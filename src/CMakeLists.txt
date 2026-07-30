@@ -16,8 +16,10 @@ target_sources(
             FILES
             rt/arch.hpp
             rt/garbage_ring.hpp
+            rt/interpolator.hpp
             rt/result.hpp
             rt/rt_scope.hpp
+            rt/sample.hpp
             rt/spsc_ring.hpp)
 
 # Every consumer must agree with rt_scope.cpp about whether the guard exists —

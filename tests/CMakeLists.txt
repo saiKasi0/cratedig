@@ -12,8 +12,10 @@ add_executable(
   unit/smoke_test.cpp
   unit/engine_render_test.cpp
   unit/garbage_ring_test.cpp
+  unit/interpolator_test.cpp
   unit/result_test.cpp
   unit/rt_scope_test.cpp
+  unit/sample_test.cpp
   unit/spsc_ring_test.cpp
   integration/rt_safety_test.cpp
   # The guard's operator new/delete replacements must be linked into the

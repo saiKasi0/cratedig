@@ -8,7 +8,9 @@
 
 #include "rt/arch.hpp"
 #include "rt/garbage_ring.hpp"
+#include "rt/interpolator.hpp"
 #include "rt/result.hpp"
+#include "rt/sample.hpp"
 #include "rt/spsc_ring.hpp"
 
 #include <cstddef>
@@ -36,6 +38,23 @@ static_assert(kErrResult.value_or(99) == 99);
 static_assert(ProbeRing::capacity() == 8);
 static_assert(ProbeGarbage::capacity() == 4);
 static_assert(rt::kCacheLine == 64);
+
+static_assert(rt::hermite4(0.0F, 1.0F, 0.0F, 0.0F, 0.0F) == 1.0F);
+static_assert(rt::linear2(0.0F, 1.0F, 0.5F) == 0.5F);
+static_assert(rt::Sample::kGuardBefore >= rt::kHermiteTapsBefore);
+static_assert(rt::Sample::kGuardAfter >= rt::kHermiteTapsAfter);
+
+// rt::Sample owns a std::vector, so this is also the check that the container
+// paths it uses compile under -fno-exceptions.
+[[maybe_unused]] void instantiate_sample_members(rt::Sample& sample) noexcept {
+  static_cast<void>(sample.sample_rate());
+  static_cast<void>(sample.num_channels());
+  static_cast<void>(sample.num_frames());
+  static_cast<void>(sample.empty());
+  static_cast<void>(sample.mutable_channel(0));
+  static_cast<void>(sample.channel(0));
+  static_cast<void>(sample.frame0(0));
+}
 
 [[maybe_unused]] void instantiate_ring_members(ProbeRing& ring, std::uint64_t& slot) noexcept {
   std::uint64_t batch[2] = {1, 2};

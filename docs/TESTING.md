@@ -64,6 +64,52 @@ the same platform. Tests enforce this in two ways:
   and are exempt from the fetch-don't-commit rule below (they are small, textual or
   short binary, and have no third-party provenance).
 
+## DSP characterisation: the interpolator SNR budget
+
+`tests/unit/interpolator_test.cpp` is the pattern every DSP unit should follow:
+measure first, then commit thresholds derived from the measurement.
+
+Method: interpolate a pure sine at a playback ratio and compare against the same
+sine evaluated analytically at the output instants;
+`SNR = 10·log10(Σ reference² / Σ error²)`. Reference and accumulators are
+`double`, so what is measured is the kernel's error rather than the rounding of
+the yardstick. No FFT is involved — which is also why PFFFT stays staged for M3.
+
+**Ratios 1.0 and 2.0 are not SNR test cases.** At an integer ratio the fraction
+is always exactly zero, so *every* kernel — Hermite, linear, nearest — returns
+input frames untouched and scores ~154 dB, the float noise floor. Asserting an
+SNR there measures nothing. The committed cases use 44100/48000, which visits
+every fractional phase and is the ratio real 44.1 kHz material actually plays at.
+Ratio 1.0 gets its own *exactness* test instead.
+
+Measured at ratio 44100/48000, 44.1 kHz, 20 000 frames (AppleClang, arm64):
+
+| Sine | Hermite | Linear | Gain | Committed threshold |
+|---|---|---|---|---|
+| 100 Hz | 146.8 dB | 94.6 dB | 52.1 dB | > 140 dB |
+| 440 Hz | 110.9 dB | 68.9 dB | 42.0 dB | > 105 dB |
+| 1 kHz | 89.4 dB | 54.7 dB | 34.8 dB | > 85 dB |
+| 4 kHz | 51.5 dB | 30.6 dB | 20.9 dB | > 48 dB |
+| 10 kHz | 24.1 dB | 15.0 dB | 9.0 dB | > 22 dB |
+
+Thresholds sit roughly 3–6 dB below measurement — enough for libm differences
+across platforms, not enough to hide a regression. **They fall steeply with
+frequency because that is what a 4-point kernel does**; a partial approaching
+Nyquist has almost no oversampling to work with. A uniform "> 90 dB everywhere"
+would be unmeetable and would end up being lowered rather than investigated.
+
+The suite asserts the **margin over linear** as well as the absolute figure. An
+absolute threshold alone is weak: a kernel that quietly degraded still clears
+140 dB at 100 Hz. The margin is what pins down that the outer two taps are being
+used. Negative-controlled by degrading `hermite4` to linear — the polynomial,
+cubic, SNR and margin tests all fail; the `t == 0` and passthrough tests
+correctly still pass, because those properties hold for linear too.
+
+The kernel reproduces polynomials of degree ≤ 2 exactly and **does not reproduce
+cubics** — there is a test asserting the inexactness, because `f(x) = x³` comes
+out exact at `t = 0.5` and a spot-check there invites someone to "strengthen"
+the test into something that fails everywhere else.
+
 ## Audio fixtures — CC0 only, fetched not committed
 
 Source audio used by decode, onset, and metering tests is **never committed as a
