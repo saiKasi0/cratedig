@@ -1,5 +1,4 @@
 #include "ingest/decoder.hpp"
-
 #include "ingest/resampler.hpp"
 
 #include <array>
@@ -25,10 +24,10 @@ namespace {
 // 8 frames, stereo, 44.1 kHz. Left channel counts up, right counts down, so a
 // channel swap or an interleaving mistake is immediately visible rather than
 // plausible.
-constexpr std::array<std::int16_t, 8> kLeft{0, 4'096, 8'192, 16'384, -4'096, -8'192, -16'384,
-                                            32'767};
-constexpr std::array<std::int16_t, 8> kRight{-32'768, -16'384, -8'192, -4'096, 4'096, 8'192,
-                                             16'384, 0};
+constexpr std::array<std::int16_t, 8> kLeft{0,      4'096,  8'192,   16'384,
+                                            -4'096, -8'192, -16'384, 32'767};
+constexpr std::array<std::int16_t, 8> kRight{-32'768, -16'384, -8'192, -4'096,
+                                             4'096,   8'192,   16'384, 0};
 constexpr std::uint32_t kWavRate = 44'100;
 
 void put_u32(std::vector<std::uint8_t>& out, std::uint32_t value) {
@@ -61,8 +60,8 @@ std::vector<std::uint8_t> build_wav() {
   put_tag(wav, "WAVE");
 
   put_tag(wav, "fmt ");
-  put_u32(wav, 16);           // PCM fmt chunk size
-  put_u16(wav, 1);            // WAVE_FORMAT_PCM
+  put_u32(wav, 16);  // PCM fmt chunk size
+  put_u16(wav, 1);   // WAVE_FORMAT_PCM
   put_u16(wav, kChannels);
   put_u32(wav, kWavRate);
   put_u32(wav, kWavRate * kChannels * (kBitsPerSample / 8U));  // byte rate
@@ -205,11 +204,11 @@ TEST_CASE("Decoder describes every error code", "[unit]") {
   // A switch that silently falls through to "unknown error" for a newly added
   // code would show up here rather than in front of a user.
   const ingest::DecodeError codes[] = {
-      ingest::DecodeError::kNone,          ingest::DecodeError::kFileNotFound,
-      ingest::DecodeError::kOpenFailed,    ingest::DecodeError::kNoAudioStream,
-      ingest::DecodeError::kNoDecoder,     ingest::DecodeError::kDecoderOpenFailed,
-      ingest::DecodeError::kDecodeFailed,  ingest::DecodeError::kResamplerFailed,
-      ingest::DecodeError::kEmptyStream,   ingest::DecodeError::kUnsupportedChannelCount,
+      ingest::DecodeError::kNone,         ingest::DecodeError::kFileNotFound,
+      ingest::DecodeError::kOpenFailed,   ingest::DecodeError::kNoAudioStream,
+      ingest::DecodeError::kNoDecoder,    ingest::DecodeError::kDecoderOpenFailed,
+      ingest::DecodeError::kDecodeFailed, ingest::DecodeError::kResamplerFailed,
+      ingest::DecodeError::kEmptyStream,  ingest::DecodeError::kUnsupportedChannelCount,
   };
   for (const ingest::DecodeError code : codes) {
     CHECK_FALSE(ingest::describe(code).empty());

@@ -34,11 +34,92 @@
 
 version = 1
 
-# No fixtures yet. CRATEDIG has no decoder until M1, and an unused fixture is
-# dead weight plus unverifiable-provenance risk (docs/TESTING.md). Entries land
-# with the milestone whose tests consume them:
-#   M1 — WAV + FLAC, one 44.1 kHz and one 48 kHz
+# Fixtures land with the milestone whose tests consume them. Still outstanding:
 #   M2 — one long-form file (> 3 min) for peak-pyramid / streaming stress
 #   M3 — percussive material + hand-labeled *.onsets.txt ground truth
 #   M5 — near-silent and clipped/loud files for metering and limiter edges
 #   M6 — remaining codecs/containers
+#
+# ---------------------------------------------------------------------------
+# EXPLICITLY REJECTED, do not add
+# ---------------------------------------------------------------------------
+# `loop_amen` and `loop_amen_full` are present in the same Sonic Pi directory as
+# everything below, and are covered by the same blanket CC0 statement. They are
+# still not admissible here: the underlying recording is the Winstons' "Amen,
+# Brother", and no downstream sample pack can place someone else's master
+# recording into the public domain. docs/TESTING.md bans Amen-break derivatives
+# "regardless of how it is labeled" precisely because the CC0 label on a
+# redistribution is the trap. The same reasoning applies to any other break in a
+# CC0-labelled pack whose origin is a commercial record.
+#
+# ---------------------------------------------------------------------------
+# Sonic Pi sample library — CC0-1.0
+# ---------------------------------------------------------------------------
+# Provenance, verifiable at the pinned revision itself:
+#   https://raw.githubusercontent.com/sonic-pi-net/sonic-pi/622864a774e7866f6c4746b9b59a41064f9bc173/etc/samples/README.md
+#   "All other samples in this directory are from http://freesound.org and have
+#    also been placed in the public domain via the Creative Commons 0 License"
+#
+# URLs are pinned to commit 622864a774e7866f6c4746b9b59a41064f9bc173 (tag
+# v4.5.1) rather than to a tag or branch name. raw.githubusercontent.com serves
+# whatever a ref currently points at, and tags can be moved; a commit SHA cannot.
+# A fixture that silently changed underneath us would change test results
+# without changing this repository.
+
+[[fixture]]
+path = "drum_heavy_kick.flac"
+role = "codec:flac"
+license = "CC0-1.0"
+source_url = "https://raw.githubusercontent.com/sonic-pi-net/sonic-pi/622864a774e7866f6c4746b9b59a41064f9bc173/etc/samples/drum_heavy_kick.flac"
+sha256 = "9c141c8de85e695baf6d490c9904b057d97c2c49fa3985f0396fea320ce35a57"
+# FLAC, 44.1 kHz, mono, 0.27 s. The "starter-pack kick" named in the M1
+# acceptance criterion, and the file the shell loads by default.
+used_by = ["tests/unit/fixture_decode_test.cpp", "M1 acceptance: cratedig plays a kick"]
+
+[[fixture]]
+path = "bd_haus.flac"
+role = "codec:flac"
+license = "CC0-1.0"
+source_url = "https://raw.githubusercontent.com/sonic-pi-net/sonic-pi/622864a774e7866f6c4746b9b59a41064f9bc173/etc/samples/bd_haus.flac"
+sha256 = "b9aa2aa81a8ccabc1a93763e689587447860497a661ed03ba3f9bd6c06e99346"
+# FLAC, 44.1 kHz, stereo, 0.22 s. Second percussive source, and the short stereo
+# case for the channel-mapping path.
+used_by = ["tests/unit/fixture_decode_test.cpp"]
+
+[[fixture]]
+path = "ambi_choir.flac"
+role = "stereo"
+license = "CC0-1.0"
+source_url = "https://raw.githubusercontent.com/sonic-pi-net/sonic-pi/622864a774e7866f6c4746b9b59a41064f9bc173/etc/samples/ambi_choir.flac"
+sha256 = "2633a5df4280fe49c58d5ced8633325d049ee03bb4b7512310cb2356d2ab1319"
+# FLAC, 44.1 kHz, stereo, 1.57 s. Sustained and tonal rather than percussive, so
+# resampler artefacts are audible in it; the drum hits are too short to show them.
+used_by = ["tests/unit/fixture_decode_test.cpp"]
+
+# ---------------------------------------------------------------------------
+# Locally transcoded — no CC0 source publishes these directly
+# ---------------------------------------------------------------------------
+# License is inherited from derived_from. Their own hash is informational:
+# ffmpeg writes an encoder tag into the WAV header and the bytes differ between
+# builds, so these are verified by decoding them back, not by hash equality.
+
+[[fixture]]
+path = "kick_44k.wav"
+role = "codec:wav"
+license = "CC0-1.0"
+derived_from = "drum_heavy_kick.flac"
+ffmpeg_args = "-c:a pcm_s16le"
+# WAV/PCM coverage at the source rate. Lossless from a lossless source, so the
+# decoded samples must match the FLAC's exactly — which is what the test asserts.
+used_by = ["tests/unit/fixture_decode_test.cpp"]
+
+[[fixture]]
+path = "kick_48k.wav"
+role = "rate:48000"
+license = "CC0-1.0"
+derived_from = "drum_heavy_kick.flac"
+ffmpeg_args = "-ar 48000 -c:a pcm_s16le"
+# The 48 kHz half of the sample-rate coverage docs/TESTING.md requires. Loading
+# this on a 48 kHz engine must take the resampler's bit-exact passthrough, while
+# the 44.1 kHz files exercise the conversion path.
+used_by = ["tests/unit/fixture_decode_test.cpp"]

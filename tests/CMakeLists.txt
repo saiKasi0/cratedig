@@ -12,6 +12,7 @@ add_executable(
   unit/smoke_test.cpp
   unit/decode_test.cpp
   unit/engine_render_test.cpp
+  unit/fixture_decode_test.cpp
   unit/garbage_ring_test.cpp
   unit/interpolator_test.cpp
   unit/result_test.cpp
@@ -28,6 +29,12 @@ add_executable(
 target_link_libraries(
   cratedig_unit_tests PRIVATE Catch2::Catch2WithMain cratedig_rt cratedig_engine cratedig_ingest
                               cratedig_warnings cratedig_sanitizer)
+
+# Fixture tests locate the starter pack from the source tree, not the working
+# directory: ctest runs tests from the build directory, and the pack deliberately
+# lives beside the sources because it is fetched once and reused by every preset.
+target_compile_definitions(
+  cratedig_unit_tests PRIVATE CRATEDIG_STARTER_PACK_DIR="${CMAKE_SOURCE_DIR}/assets/starter-pack")
 
 # Building the no-exceptions check is part of building the tests.
 add_dependencies(cratedig_unit_tests cratedig_rt_nofx_check)

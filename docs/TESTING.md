@@ -150,17 +150,57 @@ back and comparing sample data within tolerance, not by hash equality.
 Fixtures are added at the milestone whose tests need them — an unused fixture is
 dead weight and unverifiable provenance risk.
 
-| Fixture role | Requirement | Needed by |
-|---|---|---|
-| Per codec/container | One file for each format the decoder claims to support (WAV, FLAC first; MP3/AAC/OGG/OPUS/M4A later), transcoded locally where no CC0 original exists | M1 (WAV/FLAC), M6 (all codecs) |
-| Long-form | One file > 3 minutes, for buffering/streaming and peak-pyramid stress | M2 |
-| Percussive | Short percussive material **with hand-labeled onset ground truth committed as text** next to the manifest (`*.onsets.txt`, one time-in-seconds per line) | M3 |
-| Near-silent | Signal near the noise floor — metering, denormal, and auto-gain edge cases | M5 |
-| Clipped / loud | Material at or over 0 dBFS — limiter, clip indicator, and headroom paths | M5 |
-| Sample rates | At least one 44.1 kHz and one 48 kHz file so the resampler path is always exercised | M1 |
+| Fixture role | Requirement | Needed by | Status |
+|---|---|---|---|
+| Per codec/container | One file for each format the decoder claims to support (WAV, FLAC first; MP3/AAC/OGG/OPUS/M4A later), transcoded locally where no CC0 original exists | M1 (WAV/FLAC), M6 (all codecs) | **done for M1** — `drum_heavy_kick.flac`, `kick_44k.wav` |
+| Sample rates | At least one 44.1 kHz and one 48 kHz file so the resampler path is always exercised | M1 | **done** — the Sonic Pi files are 44.1 kHz, `kick_48k.wav` is derived |
+| Stereo | A file with genuinely different left and right content, so a decoder that duplicates channel 0 is caught | M1 | **done** — `ambi_choir.flac`, `bd_haus.flac` |
+| Long-form | One file > 3 minutes, for buffering/streaming and peak-pyramid stress | M2 | pending |
+| Percussive | Short percussive material **with hand-labeled onset ground truth committed as text** next to the manifest (`*.onsets.txt`, one time-in-seconds per line) | M3 | pending |
+| Near-silent | Signal near the noise floor — metering, denormal, and auto-gain edge cases | M5 | pending |
+| Clipped / loud | Material at or over 0 dBFS — limiter, clip indicator, and headroom paths | M5 | pending |
 
 Onset ground truth is hand-labeled and committed; it is a golden file and falls
 under the "never edit to make a test pass" rule above.
+
+### Source URLs are pinned to a commit, not a tag
+
+`raw.githubusercontent.com` serves whatever a ref currently points at, and tags
+can be moved. Every fixture URL therefore names a commit SHA. A fixture that
+changed underneath us would otherwise change test results without changing this
+repository — and the checksum check would report it as *our* drift.
+
+### Fixture-dependent tests skip, loudly
+
+Fixtures are fetched and never committed, so a fresh clone has none. Tests that
+need one are tagged `[fixture]` and call `SKIP()` with the command to run,
+rather than failing — and rather than passing while asserting nothing.
+
+**Decoder correctness does not depend on them.** `tests/unit/decode_test.cpp`
+assembles a 16-bit PCM WAV byte by byte in the test source and asserts every
+decoded float exactly; it needs no file, no network and no ffmpeg CLI, so it can
+never skip. The starter pack adds what cannot be built by hand — real FLAC
+frames, real stereo, a rate that is not the engine's.
+
+Run them with `ctest --preset dev -L fixture` after `scripts/fetch_starter_pack.sh`.
+
+### What is verified, and how it was checked
+
+`scripts/verify_fixtures.py` runs inside `scripts/ci.sh`. All three of its gates
+are negative-controlled rather than assumed:
+
+| Gate | Control | Result |
+|---|---|---|
+| Checksum drift | flip one byte of a fetched fixture | fails, printing manifest vs on-disk hash |
+| License policy | change a manifest row to `CC-BY-4.0` | fails, naming the allowed set |
+| Skip-when-absent | move the fetched files away | 5 tests skip with a reason; none fail, none pass |
+
+Derived (transcoded) fixtures are **not** hash-enforced — ffmpeg writes an
+encoder tag into the WAV header and the bytes differ between builds. They are
+validated by decoding instead: `kick_44k.wav` is a lossless transcode of
+`drum_heavy_kick.flac`, so the two must decode to identical samples through two
+different containers and two different decoders. That is a stronger check than a
+hash, because it would also catch a transcode that silently resampled.
 
 ## RT-safety testing
 

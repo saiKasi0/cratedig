@@ -32,15 +32,19 @@ constexpr int kMaxChannels = 32;
 struct FormatContextDeleter {
   void operator()(AVFormatContext* context) const noexcept { avformat_close_input(&context); }
 };
+
 struct CodecContextDeleter {
   void operator()(AVCodecContext* context) const noexcept { avcodec_free_context(&context); }
 };
+
 struct PacketDeleter {
   void operator()(AVPacket* packet) const noexcept { av_packet_free(&packet); }
 };
+
 struct FrameDeleter {
   void operator()(AVFrame* frame) const noexcept { av_frame_free(&frame); }
 };
+
 struct SwrDeleter {
   void operator()(SwrContext* context) const noexcept { swr_free(&context); }
 };
@@ -80,9 +84,9 @@ bool append_frame(SwrContext* swr, const AVFrame& frame, PlanarAudio& channels) 
     planes[channel] = reinterpret_cast<std::uint8_t*>(channels[channel].data() + offset);
   }
 
-  const int written = swr_convert(swr, planes.data(), frame.nb_samples,
-                                  const_cast<const std::uint8_t**>(frame.extended_data),
-                                  frame.nb_samples);
+  const int written =
+      swr_convert(swr, planes.data(), frame.nb_samples,
+                  const_cast<const std::uint8_t**>(frame.extended_data), frame.nb_samples);
   if (written < 0) {
     return false;
   }
@@ -148,8 +152,7 @@ SampleLoad load_sample(const std::filesystem::path& path, std::uint32_t target_s
   }
 
   const AVCodec* codec = nullptr;
-  const int stream_index =
-      av_find_best_stream(format.get(), AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
+  const int stream_index = av_find_best_stream(format.get(), AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
   if (stream_index < 0) {
     return failure(DecodeError::kNoAudioStream, av_error_string(stream_index));
   }
@@ -258,8 +261,8 @@ SampleLoad load_sample(const std::filesystem::path& path, std::uint32_t target_s
   }
 
   const std::size_t frames = resampled.channels.front().size();
-  auto sample = std::make_shared<rt::Sample>(
-      output_rate, static_cast<std::uint16_t>(channel_count), frames);
+  auto sample =
+      std::make_shared<rt::Sample>(output_rate, static_cast<std::uint16_t>(channel_count), frames);
   for (std::size_t channel = 0; channel < resampled.channels.size(); ++channel) {
     const std::vector<float>& source = resampled.channels[channel];
     std::span<float> destination = sample->mutable_channel(static_cast<std::uint16_t>(channel));
@@ -269,9 +272,13 @@ SampleLoad load_sample(const std::filesystem::path& path, std::uint32_t target_s
   return SampleLoad{.sample = std::move(sample), .error = DecodeError::kNone, .detail = {}};
 }
 
-std::string_view ffmpeg_license() noexcept { return avutil_license(); }
+std::string_view ffmpeg_license() noexcept {
+  return avutil_license();
+}
 
-std::string_view ffmpeg_configuration() noexcept { return avutil_configuration(); }
+std::string_view ffmpeg_configuration() noexcept {
+  return avutil_configuration();
+}
 
 std::string ffmpeg_versions() {
   const auto format = [](unsigned int version) {
