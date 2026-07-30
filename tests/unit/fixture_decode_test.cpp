@@ -149,8 +149,7 @@ TEST_CASE("Starter pack: 44.1 kHz material converts to the engine rate", "[fixtu
   CHECK(converted.sample->sample_rate() == 48'000);
 
   // 48000/44100 longer, within the converter's transient.
-  const auto expected =
-      static_cast<double>(native.sample->num_frames()) * 48'000.0 / 44'100.0;
+  const auto expected = static_cast<double>(native.sample->num_frames()) * 48'000.0 / 44'100.0;
   const auto actual = static_cast<double>(converted.sample->num_frames());
   CHECK(actual > expected - 32.0);
   CHECK(actual < expected + 32.0);

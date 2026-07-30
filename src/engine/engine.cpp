@@ -64,7 +64,7 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
     // lock-free, so it is legal here. The voice releases it through the garbage
     // ring, never by dropping it on this thread.
     if (!m_voices.trigger(sample, event.velocity, m_config.sample_rate, m_garbage)) {
-      ++m_dropped_triggers;
+      m_dropped_triggers.fetch_add(1, std::memory_order_relaxed);
     }
   }
 
@@ -75,7 +75,10 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
   // its reference and we retry next block (see VoicePool::reclaim).
   static_cast<void>(m_voices.reclaim(m_garbage));
 
-  m_frames_rendered += num_frames;
+  // relaxed: publishes progress to the UI's poll loop; nothing else is ordered
+  // by it, and the audio thread is the only writer.
+  m_frames_rendered.store(m_frames_rendered.load(std::memory_order_relaxed) + num_frames,
+                          std::memory_order_relaxed);
 }
 
 std::size_t Engine::collect_garbage() noexcept {

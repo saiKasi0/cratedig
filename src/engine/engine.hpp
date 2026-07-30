@@ -8,6 +8,7 @@
 #include "rt/voice_pool.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -90,7 +91,14 @@ class Engine {
   // returns how many references were released.
   std::size_t collect_garbage() noexcept;
 
-  [[nodiscard]] std::uint64_t frames_rendered() const noexcept { return m_frames_rendered; }
+  // Atomic because the audio thread writes it and the UI reads it live. Relaxed
+  // on both sides: it orders nothing, it is a progress counter. Making it a
+  // plain uint64_t was a real data race, and it did not present as a torn value
+  // -- the compiler simply hoisted the load out of a poll loop, so a caller
+  // watching for progress saw zero forever while the callback ran normally.
+  [[nodiscard]] std::uint64_t frames_rendered() const noexcept {
+    return m_frames_rendered.load(std::memory_order_relaxed);
+  }
 
   [[nodiscard]] const Config& config() const noexcept { return m_config; }
 
@@ -100,7 +108,10 @@ class Engine {
   // somewhere, so they are exposed rather than merely counted.
   [[nodiscard]] std::uint64_t dropped_events() const noexcept { return m_dropped_events; }
 
-  [[nodiscard]] std::uint64_t dropped_triggers() const noexcept { return m_dropped_triggers; }
+  // Also audio-thread-written and UI-read; same reasoning as frames_rendered().
+  [[nodiscard]] std::uint64_t dropped_triggers() const noexcept {
+    return m_dropped_triggers.load(std::memory_order_relaxed);
+  }
 
   [[nodiscard]] std::uint64_t garbage_overflows() const noexcept {
     return m_garbage.overflow_count();
@@ -108,7 +119,7 @@ class Engine {
 
  private:
   Config m_config;
-  std::uint64_t m_frames_rendered = 0;
+  std::atomic<std::uint64_t> m_frames_rendered{0};
 
   std::array<std::shared_ptr<const rt::Sample>, rt::kNumPads> m_pads{};
 
@@ -116,10 +127,12 @@ class Engine {
   rt::VoicePool<kMaxVoices> m_voices;
   rt::GarbageRing<kGarbageRingCapacity> m_garbage;
 
-  // Written by the control thread only.
+  // Written by the control thread only, and read by it -- no cross-thread access,
+  // so no atomic.
   std::uint64_t m_dropped_events = 0;
-  // Written by the audio thread only.
-  std::uint64_t m_dropped_triggers = 0;
+
+  // Written by the audio thread, read by the UI while it runs.
+  std::atomic<std::uint64_t> m_dropped_triggers{0};
 };
 
 }  // namespace engine

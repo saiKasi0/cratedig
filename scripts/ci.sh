@@ -14,6 +14,9 @@ fi
 # assets/starter-pack/MANIFEST.toml so checksum drift fails the build. No network
 # needed: fixtures that were never fetched are reported, not fatal (e2e jobs run
 # scripts/fetch_starter_pack.sh first, which enforces presence).
+echo "==> checking module boundaries"
+scripts/check_layering.sh
+
 echo "==> verifying audio fixtures"
 python3 scripts/verify_fixtures.py
 

@@ -10,6 +10,7 @@ target_compile_options(cratedig_rt_nofx_check PRIVATE -fno-exceptions -fno-rtti)
 add_executable(
   cratedig_unit_tests
   unit/smoke_test.cpp
+  unit/audio_device_test.cpp
   unit/decode_test.cpp
   unit/engine_render_test.cpp
   unit/fixture_decode_test.cpp
@@ -28,7 +29,7 @@ add_executable(
 
 target_link_libraries(
   cratedig_unit_tests PRIVATE Catch2::Catch2WithMain cratedig_rt cratedig_engine cratedig_ingest
-                              cratedig_warnings cratedig_sanitizer)
+                              cratedig_io cratedig_warnings cratedig_sanitizer)
 
 # Fixture tests locate the starter pack from the source tree, not the working
 # directory: ctest runs tests from the build directory, and the pack deliberately

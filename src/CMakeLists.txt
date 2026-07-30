@@ -60,3 +60,12 @@ add_library(cratedig_ingest STATIC ingest/decoder.cpp ingest/resampler.cpp)
 target_link_libraries(cratedig_ingest PUBLIC cratedig_rt)
 target_link_libraries(cratedig_ingest PRIVATE cratedig_ffmpeg SampleRate::samplerate
                                               cratedig_warnings cratedig_sanitizer)
+
+# The device layer. rtaudio is linked PRIVATE and RtAudio.h appears in exactly
+# one file, io/audio_device.cpp — src/io/ is the only module permitted to see it
+# at all (CLAUDE.md). scripts/check_layering.sh enforces that mechanically,
+# because it is the kind of rule that decays the first time someone needs a
+# device enum "just here".
+add_library(cratedig_io STATIC io/audio_device.cpp)
+target_link_libraries(cratedig_io PUBLIC cratedig_engine)
+target_link_libraries(cratedig_io PRIVATE rtaudio cratedig_warnings cratedig_sanitizer)
