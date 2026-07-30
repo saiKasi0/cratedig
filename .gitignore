@@ -1,0 +1,7 @@
+*.md
+docs/design/*
+!docs/ARCHITECTURE.md
+!docs/LUA_API.md
+!docs/MIXER.md
+!docs/TESTING.md
+!docs/LICENSING.md
