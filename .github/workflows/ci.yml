@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  format-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Enabled once .pre-commit-config.yaml lands (M0 Task 4).
+      - name: pre-commit
+        run: |
+          if [ -f .pre-commit-config.yaml ]; then
+            pipx run pre-commit run --all-files
+          else
+            echo "no pre-commit config yet — skipping"
+          fi
+
+  macos:
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [dev, asan, tsan, ubsan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ninja
+        run: brew install ninja
+      - name: Cache FetchContent
+        uses: actions/cache@v4
+        with:
+          path: build/${{ matrix.preset }}/_deps
+          key: deps-${{ runner.os }}-${{ matrix.preset }}-${{ hashFiles('cmake/deps.cmake') }}
+      - name: Build and test
+        run: scripts/ci.sh ${{ matrix.preset }}
+
+  linux-docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: CI in container (acceptance path)
+        run: docker compose -f docker/compose.yml run --rm ci

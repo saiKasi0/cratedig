@@ -1,0 +1,44 @@
+# Provenance and integrity manifest for every audio fixture CRATEDIG fetches.
+#
+# Audio binaries are NEVER committed to this repo. `scripts/fetch_starter_pack.sh`
+# downloads them; `scripts/verify_fixtures.py` recomputes hashes and fails on drift.
+# Rules that govern what may appear here are in docs/TESTING.md and docs/LICENSING.md.
+#
+# Hard rule: CC0-1.0 or public domain ONLY, verifiable at source_url itself.
+# Rejected: "free for personal use", CC-BY, royalty-free-with-terms, unclear
+# provenance, and any Amen-break derivative however it is labeled.
+#
+# Schema
+# ------
+# Fetched file:
+#   [[fixture]]
+#   path        = "loop_industrial.flac"   # relative to assets/starter-pack/
+#   role        = "codec:flac"             # see the coverage table in docs/TESTING.md
+#   license     = "CC0-1.0"
+#   source_url  = "https://…"              # license must be verifiable HERE
+#   sha256      = "…"                      # enforced; drift fails the build
+#   used_by     = ["tests/unit/decode_flac_test.cpp"]
+#
+# Locally transcoded file (a codec no CC0 source publishes directly):
+#   [[fixture]]
+#   path           = "loop_industrial.mp3"
+#   role           = "codec:mp3"
+#   license        = "CC0-1.0"             # inherited from derived_from
+#   derived_from   = "loop_industrial.flac"
+#   ffmpeg_args    = "-c:a libmp3lame -b:a 192k"
+#   derived_sha256 = "…"                   # INFORMATIONAL — encoder output varies
+#                                          # by ffmpeg build, so derived files are
+#                                          # verified by decoding back and comparing
+#                                          # samples within tolerance, not by hash.
+#   used_by        = ["tests/unit/decode_mp3_test.cpp"]
+
+version = 1
+
+# No fixtures yet. CRATEDIG has no decoder until M1, and an unused fixture is
+# dead weight plus unverifiable-provenance risk (docs/TESTING.md). Entries land
+# with the milestone whose tests consume them:
+#   M1 — WAV + FLAC, one 44.1 kHz and one 48 kHz
+#   M2 — one long-form file (> 3 min) for peak-pyramid / streaming stress
+#   M3 — percussive material + hand-labeled *.onsets.txt ground truth
+#   M5 — near-silent and clipped/loud files for metering and limiter edges
+#   M6 — remaining codecs/containers

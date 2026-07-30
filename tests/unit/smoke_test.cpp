@@ -1,7 +1,7 @@
-#include <catch2/catch_test_macros.hpp>
-
 #include <bit>
 #include <cstdint>
+
+#include <catch2/catch_test_macros.hpp>
 
 TEST_CASE("toolchain sanity", "[unit]") {
   STATIC_CHECK(__cplusplus >= 202002L);

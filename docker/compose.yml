@@ -1,0 +1,19 @@
+services:
+  ci:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ..:/work
+    working_dir: /work
+    # Sanitizers need ptrace (LeakSanitizer) and trip over the default seccomp
+    # profile's ASLR interactions on newer kernels.
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      # The repo is bind-mounted; suffix the preset binaryDirs so Linux builds
+      # never collide with the host's macOS CMake caches under build/.
+      - CRATEDIG_BUILD_SUFFIX=-linux
+    command: scripts/ci.sh dev asan tsan ubsan

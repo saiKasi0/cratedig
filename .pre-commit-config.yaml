@@ -1,0 +1,35 @@
+# pre-commit run -a  runs everything below.
+# clang-tidy is NOT here by default — it needs compile_commands.json and is too
+# slow for every commit. Run it via `scripts/tidy.sh` (CI runs it too).
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        # Audio fixtures are fetched, never committed (docs/TESTING.md).
+        args: [--maxkb=256]
+      - id: check-executables-have-shebangs
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  # Pinned to 18.x to match clang-format-18 in docker/Dockerfile — a version
+  # mismatch here means CI and local disagree about formatting.
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v18.1.8
+    hooks:
+      - id: clang-format
+        types_or: [c++, c]
+
+  - repo: local
+    hooks:
+      - id: clang-tidy
+        name: clang-tidy (manual — needs a configured build dir)
+        entry: scripts/tidy.sh
+        language: script
+        pass_filenames: false
+        stages: [manual]
