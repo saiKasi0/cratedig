@@ -56,7 +56,8 @@ target_compile_options(cratedig_engine PRIVATE -fno-exceptions -fno-rtti)
 # Exceptions are NOT disabled here: -fno-exceptions applies to src/rt/ and
 # src/engine/ (CLAUDE.md), and this module uses std::string and std::filesystem
 # freely. It depends on rt:: types only, never on the engine.
-add_library(cratedig_ingest STATIC ingest/decoder.cpp ingest/resampler.cpp)
+add_library(cratedig_ingest STATIC ingest/decoder.cpp ingest/peak_pyramid.cpp
+                                   ingest/resampler.cpp)
 target_link_libraries(cratedig_ingest PUBLIC cratedig_rt)
 target_link_libraries(cratedig_ingest PRIVATE cratedig_ffmpeg SampleRate::samplerate
                                               cratedig_warnings cratedig_sanitizer)

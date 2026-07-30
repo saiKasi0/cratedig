@@ -10,7 +10,6 @@
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
-
 #include <unistd.h>
 
 #include <atomic>
@@ -78,8 +77,8 @@ int run_app(const AppOptions& options) {
     sample = load.sample;
     sample_name = options.sample_path.filename().string();
 
-    const double seconds = static_cast<double>(sample->num_frames()) /
-                           static_cast<double>(sample->sample_rate());
+    const double seconds =
+        static_cast<double>(sample->num_frames()) / static_cast<double>(sample->sample_rate());
     sample_summary = sample_name + " · " + std::to_string(sample->sample_rate()) + " Hz · " +
                      (sample->num_channels() == 1 ? "mono" : "stereo") + " · " +
                      format_seconds(seconds);
@@ -151,8 +150,8 @@ int run_app(const AppOptions& options) {
   auto frame = ftxui::Renderer([&] {
     std::ostringstream counters;
     counters << "voices " << engine.active_voices() << '/' << engine::Engine::kMaxVoices
-             << "   xruns " << device.xrun_count() << "   dropped " << engine.dropped_events() << '/'
-             << engine.dropped_triggers() << "   frames " << engine.frames_rendered();
+             << "   xruns " << device.xrun_count() << "   dropped " << engine.dropped_events()
+             << '/' << engine.dropped_triggers() << "   frames " << engine.frames_rendered();
 
     return ftxui::vbox({
                ftxui::hbox({

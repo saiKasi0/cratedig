@@ -16,6 +16,7 @@ add_executable(
   unit/fixture_decode_test.cpp
   unit/garbage_ring_test.cpp
   unit/interpolator_test.cpp
+  unit/peak_pyramid_test.cpp
   unit/result_test.cpp
   unit/rt_scope_test.cpp
   unit/sample_test.cpp
