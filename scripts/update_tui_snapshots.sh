@@ -28,8 +28,12 @@ if [ ! -x "${binary}" ]; then
   cmake --build --preset "${preset}" -j
 fi
 
-echo "==> regenerating tests/tui/snapshots/"
+echo "==> regenerating the offscreen layout snapshots"
 CRATEDIG_UPDATE_SNAPSHOTS=1 "${binary}" "[tui]"
+
+echo "==> regenerating the PTY session snapshot"
+CRATEDIG_UPDATE_SNAPSHOTS=1 python3 tests/tui/pty_session.py \
+  "${build_dir}/src/cratedig" tests/tui/snapshots
 
 echo
 echo "==> what changed"

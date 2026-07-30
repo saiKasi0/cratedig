@@ -31,7 +31,15 @@ constexpr RtAudioStreamFlags kStreamFlags = RTAUDIO_NONINTERLEAVED;
 }  // namespace
 
 struct AudioDevice::Impl {
-  RtAudio audio;
+  // Constructed on first use, not on construction of AudioDevice.
+  //
+  // Instantiating RtAudio initialises a backend, and on a Linux box with no
+  // sound card libasound writes several lines of complaint straight to stderr.
+  // With `cratedig --no-audio` that lands on top of the interface, because the
+  // TUI and libasound share a terminal -- which is how this was found, as ALSA
+  // warnings in a PTY snapshot. Nothing that never opens a device should pay
+  // for a backend it is not going to use.
+  std::unique_ptr<RtAudio> audio;
   engine::Engine* engine = nullptr;
   std::uint32_t channels = 0;
   std::uint32_t block_frames = 0;
@@ -42,12 +50,17 @@ struct AudioDevice::Impl {
 
   std::string last_error;
 
-  Impl()
-      : audio(RtAudio::UNSPECIFIED,
-              // RtAudio 6 reports through this instead of throwing. Capturing
-              // the text means a failure can say "Device unavailable" rather
-              // than only "kOpenFailed".
-              [this](RtAudioErrorType /*type*/, const std::string& text) { last_error = text; }) {}
+  RtAudio& backend() {
+    if (audio == nullptr) {
+      audio = std::make_unique<RtAudio>(
+          RtAudio::UNSPECIFIED,
+          // RtAudio 6 reports through this instead of throwing. Capturing the
+          // text means a failure can say "Device unavailable" rather than only
+          // "kOpenFailed".
+          [this](RtAudioErrorType /*type*/, const std::string& text) { last_error = text; });
+    }
+    return *audio;
+  }
 
   // AUDIO THREAD. Everything here is stack-only by construction.
   //
@@ -114,8 +127,8 @@ std::vector<DeviceInfo> AudioDevice::output_devices() const {
   // Zero devices is normal, not an error: a container has no /dev/snd, and the
   // Linux CI run is the ROADMAP acceptance path. Anything here that treated an
   // empty list as a failure would make the whole suite unrunnable in Docker.
-  for (const unsigned int id : m_impl->audio.getDeviceIds()) {
-    const RtAudio::DeviceInfo info = m_impl->audio.getDeviceInfo(id);
+  for (const unsigned int id : m_impl->backend().getDeviceIds()) {
+    const RtAudio::DeviceInfo info = m_impl->backend().getDeviceInfo(id);
     if (info.outputChannels == 0) {
       continue;  // input-only device
     }
@@ -133,7 +146,7 @@ bool AudioDevice::has_output_device() const {
 }
 
 std::string AudioDevice::api_name() const {
-  return RtAudio::getApiDisplayName(m_impl->audio.getCurrentApi());
+  return RtAudio::getApiDisplayName(m_impl->backend().getCurrentApi());
 }
 
 DeviceError AudioDevice::open(engine::Engine& engine, const Config& config) {
@@ -146,7 +159,7 @@ DeviceError AudioDevice::open(engine::Engine& engine, const Config& config) {
 
   unsigned int device_id = config.device_id;
   if (device_id == 0) {
-    device_id = m_impl->audio.getDefaultOutputDevice();
+    device_id = m_impl->backend().getDefaultOutputDevice();
   }
   if (device_id == 0) {
     return DeviceError::kNoDeviceAvailable;
@@ -171,8 +184,8 @@ DeviceError AudioDevice::open(engine::Engine& engine, const Config& config) {
 
   m_impl->last_error.clear();
   const RtAudioErrorType status =
-      m_impl->audio.openStream(&parameters, nullptr, RTAUDIO_FLOAT32, config.sample_rate, &frames,
-                               &Impl::render, m_impl.get(), &options);
+      m_impl->backend().openStream(&parameters, nullptr, RTAUDIO_FLOAT32, config.sample_rate,
+                                   &frames, &Impl::render, m_impl.get(), &options);
   if (status != RTAUDIO_NO_ERROR) {
     m_impl->engine = nullptr;
     return DeviceError::kOpenFailed;
@@ -187,33 +200,33 @@ DeviceError AudioDevice::start() {
     return DeviceError::kNotOpen;
   }
   m_impl->last_error.clear();
-  if (m_impl->audio.startStream() != RTAUDIO_NO_ERROR) {
+  if (m_impl->backend().startStream() != RTAUDIO_NO_ERROR) {
     return DeviceError::kStartFailed;
   }
   return DeviceError::kNone;
 }
 
 void AudioDevice::stop() noexcept {
-  if (m_impl->audio.isStreamRunning()) {
+  if (m_impl->audio != nullptr && m_impl->audio->isStreamRunning()) {
     // stopStream drains; abortStream would cut the tail off mid-block. The
     // difference is audible on the last note.
-    static_cast<void>(m_impl->audio.stopStream());
+    static_cast<void>(m_impl->backend().stopStream());
   }
 }
 
 void AudioDevice::close() noexcept {
-  if (m_impl->audio.isStreamOpen()) {
-    m_impl->audio.closeStream();
+  if (m_impl->audio != nullptr && m_impl->audio->isStreamOpen()) {
+    m_impl->backend().closeStream();
   }
   m_impl->engine = nullptr;
 }
 
 bool AudioDevice::is_open() const noexcept {
-  return m_impl->audio.isStreamOpen();
+  return m_impl->audio != nullptr && m_impl->audio->isStreamOpen();
 }
 
 bool AudioDevice::is_running() const noexcept {
-  return m_impl->audio.isStreamRunning();
+  return m_impl->audio != nullptr && m_impl->audio->isStreamRunning();
 }
 
 std::uint32_t AudioDevice::actual_block_frames() const noexcept {

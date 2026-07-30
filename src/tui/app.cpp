@@ -252,10 +252,19 @@ int run_app(const AppOptions& options) {
   // The refresh thread exists because Loop() is blocking and the counters change
   // without any key being pressed. Declared after `screen` so it is joined
   // before `screen` is destroyed.
+  //
+  // Post(), NOT PostEvent(). FTXUI's own documentation recommends
+  // PostEvent(Event::Custom) from exactly this kind of thread, and in 7.0.1
+  // that is a data race: PostEvent goes to MultiReceiverBuffer::Push, which
+  // does an unsynchronised values_.push_back() and next_index_++ on a
+  // std::deque shared with the main loop. Post() takes the same Event through
+  // TaskRunner::PostTask, whose queue is mutex-guarded. TSan found this on the
+  // Linux run of the PTY session test; it is a real race, not an artifact of
+  // FTXUI being built without instrumentation.
   std::atomic<bool> ticking{true};
   std::thread refresh{[&] {
     while (ticking.load(std::memory_order_relaxed)) {
-      screen.PostEvent(ftxui::Event::Custom);
+      screen.Post(ftxui::Event::Custom);
       std::this_thread::sleep_for(kFrameInterval);
     }
   }};

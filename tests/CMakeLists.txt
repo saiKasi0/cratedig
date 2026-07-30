@@ -82,3 +82,17 @@ if(CRATEDIG_RT_GUARD AND NOT CRATEDIG_SANITIZER STREQUAL "thread")
 else()
   message(STATUS "cratedig: RT_SCOPE abort test disabled (guard off or TSan build)")
 endif()
+
+# --- the PTY session --------------------------------------------------------
+# Python rather than C++: a forkpty harness plus the terminal replay it needs
+# would be several times the code for the same assertion, and python3 is already
+# a build dependency via scripts/verify_fixtures.py.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+  add_test(NAME tui_pty_session
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tui/pty_session.py
+                   $<TARGET_FILE:cratedig> ${CMAKE_CURRENT_SOURCE_DIR}/tui/snapshots)
+  set_tests_properties(tui_pty_session PROPERTIES LABELS tui)
+else()
+  message(STATUS "cratedig: PTY session test disabled (no python3 interpreter)")
+endif()
