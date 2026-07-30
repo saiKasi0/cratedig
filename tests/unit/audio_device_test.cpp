@@ -106,9 +106,12 @@ TEST_CASE("AudioDevice starts with a clean xrun count", "[unit]") {
 
 TEST_CASE("AudioDevice describes every error code", "[unit]") {
   const io::DeviceError codes[] = {
-      io::DeviceError::kNone,        io::DeviceError::kNoDeviceAvailable,
-      io::DeviceError::kUnsupportedChannelCount, io::DeviceError::kOpenFailed,
-      io::DeviceError::kStartFailed, io::DeviceError::kAlreadyOpen,
+      io::DeviceError::kNone,
+      io::DeviceError::kNoDeviceAvailable,
+      io::DeviceError::kUnsupportedChannelCount,
+      io::DeviceError::kOpenFailed,
+      io::DeviceError::kStartFailed,
+      io::DeviceError::kAlreadyOpen,
       io::DeviceError::kNotOpen,
   };
   for (const io::DeviceError code : codes) {

@@ -19,7 +19,14 @@ namespace {
 // callback needs no interleave pass and no scratch buffer -- which is the
 // difference between a real-time-safe callback and one that wants a heap
 // allocation on the first block.
-constexpr RtAudioStreamFlags kStreamFlags = RTAUDIO_NONINTERLEAVED | RTAUDIO_MINIMIZE_LATENCY;
+//
+// RTAUDIO_MINIMIZE_LATENCY is deliberately NOT set. It does not nudge the buffer
+// size toward the request, it overrides it: asking for 256 frames on CoreAudio
+// produced a 15-frame callback, ~0.3 ms, and an xrun on startup. Block size is a
+// latency-versus-safety decision the caller is making on purpose, and a device
+// layer that silently substitutes its own answer takes that decision away. The
+// negotiated value is reported through actual_block_frames() either way.
+constexpr RtAudioStreamFlags kStreamFlags = RTAUDIO_NONINTERLEAVED;
 
 }  // namespace
 
@@ -51,9 +58,8 @@ struct AudioDevice::Impl {
                     double stream_time, RtAudioStreamStatus status, void* user_data);
 };
 
-int AudioDevice::Impl::render(void* output_buffer, void* /*input_buffer*/,
-                              unsigned int frame_count, double /*stream_time*/,
-                              RtAudioStreamStatus status, void* user_data) {
+int AudioDevice::Impl::render(void* output_buffer, void* /*input_buffer*/, unsigned int frame_count,
+                              double /*stream_time*/, RtAudioStreamStatus status, void* user_data) {
   auto* impl = static_cast<AudioDevice::Impl*>(user_data);
 
   if ((status & RTAUDIO_OUTPUT_UNDERFLOW) != 0) {
@@ -122,7 +128,9 @@ std::vector<DeviceInfo> AudioDevice::output_devices() const {
   return devices;
 }
 
-bool AudioDevice::has_output_device() const { return !output_devices().empty(); }
+bool AudioDevice::has_output_device() const {
+  return !output_devices().empty();
+}
 
 std::string AudioDevice::api_name() const {
   return RtAudio::getApiDisplayName(m_impl->audio.getCurrentApi());
@@ -200,16 +208,24 @@ void AudioDevice::close() noexcept {
   m_impl->engine = nullptr;
 }
 
-bool AudioDevice::is_open() const noexcept { return m_impl->audio.isStreamOpen(); }
+bool AudioDevice::is_open() const noexcept {
+  return m_impl->audio.isStreamOpen();
+}
 
-bool AudioDevice::is_running() const noexcept { return m_impl->audio.isStreamRunning(); }
+bool AudioDevice::is_running() const noexcept {
+  return m_impl->audio.isStreamRunning();
+}
 
-std::uint32_t AudioDevice::actual_block_frames() const noexcept { return m_impl->block_frames; }
+std::uint32_t AudioDevice::actual_block_frames() const noexcept {
+  return m_impl->block_frames;
+}
 
 std::uint64_t AudioDevice::xrun_count() const noexcept {
   return m_impl->xruns.load(std::memory_order_relaxed);
 }
 
-const std::string& AudioDevice::last_error() const noexcept { return m_impl->last_error; }
+const std::string& AudioDevice::last_error() const noexcept {
+  return m_impl->last_error;
+}
 
 }  // namespace io

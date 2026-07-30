@@ -69,3 +69,21 @@ target_link_libraries(cratedig_ingest PRIVATE cratedig_ffmpeg SampleRate::sample
 add_library(cratedig_io STATIC io/audio_device.cpp)
 target_link_libraries(cratedig_io PUBLIC cratedig_engine)
 target_link_libraries(cratedig_io PRIVATE rtaudio cratedig_warnings cratedig_sanitizer)
+
+# TEMPORARY, M1 ONLY. This is a termios shell, not a TUI — M2 replaces the whole
+# contents of src/tui/ with FTXUI components built from docs/design/*.html, plus
+# the PTY snapshot tests that become the ground truth for the interface. It lives
+# here rather than in a new src/app/ because src/tui/ is already the TUI lane in
+# the CLAUDE.md module map, and inventing a module to hold throwaway code would
+# mean changing that map twice.
+add_library(cratedig_tui STATIC tui/raw_terminal.cpp tui/shell.cpp)
+target_link_libraries(cratedig_tui PUBLIC cratedig_engine cratedig_ingest cratedig_io)
+target_link_libraries(cratedig_tui PRIVATE cratedig_warnings cratedig_sanitizer)
+
+add_executable(cratedig tui/main.cpp)
+target_link_libraries(cratedig PRIVATE cratedig_tui CLI11::CLI11 cratedig_warnings
+                                       cratedig_sanitizer)
+# The RT guard replaces global operator new/delete, so its objects must be linked
+# into the executable directly — from a static library the linker would drop them
+# and the guard would silently enforce nothing (see the OBJECT library note above).
+target_sources(cratedig PRIVATE $<TARGET_OBJECTS:cratedig_rt_guard>)
