@@ -48,3 +48,15 @@ add_library(cratedig_engine STATIC engine/engine.cpp)
 target_link_libraries(cratedig_engine PUBLIC cratedig_rt)
 target_link_libraries(cratedig_engine PRIVATE cratedig_warnings cratedig_sanitizer)
 target_compile_options(cratedig_engine PRIVATE -fno-exceptions -fno-rtti)
+
+# Ingest: decoding, resampling, and later analysis and yt-dlp. Everything here
+# runs on worker threads, so it is allowed to allocate, block, and fail — the
+# only thing that reaches the audio lane is a finished rt::Sample.
+#
+# Exceptions are NOT disabled here: -fno-exceptions applies to src/rt/ and
+# src/engine/ (CLAUDE.md), and this module uses std::string and std::filesystem
+# freely. It depends on rt:: types only, never on the engine.
+add_library(cratedig_ingest STATIC ingest/decoder.cpp ingest/resampler.cpp)
+target_link_libraries(cratedig_ingest PUBLIC cratedig_rt)
+target_link_libraries(cratedig_ingest PRIVATE cratedig_ffmpeg SampleRate::samplerate
+                                              cratedig_warnings cratedig_sanitizer)

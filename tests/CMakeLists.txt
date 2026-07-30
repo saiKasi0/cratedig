@@ -10,6 +10,7 @@ target_compile_options(cratedig_rt_nofx_check PRIVATE -fno-exceptions -fno-rtti)
 add_executable(
   cratedig_unit_tests
   unit/smoke_test.cpp
+  unit/decode_test.cpp
   unit/engine_render_test.cpp
   unit/garbage_ring_test.cpp
   unit/interpolator_test.cpp
@@ -25,8 +26,8 @@ add_executable(
   $<TARGET_OBJECTS:cratedig_rt_guard>)
 
 target_link_libraries(
-  cratedig_unit_tests PRIVATE Catch2::Catch2WithMain cratedig_rt cratedig_engine cratedig_warnings
-                              cratedig_sanitizer)
+  cratedig_unit_tests PRIVATE Catch2::Catch2WithMain cratedig_rt cratedig_engine cratedig_ingest
+                              cratedig_warnings cratedig_sanitizer)
 
 # Building the no-exceptions check is part of building the tests.
 add_dependencies(cratedig_unit_tests cratedig_rt_nofx_check)

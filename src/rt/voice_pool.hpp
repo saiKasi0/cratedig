@@ -252,8 +252,7 @@ class VoicePool {
         return;
       }
 
-      const auto fraction =
-          static_cast<float>(voice.phase & kPhaseFractionMask) * kPhaseToFloat;
+      const auto fraction = static_cast<float>(voice.phase & kPhaseFractionMask) * kPhaseToFloat;
       const auto offset = static_cast<std::ptrdiff_t>(index);
 
       for (std::size_t channel = 0; channel < out_channels; ++channel) {

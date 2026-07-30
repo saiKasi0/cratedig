@@ -17,7 +17,8 @@ namespace {
 constexpr std::uint32_t kEngineRate = 48'000;
 
 std::shared_ptr<const rt::Sample> make_sample(std::size_t frames, std::uint16_t channels = 1,
-                                              std::uint32_t rate = kEngineRate, float value = 1.0F) {
+                                              std::uint32_t rate = kEngineRate,
+                                              float value = 1.0F) {
   auto sample = std::make_shared<rt::Sample>(rate, channels, frames);
   for (std::uint16_t channel = 0; channel < channels; ++channel) {
     std::span<float> data = sample->mutable_channel(channel);
@@ -39,7 +40,10 @@ class Buffers {
   }
 
   [[nodiscard]] std::span<float* const> channels() noexcept { return m_pointers; }
-  [[nodiscard]] const std::vector<float>& channel(std::size_t index) const { return m_storage[index]; }
+
+  [[nodiscard]] const std::vector<float>& channel(std::size_t index) const {
+    return m_storage[index];
+  }
 
   void clear() {
     for (std::vector<float>& channel : m_storage) {
