@@ -45,6 +45,22 @@ endif()
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
+# Every FetchContent dependency is linked statically. docs/LICENSING.md's table
+# assumes it, and a binary that needs a .dylib out of build/_deps/ is not a
+# binary anyone can run.
+#
+# This is a NORMAL variable, deliberately, and it is never unset. RtAudio's
+# CMakeLists contains `option(BUILD_SHARED_LIBS "Build as shared library" ON)`,
+# which creates a *global cache entry* set to ON. RtAudio itself escapes the
+# consequences because RTAUDIO_BUILD_STATIC_LIBS wins in its own logic — but
+# every dependency configured after it inherits the poisoned cache. That is
+# exactly what happened through M1: libsamplerate silently built as
+# libsamplerate.0.dylib and the cratedig binary linked @rpath against it, while
+# NOTICE claimed static. A normal variable shadows the cache entry for the whole
+# directory scope, and under CMP0077 NEW (set above) option() then leaves it
+# alone instead of overwriting it.
+set(BUILD_SHARED_LIBS OFF)
+
 # BUILD_TESTING is not ours — we gate our suite on CRATEDIG_BUILD_TESTS and call
 # enable_testing() directly — but RtAudio's CMakeLists calls include(CTest), which
 # defines BUILD_TESTING=ON as a global cache entry. libsamplerate, configured
@@ -108,13 +124,9 @@ unset(CMAKE_POLICY_DEFAULT_CMP0077)
 unset(CMAKE_POLICY_VERSION_MINIMUM)
 unset(BUILD_TESTING)
 
-# Fail loudly rather than at link time if an override above was ignored: a shared
-# rtaudio, or one built against an unintended backend, is exactly the kind of
-# silent host-dependent divergence the pinned API list exists to prevent.
-get_target_property(_cratedig_rtaudio_type rtaudio TYPE)
-if(NOT _cratedig_rtaudio_type STREQUAL "STATIC_LIBRARY")
-  message(FATAL_ERROR "cratedig: expected a static rtaudio, got ${_cratedig_rtaudio_type}")
-endif()
+# The static-linkage post-condition is asserted at the bottom of this file, over
+# every dependency rather than only rtaudio — checking one of them is what let
+# libsamplerate build shared unnoticed for a whole milestone.
 
 # RtMidi (MIT-style) — MIDI input, linked ONLY from src/io/. Activates at M4.
 # FetchContent_Declare(rtmidi
@@ -122,10 +134,53 @@ endif()
 #   URL_HASH SHA256=<pin at activation> SYSTEM EXCLUDE_FROM_ALL)
 
 # -- M2: TUI -----------------------------------------------------------------------
-# FTXUI (MIT)
-# FetchContent_Declare(ftxui
-#   URL https://github.com/ArthurSonzogni/FTXUI/archive/refs/tags/v5.0.0.tar.gz
-#   URL_HASH SHA256=<pin at activation> SYSTEM EXCLUDE_FROM_ALL)
+#
+# FTXUI (MIT) — the terminal interface, linked ONLY from src/tui/.
+#
+# CMP0077 again, for the same reason as RtAudio above but a different cause:
+# FTXUI declares cmake_minimum_required(VERSION 3.12), and CMP0077 was introduced
+# in 3.13. Below that, option() still clears a normal variable of the same name,
+# so every FTXUI_* override here would be silently discarded and we would build
+# its examples and tests. The guard is set and unset around this block alone so
+# it cannot leak into our own targets.
+#
+# 3.12 is >= 3.5, so unlike libsamplerate this needs no
+# CMAKE_POLICY_VERSION_MINIMUM shim on CMake 4.
+set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+
+set(FTXUI_BUILD_DOCS OFF)
+set(FTXUI_BUILD_EXAMPLES OFF)
+set(FTXUI_BUILD_TESTS OFF)
+set(FTXUI_BUILD_TESTS_FUZZER OFF)
+# C++20 modules require the Ninja/MSVC generator and CMake >= 3.28.2, and we
+# deliberately disable module scanning project-wide (see the root CMakeLists).
+set(FTXUI_BUILD_MODULES OFF)
+set(FTXUI_ENABLE_INSTALL OFF)
+set(FTXUI_CLANG_TIDY OFF)
+set(FTXUI_DEV_WARNINGS OFF)
+set(FTXUI_QUIET ON)
+FetchContent_Declare(
+  ftxui
+  URL https://github.com/ArthurSonzogni/FTXUI/archive/refs/tags/v7.0.1.tar.gz
+  URL_HASH SHA256=80f544bb47fab24d3e57bc561324da228c050b3f2e8683fe806883ca5cd561a2
+  SYSTEM EXCLUDE_FROM_ALL)
+FetchContent_MakeAvailable(ftxui)
+
+unset(CMAKE_POLICY_DEFAULT_CMP0077)
+
+# -- Static-linkage post-condition -------------------------------------------------
+#
+# Asserted rather than assumed. None of these libraries declares STATIC
+# explicitly; they all follow BUILD_SHARED_LIBS, and the failure is silent — the
+# build succeeds, the tests pass, and the binary only breaks once build/ is gone.
+# Checking every target is the point: the M1 version of this check covered
+# rtaudio alone, and libsamplerate went shared behind it.
+foreach(_cratedig_dep IN ITEMS rtaudio samplerate screen dom component)
+  get_target_property(_cratedig_dep_type ${_cratedig_dep} TYPE)
+  if(NOT _cratedig_dep_type STREQUAL "STATIC_LIBRARY")
+    message(FATAL_ERROR "cratedig: expected a static ${_cratedig_dep}, got ${_cratedig_dep_type}")
+  endif()
+endforeach()
 
 # -- M3: onset detection -----------------------------------------------------------
 # PFFFT (FFTPACK license) — no tagged releases; pin a commit hash tarball

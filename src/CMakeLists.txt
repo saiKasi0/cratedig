@@ -70,15 +70,22 @@ add_library(cratedig_io STATIC io/audio_device.cpp)
 target_link_libraries(cratedig_io PUBLIC cratedig_engine)
 target_link_libraries(cratedig_io PRIVATE rtaudio cratedig_warnings cratedig_sanitizer)
 
-# TEMPORARY, M1 ONLY. This is a termios shell, not a TUI — M2 replaces the whole
-# contents of src/tui/ with FTXUI components built from docs/design/*.html, plus
-# the PTY snapshot tests that become the ground truth for the interface. It lives
-# here rather than in a new src/app/ because src/tui/ is already the TUI lane in
-# the CLAUDE.md module map, and inventing a module to hold throwaway code would
-# mean changing that map twice.
-add_library(cratedig_tui STATIC tui/raw_terminal.cpp tui/shell.cpp)
-target_link_libraries(cratedig_tui PUBLIC cratedig_engine cratedig_ingest cratedig_io)
+# The TUI lane. FTXUI is linked PUBLIC because the render layer's return type is
+# an ftxui::Element — the snapshot tests build the same elements and render them
+# to an offscreen Screen, so they need the headers too.
+#
+# Exceptions stay enabled here for the same reason as src/ingest/: -fno-exceptions
+# applies to src/rt/ and src/engine/ (CLAUDE.md), and both FTXUI and std::string
+# are used freely on the control thread.
+add_library(cratedig_tui STATIC tui/app.cpp tui/cli.cpp)
+target_link_libraries(cratedig_tui PUBLIC cratedig_engine cratedig_ingest cratedig_io
+                                          ftxui::ftxui)
 target_link_libraries(cratedig_tui PRIVATE cratedig_warnings cratedig_sanitizer)
+
+# Single source of truth for the version string: it appears in --version and in
+# the interface header, and the two drifting apart is the kind of thing nobody
+# notices until a bug report quotes the wrong one.
+target_compile_definitions(cratedig_tui PUBLIC CRATEDIG_VERSION="${PROJECT_VERSION}")
 
 add_executable(cratedig tui/main.cpp)
 target_link_libraries(cratedig PRIVATE cratedig_tui CLI11::CLI11 cratedig_warnings

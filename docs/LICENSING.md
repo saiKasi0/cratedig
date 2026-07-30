@@ -88,7 +88,7 @@ This is a normative rule about what we may ship, not legal advice.
 | CLAP | MIT | header-only | hosting API |
 | lilv (LV2 host) | ISC | dynamic (system) | Linux/macOS |
 | Catch2 | BSL-1.0 | tests only | not shipped |
-| CLI11 | BSD-3-Clause | static | |
+| CLI11 | BSD-3-Clause | header-only | |
 
 Adding a dependency is a human decision (CLAUDE.md): propose it with its license,
 linkage, and why it can't be avoided — do not vendor it.

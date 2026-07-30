@@ -34,6 +34,30 @@ if [ -n "${header_leaks}" ]; then
   echo "${header_leaks}" >&2
 fi
 
+# Rule: FTXUI is the TUI lane's business and nobody else's. The engine, ingest
+# and io modules must stay renderable-free so offline bounce and the headless
+# tests keep working; an ftxui::Element returned from src/engine/ would be the
+# same mistake as an RtAudio type, one lane over.
+ui_leaks="$(grep -rn --include='*.hpp' --include='*.cpp' -E '#include *[<"]ftxui/' src \
+  | grep -v '^src/tui/' || true)"
+if [ -n "${ui_leaks}" ]; then
+  report "FTXUI headers included outside src/tui/:"
+  echo "${ui_leaks}" >&2
+fi
+
+# Rule: nothing in src/tui/ drives the terminal by hand any more.
+#
+# M1 shipped a termios shell because FTXUI was staged for M2. It is gone, and
+# FTXUI now owns raw mode, signal handling and restoration -- doing any of that
+# alongside it means two owners of one global, and the failure mode is a user's
+# terminal left unusable. If this ever needs to come back it should be a
+# deliberate change to this rule, not a quiet include.
+termios_leaks="$(grep -rn --include='*.hpp' --include='*.cpp' -E '#include *[<"](termios|sys/ioctl)\.h' src/tui || true)"
+if [ -n "${termios_leaks}" ]; then
+  report "src/tui/ drives the terminal directly (that is FTXUI's job now):"
+  echo "${termios_leaks}" >&2
+fi
+
 # Rule: src/rt/ depends on nothing outside src/rt/. It is the real-time lane;
 # an include from engine/ or ingest/ here would drag allocation and I/O into it.
 rt_leaks="$(grep -rn --include='*.hpp' --include='*.cpp' -E '#include *"(engine|ingest|io|tui|lua|host)/' src/rt || true)"
