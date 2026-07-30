@@ -31,11 +31,22 @@
 #                                          # verified by decoding back and comparing
 #                                          # samples within tolerance, not by hash.
 #   used_by        = ["tests/unit/decode_mp3_test.cpp"]
+#
+# Locally assembled from several CC0 sources (a list means "concatenate, in this
+# order", then loop and trim to derived_duration_seconds):
+#   [[fixture]]
+#   path                     = "long_form_drums.flac"
+#   derived_from             = ["loop_a.flac", "loop_b.flac", ...]
+#   derived_duration_seconds = 330
+#   ffmpeg_args              = "-c:a flac"
+#   Every entry in derived_from must itself be a fixture here: a derived file
+#   inherits its licence and provenance from its sources, so an unlisted source
+#   would be provenance laundering rather than a transcode. verify_fixtures.py
+#   enforces that.
 
 version = 1
 
 # Fixtures land with the milestone whose tests consume them. Still outstanding:
-#   M2 — one long-form file (> 3 min) for peak-pyramid / streaming stress
 #   M3 — percussive material + hand-labeled *.onsets.txt ground truth
 #   M5 — near-silent and clipped/loud files for metering and limiter edges
 #   M6 — remaining codecs/containers
@@ -51,6 +62,13 @@ version = 1
 # "regardless of how it is labeled" precisely because the CC0 label on a
 # redistribution is the trap. The same reasoning applies to any other break in a
 # CC0-labelled pack whose origin is a commercial record.
+#
+# `loop_breakbeat` is excluded for the same reason, on its name alone. A file
+# called "breakbeat" in a sample pack is, by default, a lift from a record
+# somebody else made; establishing otherwise would take more evidence than the
+# pack's blanket CC0 statement provides, and this fixture set has no need of it.
+# When the rule is "provenance must be verifiable at the source URL", the
+# burden falls on including a file, not on excluding one.
 #
 # ---------------------------------------------------------------------------
 # Sonic Pi sample library — CC0-1.0
@@ -97,6 +115,67 @@ sha256 = "2633a5df4280fe49c58d5ced8633325d049ee03bb4b7512310cb2356d2ab1319"
 used_by = ["tests/unit/fixture_decode_test.cpp"]
 
 # ---------------------------------------------------------------------------
+# Percussion loops — CC0-1.0, same Sonic Pi source and same pinned commit
+# ---------------------------------------------------------------------------
+# Fetched to be concatenated into long_form_drums.flac below. They are also the
+# obvious material for M3's chopping work, which is why they are drum and
+# percussion loops rather than whatever was shortest.
+
+[[fixture]]
+path = "loop_industrial.flac"
+role = "percussion"
+license = "CC0-1.0"
+source_url = "https://raw.githubusercontent.com/sonic-pi-net/sonic-pi/622864a774e7866f6c4746b9b59a41064f9bc173/etc/samples/loop_industrial.flac"
+sha256 = "6925eb60647384e84c45c4aed84d1ddcabe4c2c34e992e5ed80915da8850aa05"
+# FLAC, 44.1 kHz, stereo, 0.88 s.
+used_by = ["long_form_drums.flac"]
+
+[[fixture]]
+path = "loop_compus.flac"
+role = "percussion"
+license = "CC0-1.0"
+source_url = "https://raw.githubusercontent.com/sonic-pi-net/sonic-pi/622864a774e7866f6c4746b9b59a41064f9bc173/etc/samples/loop_compus.flac"
+sha256 = "76d2156582500c496a5c168ab2a1ddd7f3df9534ca476eb760375c30f709ed1d"
+# FLAC, 44.1 kHz, stereo, 6.49 s.
+used_by = ["long_form_drums.flac"]
+
+[[fixture]]
+path = "loop_garzul.flac"
+role = "percussion"
+license = "CC0-1.0"
+source_url = "https://raw.githubusercontent.com/sonic-pi-net/sonic-pi/622864a774e7866f6c4746b9b59a41064f9bc173/etc/samples/loop_garzul.flac"
+sha256 = "bc04e06c84a4b6535b8f7bdb51c5b09afe5350421bf16660454e6d370d9ab849"
+# FLAC, 44.1 kHz, stereo, 8.00 s.
+used_by = ["long_form_drums.flac"]
+
+[[fixture]]
+path = "loop_safari.flac"
+role = "percussion"
+license = "CC0-1.0"
+source_url = "https://raw.githubusercontent.com/sonic-pi-net/sonic-pi/622864a774e7866f6c4746b9b59a41064f9bc173/etc/samples/loop_safari.flac"
+sha256 = "4e952f7548c42b70c6a80c87d93b4f5bad0068020d7b5b28998558a9857687c4"
+# FLAC, 44.1 kHz, stereo, 8.01 s.
+used_by = ["long_form_drums.flac"]
+
+[[fixture]]
+path = "loop_tabla.flac"
+role = "percussion"
+license = "CC0-1.0"
+source_url = "https://raw.githubusercontent.com/sonic-pi-net/sonic-pi/622864a774e7866f6c4746b9b59a41064f9bc173/etc/samples/loop_tabla.flac"
+sha256 = "7dbb7d6e216aece300700453c9734ecd6f56ec75dd56a5365c6a12194ed3ebab"
+# FLAC, 44.1 kHz, stereo, 10.67 s — the longest of the set.
+used_by = ["long_form_drums.flac"]
+
+[[fixture]]
+path = "loop_perc1.flac"
+role = "percussion"
+license = "CC0-1.0"
+source_url = "https://raw.githubusercontent.com/sonic-pi-net/sonic-pi/622864a774e7866f6c4746b9b59a41064f9bc173/etc/samples/loop_perc1.flac"
+sha256 = "def05c2bfbc8b08b021031aeef16098281517103431fccef7da38e1ceffc866a"
+# FLAC, 44.1 kHz, stereo, 2.47 s.
+used_by = ["long_form_drums.flac"]
+
+# ---------------------------------------------------------------------------
 # Locally transcoded — no CC0 source publishes these directly
 # ---------------------------------------------------------------------------
 # License is inherited from derived_from. Their own hash is informational:
@@ -123,3 +202,42 @@ ffmpeg_args = "-ar 48000 -c:a pcm_s16le"
 # this on a 48 kHz engine must take the resampler's bit-exact passthrough, while
 # the 44.1 kHz files exercise the conversion path.
 used_by = ["tests/unit/fixture_decode_test.cpp"]
+
+# ---------------------------------------------------------------------------
+# Long-form — assembled here, from CC0 sources listed above
+# ---------------------------------------------------------------------------
+# Why assembled rather than fetched: a real public-domain recording would be
+# better material, and archive.org (where the public-domain jazz lives) was
+# unreachable when this landed. It is also a harder provenance question than it
+# looks — under the Music Modernization Act only US recordings first published
+# in or before 1925 are public domain, those are acoustic-era and were recorded
+# with the drums deliberately kept off the horn, and an archive.org uploader's
+# "public domain" tag is a claim rather than a rights determination. The hunt is
+# deferred to M3, which needs hand-labelled percussive material anyway and is
+# the right moment to verify a specific item properly.
+#
+# The sequence is three different permutations of the nine sources rather than
+# one order looped: a 39-second period is plainly visible as a repeat when the
+# whole file is on screen, and 116 seconds is not.
+
+[[fixture]]
+path = "long_form_drums.flac"
+role = "long-form"
+license = "CC0-1.0"
+derived_from = [
+  "loop_industrial.flac", "loop_tabla.flac", "drum_heavy_kick.flac",
+  "loop_garzul.flac", "bd_haus.flac", "loop_perc1.flac",
+  "ambi_choir.flac", "loop_safari.flac", "loop_compus.flac",
+  "loop_perc1.flac", "loop_safari.flac", "bd_haus.flac",
+  "loop_compus.flac", "loop_industrial.flac", "ambi_choir.flac",
+  "loop_garzul.flac", "drum_heavy_kick.flac", "loop_tabla.flac",
+  "loop_garzul.flac", "bd_haus.flac", "loop_compus.flac",
+  "loop_perc1.flac", "loop_tabla.flac", "loop_industrial.flac",
+  "loop_safari.flac", "drum_heavy_kick.flac", "ambi_choir.flac",
+]
+derived_duration_seconds = 330
+ffmpeg_args = "-c:a flac"
+# 5.5 min, 44.1 kHz stereo, ~23 MB. The long-form row docs/TESTING.md requires:
+# peak-pyramid construction, scroll and zoom at full frame rate over a file too
+# long to rescan per frame.
+used_by = ["tests/tui/waveform_perf_test.cpp", "M2 acceptance: a 5-minute file scrolls"]

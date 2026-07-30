@@ -172,6 +172,28 @@ that consume it. `scripts/verify_fixtures.sh` recomputes every hash and fails on
 drift; `scripts/ci.sh` runs it, so a changed or substituted fixture fails the
 build rather than silently changing test results.
 
+A fixture may also be **assembled from several manifest-listed CC0 sources**: a
+list-valued `derived_from` means "concatenate these, in this order", then loop
+and trim to `derived_duration_seconds`. Every source must itself be a fixture in
+the manifest, and `verify_fixtures.py` enforces that — a derived file inherits
+its licence and provenance from its sources, so an unlisted source would be
+provenance laundering rather than a transcode.
+
+`long_form_drums.flac` is built that way: three different permutations of nine
+CC0 percussion loops, looped to 5.5 minutes. Three permutations rather than one
+order repeated, because a 39-second period is plainly visible as a repeat when
+the whole file is on screen and 116 seconds is not.
+
+**Why assembled and not fetched.** A real public-domain recording would be
+better material. archive.org, where the public-domain jazz lives, was
+unreachable when this landed; and it is a harder provenance question than it
+looks — under the Music Modernization Act only US recordings first published in
+or before 1925 are public domain, those are acoustic-era and were recorded with
+the drums deliberately kept off the horn, and an archive.org uploader's "public
+domain" tag is a claim rather than a rights determination. The hunt is deferred
+to M3, which needs hand-labelled percussive material anyway and is the right
+moment to verify a specific item properly.
+
 Files that must be produced locally (a codec no CC0 source publishes directly) are
 **transcoded from a manifest-listed CC0 source with ffmpeg** by the fetch script.
 Their manifest row records the source file and the exact ffmpeg recipe. Their own
@@ -189,7 +211,7 @@ dead weight and unverifiable provenance risk.
 | Per codec/container | One file for each format the decoder claims to support (WAV, FLAC first; MP3/AAC/OGG/OPUS/M4A later), transcoded locally where no CC0 original exists | M1 (WAV/FLAC), M6 (all codecs) | **done for M1** — `drum_heavy_kick.flac`, `kick_44k.wav` |
 | Sample rates | At least one 44.1 kHz and one 48 kHz file so the resampler path is always exercised | M1 | **done** — the Sonic Pi files are 44.1 kHz, `kick_48k.wav` is derived |
 | Stereo | A file with genuinely different left and right content, so a decoder that duplicates channel 0 is caught | M1 | **done** — `ambi_choir.flac`, `bd_haus.flac` |
-| Long-form | One file > 3 minutes, for buffering/streaming and peak-pyramid stress | M2 | pending |
+| Long-form | One file > 3 minutes, for buffering/streaming and peak-pyramid stress | M2 | **done** — `long_form_drums.flac`, 5.5 min, assembled locally from nine CC0 sources |
 | Percussive | Short percussive material **with hand-labeled onset ground truth committed as text** next to the manifest (`*.onsets.txt`, one time-in-seconds per line) | M3 | pending |
 | Near-silent | Signal near the noise floor — metering, denormal, and auto-gain edge cases | M5 | pending |
 | Clipped / loud | Material at or over 0 dBFS — limiter, clip indicator, and headroom paths | M5 | pending |

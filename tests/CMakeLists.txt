@@ -26,6 +26,7 @@ add_executable(
   unit/wave_view_test.cpp
   unit/waveform_test.cpp
   tui/layout_snapshot_test.cpp
+  tui/waveform_perf_test.cpp
   integration/engine_threading_test.cpp
   integration/rt_safety_test.cpp
   # The guard's operator new/delete replacements must be linked into the

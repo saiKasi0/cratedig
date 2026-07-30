@@ -74,6 +74,25 @@ def main() -> int:
             derived += 1
             if not entry.get("ffmpeg_args"):
                 errors.append(f"{path_value}: derived fixture has no 'ffmpeg_args' recipe")
+
+            # A list means "concatenate these, in this order". Every entry must
+            # itself be a manifest fixture, because that is what carries the
+            # licence and the checksum -- a derived file inherits its provenance
+            # from its sources, so an unlisted source would be provenance
+            # laundering rather than a transcode.
+            sources = entry["derived_from"]
+            if isinstance(sources, str):
+                sources = [sources]
+            known = {other.get("path") for other in fixtures}
+            for source in sources:
+                if source not in known:
+                    errors.append(
+                        f"{path_value}: derived from {source!r}, which is not in the manifest"
+                    )
+            if len(sources) > 1 and not entry.get("derived_duration_seconds"):
+                errors.append(
+                    f"{path_value}: a multi-source fixture needs 'derived_duration_seconds'"
+                )
             continue
 
         if not entry.get("source_url"):
