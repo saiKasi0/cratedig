@@ -1,8 +1,13 @@
 #include "engine/engine.hpp"
+#include "rt/pad_event.hpp"
+#include "rt/sample.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <random>
 #include <span>
 #include <vector>
@@ -179,4 +184,175 @@ TEST_CASE("Engine keeps its configuration", "[unit]") {
   CHECK(eng.config().num_channels == kChannels);
   CHECK(eng.config().max_block_frames == kMaxBlock);
   CHECK(eng.config().seed == 0);
+}
+
+namespace {
+
+// A synthetic sample, built in the test rather than fetched.
+//
+// Determinism is the property under test, so it must not depend on a fixture
+// being present, on a decoder being correct, or on the network. The fixture
+// -backed tests live in tests/unit/decode_test.cpp and are allowed to skip;
+// these are not.
+//
+// The default rate is 44.1 kHz against a 48 kHz engine, giving a phase step of
+// 0.91875 -- a genuinely fractional accumulator. At a 1:1 rate the fraction is
+// always zero and block-size invariance would hold even for a broken
+// implementation.
+std::shared_ptr<const rt::Sample> make_test_sample(std::uint32_t rate = 44'100,
+                                                   std::uint16_t channels = 2,
+                                                   std::size_t frames = 3'000) {
+  auto sample = std::make_shared<rt::Sample>(rate, channels, frames);
+  for (std::uint16_t channel = 0; channel < channels; ++channel) {
+    std::span<float> data = sample->mutable_channel(channel);
+    for (std::size_t frame = 0; frame < frames; ++frame) {
+      // Deterministic and non-trivial: an integer recurrence, so there is no
+      // libm call whose last bit could differ between platforms.
+      const auto phase = static_cast<float>((frame * (7 + channel)) % 211);
+      data[frame] = ((phase / 105.0F) - 1.0F) * 0.5F;
+    }
+  }
+  return sample;
+}
+
+// Loads in place rather than returning an Engine: the engine owns an SpscRing
+// and a GarbageRing, both of which delete their move constructors on purpose, so
+// Engine is neither copyable nor movable.
+void load_pads(engine::Engine& eng) {
+  eng.set_pad_sample(0, make_test_sample());
+  eng.set_pad_sample(1, make_test_sample(48'000, 1, 1'500));
+}
+
+void trigger(engine::Engine& eng, std::uint8_t pad, float velocity) {
+  const rt::PadEvent event{.pad = pad, .velocity = velocity, .frame_offset = 0};
+  REQUIRE(eng.trigger_pad(event));
+}
+
+}  // namespace
+
+TEST_CASE("Engine plays a triggered pad", "[unit]") {
+  engine::Engine eng{test_config()};
+  load_pads(eng);
+  trigger(eng, 0, 1.0F);
+
+  RenderCapture capture{2'048, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  capture.render_in_blocks(eng, blocks);
+
+  const std::span<const float> samples = capture.samples();
+  CHECK(std::any_of(samples.begin(), samples.end(), [](float v) { return v != 0.0F; }));
+  CHECK(eng.active_voices() == 1);
+}
+
+TEST_CASE("Engine leaves unloaded and out-of-range pads silent", "[unit]") {
+  engine::Engine eng{test_config()};
+  load_pads(eng);
+
+  trigger(eng, 7, 1.0F);    // in range, no sample loaded
+  trigger(eng, 200, 1.0F);  // out of range entirely
+
+  RenderCapture capture{512, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  capture.render_in_blocks(eng, blocks);
+
+  const std::vector<float> expected_zeros(capture.samples().size(), 0.0F);
+  CHECK(std::memcmp(capture.samples().data(), expected_zeros.data(),
+                    expected_zeros.size() * sizeof(float)) == 0);
+  CHECK(eng.active_voices() == 0);
+}
+
+TEST_CASE("Engine output with voices is invariant to block size", "[unit]") {
+  // The M0 version of this test rendered silence, which is block-invariant no
+  // matter how badly the phase is handled. This is the version that can fail:
+  // a voice at a fractional rate ratio, rendered three different ways.
+  constexpr std::size_t kFrames = 16'384;
+
+  auto render = [](std::span<const std::size_t> blocks) {
+    engine::Engine eng{test_config()};
+    load_pads(eng);
+    trigger(eng, 0, 0.8F);
+    trigger(eng, 1, 0.6F);
+    RenderCapture capture{kFrames, kChannels};
+    capture.render_in_blocks(eng, blocks);
+    return capture;
+  };
+
+  const std::array<std::size_t, 1> one_block{kMaxBlock};
+  const std::array<std::size_t, 1> small_blocks{64};
+  std::mt19937 rng{777};
+  std::uniform_int_distribution<std::size_t> sizes{1, kMaxBlock};
+  std::array<std::size_t, 64> ragged_blocks{};
+  for (std::size_t& size : ragged_blocks) {
+    size = sizes(rng);
+  }
+
+  const RenderCapture whole = render(one_block);
+  const RenderCapture chunked = render(small_blocks);
+  const RenderCapture ragged = render(ragged_blocks);
+
+  CHECK(whole.hash() == chunked.hash());
+  CHECK(whole.hash() == ragged.hash());
+
+  // Guards against all three being silence, which would satisfy the equalities
+  // above while proving nothing at all.
+  const std::span<const float> samples = whole.samples();
+  CHECK(std::any_of(samples.begin(), samples.end(), [](float v) { return v != 0.0F; }));
+}
+
+TEST_CASE("Engine renders the same audio on every run", "[unit]") {
+  constexpr std::size_t kFrames = 8'192;
+  const std::array<std::size_t, 3> blocks{64, 512, 333};
+
+  auto render = [&blocks]() {
+    engine::Engine eng{test_config()};
+    load_pads(eng);
+    trigger(eng, 0, 0.8F);
+    trigger(eng, 1, 0.6F);
+    RenderCapture capture{kFrames, kChannels};
+    capture.render_in_blocks(eng, blocks);
+    return capture;
+  };
+
+  const RenderCapture first = render();
+  const RenderCapture second = render();
+
+  CHECK(first.hash() == second.hash());
+  CHECK(std::memcmp(first.samples().data(), second.samples().data(),
+                    first.samples().size() * sizeof(float)) == 0);
+}
+
+TEST_CASE("Engine reports a full event ring rather than blocking", "[unit]") {
+  engine::Engine eng{test_config()};
+  load_pads(eng);
+
+  std::size_t accepted = 0;
+  for (std::size_t i = 0; i < engine::Engine::kEventRingCapacity + 10; ++i) {
+    if (eng.trigger_pad(rt::PadEvent{.pad = 0, .velocity = 1.0F, .frame_offset = 0})) {
+      ++accepted;
+    }
+  }
+
+  CHECK(accepted == engine::Engine::kEventRingCapacity);
+  CHECK(eng.dropped_events() == 10);
+}
+
+TEST_CASE("Engine retires finished samples to the janitor", "[unit]") {
+  // The audio thread must never run a Sample destructor. Here the engine is the
+  // only other owner, so watching use_count() shows exactly when the reference
+  // is released -- and that it happens in collect_garbage(), not in render().
+  auto sample = make_test_sample(48'000, 1, 64);
+  engine::Engine eng{test_config()};
+  eng.set_pad_sample(0, sample);
+  CHECK(sample.use_count() == 2);  // ours plus the pad table
+
+  trigger(eng, 0, 1.0F);
+
+  RenderCapture capture{512, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  capture.render_in_blocks(eng, blocks);
+
+  CHECK(eng.active_voices() == 0);
+  CHECK(eng.collect_garbage() == 1);
+  CHECK(sample.use_count() == 2);  // the voice's reference is gone; the pad still holds one
+  CHECK(eng.garbage_overflows() == 0);
 }

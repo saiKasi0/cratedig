@@ -44,10 +44,17 @@ class GarbageRing {
   // AUDIO THREAD. Hands ownership of sp to the janitor. Allocation-free,
   // lock-free, and never runs a destructor on this thread.
   //
-  // Converting shared_ptr<T> to shared_ptr<void> shares the existing control
-  // block — it is a pointer copy plus a refcount bump, with no allocation. The
-  // destination slot is guaranteed empty (see the class invariant), so
-  // move-assigning into it cannot release a previous reference here either.
+  // Converting shared_ptr<T> to shared_ptr<const void> shares the existing
+  // control block — it is a pointer copy plus a refcount bump, with no
+  // allocation. The destination slot is guaranteed empty (see the class
+  // invariant), so move-assigning into it cannot release a previous reference
+  // here either.
+  //
+  // The slot type is shared_ptr<const void>, not shared_ptr<void>: almost
+  // everything retired here is a shared_ptr<const Something> (samples are
+  // immutable once published), and that does not convert to shared_ptr<void>
+  // because it would cast away const. Type erasure keeps the original deleter
+  // either way, so the true type is still destroyed correctly on the janitor.
   //
   // Returns false when the ring is full. The caller then STILL OWNS sp and must
   // keep it alive and retry on a later block. Dropping it on the floor would
@@ -97,7 +104,7 @@ class GarbageRing {
         // on the janitor thread. Emptying the slot before publishing the new
         // read index is the invariant that lets retire() move into its target
         // slot without ever releasing a reference on the audio thread.
-        const std::shared_ptr<void> collected = std::move(m_slots[read & kIndexMask]);
+        const std::shared_ptr<const void> collected = std::move(m_slots[read & kIndexMask]);
       }
       ++read;
       ++released;
@@ -129,7 +136,7 @@ class GarbageRing {
 
   // Monotonic indices, masked only to find the slot — same scheme as SpscRing,
   // so the full capacity is usable and full/empty are unambiguous.
-  std::array<std::shared_ptr<void>, Capacity> m_slots{};
+  std::array<std::shared_ptr<const void>, Capacity> m_slots{};
 
   alignas(kCacheLine) std::atomic<std::size_t> m_write_index{0};
   alignas(kCacheLine) std::atomic<std::size_t> m_read_index{0};

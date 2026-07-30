@@ -17,10 +17,12 @@ target_sources(
             rt/arch.hpp
             rt/garbage_ring.hpp
             rt/interpolator.hpp
+            rt/pad_event.hpp
             rt/result.hpp
             rt/rt_scope.hpp
             rt/sample.hpp
-            rt/spsc_ring.hpp)
+            rt/spsc_ring.hpp
+            rt/voice_pool.hpp)
 
 # Every consumer must agree with rt_scope.cpp about whether the guard exists —
 # the RT_SCOPE() macro and the operator replacements are compiled from the same

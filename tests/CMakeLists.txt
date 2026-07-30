@@ -17,6 +17,8 @@ add_executable(
   unit/rt_scope_test.cpp
   unit/sample_test.cpp
   unit/spsc_ring_test.cpp
+  unit/voice_pool_test.cpp
+  integration/engine_threading_test.cpp
   integration/rt_safety_test.cpp
   # The guard's operator new/delete replacements must be linked into the
   # executable directly, not via a library — see src/CMakeLists.txt.

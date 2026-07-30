@@ -65,8 +65,11 @@ class Sample {
   ~Sample() = default;
 
   [[nodiscard]] std::uint32_t sample_rate() const noexcept { return m_sample_rate; }
+
   [[nodiscard]] std::uint16_t num_channels() const noexcept { return m_num_channels; }
+
   [[nodiscard]] std::size_t num_frames() const noexcept { return m_num_frames; }
+
   [[nodiscard]] bool empty() const noexcept { return m_num_frames == 0; }
 
   // WORKER THREAD ONLY, before the Sample is published.

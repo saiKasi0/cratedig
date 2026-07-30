@@ -81,10 +81,8 @@ TEST_CASE("Sample guards cover exactly what the interpolator reads", "[unit]") {
   const rt::Sample sample = make_ramp(1, 16);
   const float* frame0 = sample.frame0(0);
 
-  const float at_start =
-      rt::hermite4(frame0[-1], frame0[0], frame0[1], frame0[2], 0.5F);
-  const float at_end =
-      rt::hermite4(frame0[14], frame0[15], frame0[16], frame0[17], 0.5F);
+  const float at_start = rt::hermite4(frame0[-1], frame0[0], frame0[1], frame0[2], 0.5F);
+  const float at_end = rt::hermite4(frame0[14], frame0[15], frame0[16], frame0[17], 0.5F);
 
   CHECK(at_start != 0.0F);
   CHECK(at_end != 0.0F);

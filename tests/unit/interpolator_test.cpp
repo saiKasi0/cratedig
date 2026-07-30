@@ -166,6 +166,7 @@ TEST_CASE("Hermite interpolation meets the M1 SNR budget", "[unit]") {
     double freq_hz;
     double min_snr_db;
   };
+
   const Case cases[] = {
       {100.0, 140.0},    // measured 146.8
       {440.0, 105.0},    // measured 110.9
@@ -190,6 +191,7 @@ TEST_CASE("Hermite interpolation beats linear by a wide margin", "[unit]") {
     double freq_hz;
     double min_gain_db;
   };
+
   const Case cases[] = {
       {440.0, 35.0},    // measured 42.0
       {1'000.0, 28.0},  // measured 34.8

@@ -7,12 +7,17 @@
 // the RT_SCOPE guard and requires zero violations.
 
 #include "engine/engine.hpp"
+#include "rt/pad_event.hpp"
 #include "rt/rt_scope.hpp"
+#include "rt/sample.hpp"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <random>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -83,6 +88,76 @@ TEST_CASE("Engine::render allocates nothing", "[integration]") {
 
   CHECK(HandlerSwap::count() == 0);
   CHECK(eng.frames_rendered() > 0);
+}
+
+TEST_CASE("Engine::render allocates nothing while voices are playing", "[integration]") {
+  // The M1 acceptance criterion: "no allocation in the callback" -- and the
+  // callback now does far more than clear buffers. It drains a ring, copies
+  // shared_ptrs, starts and steals voices, runs the interpolator, and hands
+  // finished samples to the garbage ring. Every one of those is a place an
+  // allocation could sneak in, and the test above would never notice because it
+  // never triggers anything.
+  if constexpr (!rt::kAllocationDetectionEnabled) {
+    SKIP("allocation detection is compiled out (TSan build) — see rt_scope.hpp");
+  }
+
+  const engine::Engine::Config config{
+      .sample_rate = 48'000, .num_channels = kChannels, .max_block_frames = kMaxBlock, .seed = 0};
+  engine::Engine eng{config};
+
+  // Loaded before the guard is armed: building samples allocates, and it is
+  // supposed to -- it happens on a worker, not here.
+  for (std::uint8_t pad = 0; pad < 4; ++pad) {
+    auto sample = std::make_shared<rt::Sample>(
+        44'100U, static_cast<std::uint16_t>(pad % 2 == 0 ? 1 : 2), std::size_t{2'000});
+    for (std::uint16_t channel = 0; channel < sample->num_channels(); ++channel) {
+      std::span<float> data = sample->mutable_channel(channel);
+      for (std::size_t frame = 0; frame < data.size(); ++frame) {
+        data[frame] = 0.1F * static_cast<float>((frame % 17) + 1);
+      }
+    }
+    eng.set_pad_sample(pad, std::move(sample));
+  }
+
+  std::vector<std::vector<float>> storage(kChannels, std::vector<float>(kMaxBlock, 0.0F));
+  std::vector<float*> channels(kChannels);
+  for (std::uint16_t i = 0; i < kChannels; ++i) {
+    channels[i] = storage[i].data();
+  }
+
+  std::mt19937 rng{4'242};
+  std::uniform_int_distribution<std::size_t> block_sizes{1, kMaxBlock};
+  std::vector<std::size_t> plan(2'000);
+  for (std::size_t& size : plan) {
+    size = block_sizes(rng);
+  }
+
+  const HandlerSwap swap;
+  std::size_t collected = 0;
+  for (std::size_t index = 0; index < plan.size(); ++index) {
+    // Far more triggers than there are voices, so stealing and the
+    // steal-plus-retire path run constantly rather than incidentally.
+    const rt::PadEvent event{
+        .pad = static_cast<std::uint8_t>(index % 4), .velocity = 0.75F, .frame_offset = 0};
+    static_cast<void>(eng.trigger_pad(event));
+    eng.render(std::span<float* const>{channels}, plan[index]);
+
+    // The janitor runs on this thread here; collect_garbage() is outside the
+    // callback and may allocate/free freely, which is the whole point.
+    if (index % 8 == 0) {
+      collected += eng.collect_garbage();
+    }
+  }
+  collected += eng.collect_garbage();
+
+  CHECK(HandlerSwap::count() == 0);
+  CHECK(eng.frames_rendered() > 0);
+
+  // Without this the test could pass while every trigger was silently dropped
+  // and no voice ever ran -- zero allocations, and zero work.
+  CHECK(collected > 0);
+  CHECK(eng.garbage_overflows() == 0);
+  CHECK(eng.dropped_events() == 0);
 }
 
 TEST_CASE("the RT guard is armed during the render test", "[integration]") {
