@@ -169,8 +169,9 @@ it.
 | Dependency | Activates | Notes |
 |---|---|---|
 | Catch2 | M0 | tests only, never shipped |
-| RtAudio, RtMidi, libsamplerate, CLI11 | M1 | RtAudio/RtMidi only reachable from `src/io/` |
-| FFmpeg | M1 | system package, **dynamically linked**, LGPL build (docs/LICENSING.md) |
+| RtAudio, libsamplerate, CLI11 | M1 | static; RtAudio only reachable from `src/io/`, and its API set is pinned (ALSA on Linux, CoreAudio on macOS) so host-detected JACK/Pulse cannot change the binary |
+| FFmpeg | M1 | **system package, dynamically linked.** Not a FetchContent dependency — see docs/LICENSING.md. Version floor 5.1 (`AVChannelLayout` API) |
+| RtMidi | M4 | static; `src/io/` only |
 | FTXUI | M2 | |
 | PFFFT | M3 | onset detection |
 | Lua 5.4 + sol2 | M7 | |

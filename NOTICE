@@ -10,3 +10,45 @@ You may obtain a copy of the License at
 Third-party attributions are added here as dependencies are wired in
 (see docs/LICENSING.md for the normative licensing rules and the
 per-dependency license table).
+
+--------------------------------------------------------------------
+Third-party software distributed with CRATEDIG binaries
+--------------------------------------------------------------------
+
+RtAudio — https://github.com/thestk/rtaudio
+    Copyright (c) 2001-2023 Gary P. Scavone
+    MIT-style license (with the additional request that changes be sent
+    to the author). Statically linked.
+
+libsamplerate — https://github.com/libsndfile/libsamplerate
+    Copyright (c) 2012-2016 Erik de Castro Lopo
+    BSD-2-Clause. Statically linked.
+
+CLI11 — https://github.com/CLIUtils/CLI11
+    Copyright (c) 2017-2026 University of Cincinnati
+    BSD-3-Clause. Header-only.
+
+--------------------------------------------------------------------
+Third-party software CRATEDIG links but does NOT distribute
+--------------------------------------------------------------------
+
+FFmpeg (libavformat, libavcodec, libavutil, libswresample)
+    https://ffmpeg.org — LGPL-2.1-or-later when built without
+    --enable-gpl.
+
+    CRATEDIG links FFmpeg dynamically against the shared libraries
+    already present on the user's system, and ships no FFmpeg binary or
+    source. Only LGPL-covered demux/decode APIs are used.
+
+    A distributed CRATEDIG binary must be linked against an LGPL build.
+    See docs/LICENSING.md; the check is enforced at configure time by
+    -DCRATEDIG_REQUIRE_LGPL_FFMPEG=ON.
+
+--------------------------------------------------------------------
+Bundled audio
+--------------------------------------------------------------------
+
+No audio is committed to this repository. The starter pack is fetched
+by scripts/fetch_starter_pack.sh and is CC0-1.0 / public domain only,
+with per-file provenance and sha256 in
+assets/starter-pack/MANIFEST.toml.

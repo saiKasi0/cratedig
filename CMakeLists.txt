@@ -21,6 +21,7 @@ option(CRATEDIG_RT_GUARD "Enable the RT_SCOPE allocation guard" ON)
 
 include(cmake/warnings.cmake)
 include(cmake/sanitizers.cmake)
+include(cmake/ffmpeg.cmake)
 include(cmake/deps.cmake)
 
 add_subdirectory(src)

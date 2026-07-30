@@ -19,13 +19,51 @@ normative: a change that violates them is a bug regardless of what it improves.
 
 ## FFmpeg
 
-- Use an **LGPL build** of FFmpeg (libavformat / libavcodec / swresample) only:
-  no `--enable-gpl`, no `--enable-nonfree` components (x264, x265, etc. must not
-  be present in the linked build).
-- **Dynamic linking only.** The engine loads the system/homebrew FFmpeg shared
-  libraries; we never link FFmpeg statically and never ship FFmpeg binaries.
-- Decode happens in worker processes/threads in `src/ingest/`; nothing in `src/rt/`
-  touches FFmpeg.
+### What is and is not at stake
+
+CRATEDIG's source is Apache-2.0 and **linking cannot change that**. A license on
+someone else's library is not an assignment of ours: our copyright, and the terms
+we offer this source under, are unaffected by what the binary links against.
+
+What FFmpeg's licensing constrains is narrower — **the terms under which a
+distributed binary may be offered**:
+
+- FFmpeg is LGPL-2.1+ by default. LGPL explicitly permits dynamic linking from a
+  differently-licensed program, so an Apache-2.0 CRATEDIG binary that dynamically
+  links an LGPL FFmpeg stays Apache-2.0. **This is the only configuration in which
+  a release binary may be distributed.**
+- Built with `--enable-gpl`, FFmpeg becomes GPL-2-**or-later**. Distributing a
+  binary linked against such a build would make the *combination* GPL. Because it
+  is "or later", GPLv3 is available, and Apache-2.0 is compatible with GPLv3 — so
+  the combination is distributable, just under GPLv3 rather than Apache-2.0.
+  (Apache-2.0 is *not* compatible with GPLv2-only; the "or later" is what avoids
+  that dead end.)
+- Running the program is not distribution. The GPL imposes no conditions on
+  private use, so a developer's machine or a CI container triggers nothing.
+
+### The rules
+
+1. **Only LGPL-covered APIs are called.** Demux and decode via libavformat /
+   libavcodec / libavutil / libswresample. No GPL-only filters, encoders, or
+   components, ever — that is what keeps the LGPL path available at all.
+2. **Dynamic linking only.** We link the system FFmpeg shared libraries via
+   pkg-config. FFmpeg is never linked statically, never vendored, and no FFmpeg
+   binary or source is shipped with CRATEDIG.
+3. **Release binaries MUST link an LGPL build** (no `--enable-gpl`, no
+   `--enable-nonfree`). This is asserted mechanically, not on trust: configuring
+   with `-DCRATEDIG_REQUIRE_LGPL_FFMPEG=ON` compiles and runs a probe calling
+   `avutil_license()` and **fails the configure step** unless it reports LGPL.
+   The release preset turns it on; it is OFF by default.
+4. **Local development and CI may use whatever FFmpeg the machine has.** Both
+   Homebrew and Debian/Ubuntu ship `--enable-gpl` builds and neither offers an
+   LGPL-only package, so requiring one for development would mean every
+   contributor compiling FFmpeg from source to satisfy an obligation that
+   distribution has not triggered. `cratedig --version` prints the linked build's
+   license so the situation is always visible rather than assumed.
+5. Decode happens on worker threads in `src/ingest/`; nothing in `src/rt/` touches
+   FFmpeg.
+
+This is a normative rule about what we may ship, not legal advice.
 
 ## yt-dlp
 
