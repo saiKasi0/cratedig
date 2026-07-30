@@ -10,6 +10,23 @@ namespace rt {
 // docs/design and the shape of every hardware sampler this thing is imitating.
 inline constexpr std::uint8_t kNumPads = 16;
 
+// What a PadEvent is telling the audio thread to do.
+enum class PadEventKind : std::uint8_t {
+  // Start a voice.
+  kNoteOn = 0,
+
+  // Let go of the pad. Only a pad in TriggerMode::kGate acts on it; a one-shot
+  // ignores it, which is the definition of one-shot rather than a special case
+  // anywhere else.
+  //
+  // The engine understands this from M3 even though M3 has only one producer of
+  // it (the Kitty keyboard protocol, where the terminal supports key release).
+  // M4's MIDI note-off and M5's sequencer become additional producers of an
+  // event the engine already handles, rather than each bringing their own idea
+  // of what letting go means.
+  kNoteOff,
+};
+
 // A pad hit, sent control -> audio through an SpscRing.
 //
 // Trivially copyable by construction, because SpscRing overwrites slots by
@@ -20,6 +37,8 @@ struct PadEvent {
   // Which pad. Out-of-range values are dropped by the engine rather than
   // trusted: this arrives from a key handler, and later from MIDI.
   std::uint8_t pad = 0;
+
+  PadEventKind kind = PadEventKind::kNoteOn;
 
   // Linear gain in [0, 1]. Normalised here rather than carrying MIDI's 7-bit
   // velocity, so that the src/io/ MIDI layer owns the curve choice in M4 and

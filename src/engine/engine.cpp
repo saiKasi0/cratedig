@@ -121,15 +121,24 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
     if (event.pad >= rt::kNumPads) {
       continue;  // came from a key handler or MIDI; not trusted
     }
+
+    if (event.kind == rt::PadEventKind::kNoteOff) {
+      // Addressed to the PAD, not to a config: the voice decides whether it
+      // cares, based on the config it is actually playing. A pad reassigned
+      // between the note-on and the note-off must still let go of the note the
+      // player is holding.
+      m_voices.note_off(event.pad);
+      continue;
+    }
+
     const std::shared_ptr<const rt::PadConfig>& config = m_pads[event.pad];
     if (config == nullptr || config->sample == nullptr) {
       continue;  // an unloaded pad is silent, not an error
     }
-    const std::shared_ptr<const rt::Sample>& sample = config->sample;
     // Copying the shared_ptr is an atomic increment — allocation-free and
     // lock-free, so it is legal here. The voice releases it through the garbage
     // ring, never by dropping it on this thread.
-    if (!m_voices.trigger(sample, event.velocity, m_config.sample_rate, m_garbage, event.pad)) {
+    if (!m_voices.trigger(config, event.velocity, m_config.sample_rate, m_garbage)) {
       m_published.dropped_triggers.fetch_add(1, std::memory_order_relaxed);
     }
   }

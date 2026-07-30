@@ -13,6 +13,7 @@ add_executable(
   unit/audio_device_test.cpp
   unit/decode_test.cpp
   unit/engine_render_test.cpp
+  unit/envelope_test.cpp
   unit/engine_telemetry_test.cpp
   unit/fixture_decode_test.cpp
   unit/garbage_ring_test.cpp

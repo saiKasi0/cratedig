@@ -15,6 +15,7 @@ target_sources(
             ${CMAKE_CURRENT_SOURCE_DIR}
             FILES
             rt/arch.hpp
+            rt/envelope.hpp
             rt/garbage_ring.hpp
             rt/handoff_ring.hpp
             rt/interpolator.hpp

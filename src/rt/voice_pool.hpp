@@ -1,9 +1,12 @@
 #ifndef CRATEDIG_RT_VOICE_POOL_HPP
 #define CRATEDIG_RT_VOICE_POOL_HPP
 
+#include "rt/envelope.hpp"
 #include "rt/interpolator.hpp"
+#include "rt/pad_config.hpp"
 #include "rt/sample.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
@@ -39,15 +42,32 @@ inline constexpr float kPhaseToFloat = 1.0F / 4'294'967'296.0F;
 
 // One sounding note.
 //
-// Holds a shared_ptr rather than a raw pointer so a sample cannot be freed while
-// a voice is still reading it. That ownership is exactly why voices must retire
-// through a GarbageRing: dropping the last reference here would run the deleter
-// on the audio thread.
+// Holds a shared_ptr rather than a raw pointer so nothing it reads can be freed
+// underneath it. That ownership is exactly why voices must retire through a
+// GarbageRing: dropping the last reference here would run the deleter on the
+// audio thread.
+//
+// It holds the PadConfig, not the Sample. A voice reads the slice bounds, the
+// envelope spec, the gain and the tuning as well as the audio, and after a live
+// reassignment the pad's config pointer has already moved on -- so the voice has
+// to own the whole thing it is playing, not just the buffer. The Sample stays
+// alive transitively, because the config holds it.
 struct Voice {
-  std::shared_ptr<const Sample> sample;
+  std::shared_ptr<const PadConfig> config;
   PhaseFixed phase = 0;
   PhaseFixed phase_step = kPhaseOne;
   float gain = 0.0F;
+
+  Envelope env;
+
+  // Resolved once at trigger, so the inner loop never re-derives them from the
+  // config or re-clamps against the sample length.
+  std::size_t start_frame = 0;
+  std::size_t end_frame = 0;
+  std::size_t fade_in = 0;
+  std::size_t fade_out = 0;
+  float inv_fade_in = 0.0F;
+  float inv_fade_out = 0.0F;
 
   // Trigger sequence number. Voice stealing picks the smallest, which makes
   // "steal the oldest" an exact rule rather than "whichever we happen to find".
@@ -59,13 +79,13 @@ struct Voice {
   // is therefore not part of the determinism contract.
   float peak = 0.0F;
 
-  // Which pad started this voice. Carried so the engine can attribute level and
-  // playhead back to a pad without a side table; M3's choke groups need the same
-  // answer, and adding it then would mean touching every trigger path twice.
+  // Which pad started this voice. Carried alongside config->pad so telemetry and
+  // choke can read it without dereferencing, and so a voice keeps its
+  // attribution even as the pad's config moves on underneath it.
   std::uint8_t pad = 0;
 
-  // Producing audio. A voice that has run off the end of its sample clears this
-  // but keeps `sample` until the GarbageRing accepts it — see reclaim().
+  // Producing audio. A voice that has run off the end of its slice clears this
+  // but keeps `config` until the GarbageRing accepts it — see reclaim().
   bool active = false;
 };
 
@@ -81,10 +101,10 @@ class VoicePool {
  public:
   [[nodiscard]] static constexpr std::size_t capacity() noexcept { return Capacity; }
 
-  // AUDIO THREAD. Starts `sample` on a free voice, stealing the oldest if the
-  // pool is full.
+  // AUDIO THREAD. Starts `config`'s slice on a free voice, stealing the oldest
+  // if the pool is full, and chokes anything else in the same choke group.
   //
-  // `garbage` receives any sample displaced from the reused slot. It is
+  // `garbage` receives any config displaced from the reused slot. It is
   // templated rather than a GarbageRing<N> so the pool does not have to know the
   // ring's capacity, and so tests can substitute a counting sink.
   //
@@ -93,34 +113,95 @@ class VoicePool {
   // stalled. Dropping the hit is the correct outcome there: the alternative is
   // releasing a reference on the audio thread.
   template <typename GarbageSink>
-  bool trigger(const std::shared_ptr<const Sample>& sample, float gain,
-               std::uint32_t engine_sample_rate, GarbageSink& garbage,
-               std::uint8_t pad = 0) noexcept {
-    if (sample == nullptr || sample->empty() || engine_sample_rate == 0) {
+  bool trigger(const std::shared_ptr<const PadConfig>& config, float velocity,
+               std::uint32_t engine_sample_rate, GarbageSink& garbage) noexcept {
+    if (config == nullptr || config->sample == nullptr || config->sample->empty() ||
+        engine_sample_rate == 0) {
+      return false;
+    }
+    const Sample& sample = *config->sample;
+
+    // Resolved before a slot is taken, so a config describing an empty slice
+    // cannot leave a stolen voice silent and un-stealable.
+    const std::size_t frames = sample.num_frames();
+    const std::size_t start = std::min(config->start_frame, frames);
+    const std::size_t end = config->end_frame == 0 ? frames : std::min(config->end_frame, frames);
+    if (end <= start) {
       return false;
     }
 
-    Voice* slot = acquire_slot(sample, garbage);
+    Voice* slot = acquire_slot(config, garbage);
     if (slot == nullptr) {
       return false;
     }
 
-    // The slot is now either empty or already holding this exact sample.
+    // The slot is now either empty or already holding this exact config.
     // Copying the shared_ptr is an atomic increment: no allocation, no lock, and
     // because the slot is empty it cannot release a reference on this thread.
-    assert((slot->sample == nullptr || slot->sample == sample) &&
-           "VoicePool: reusing a slot that still owns a different sample");
-    if (slot->sample == nullptr) {
-      slot->sample = sample;
+    assert((slot->config == nullptr || slot->config == config) &&
+           "VoicePool: reusing a slot that still owns a different config");
+    if (slot->config == nullptr) {
+      slot->config = config;
     }
-    slot->phase = 0;
-    slot->phase_step = step_for(*sample, engine_sample_rate);
-    slot->gain = gain;
+
+    const std::size_t length = end - start;
+    // Half the slice each at most, so the two fades can never overlap and a
+    // one-frame slice cannot divide by a clamped-to-zero length.
+    const std::size_t half = length / 2;
+    slot->fade_in = std::min(config->fade_in_frames, half);
+    slot->fade_out = std::min(config->fade_out_frames, half);
+    slot->inv_fade_in = slot->fade_in == 0 ? 0.0F : 1.0F / static_cast<float>(slot->fade_in);
+    slot->inv_fade_out = slot->fade_out == 0 ? 0.0F : 1.0F / static_cast<float>(slot->fade_out);
+
+    slot->start_frame = start;
+    slot->end_frame = end;
+    slot->phase = static_cast<PhaseFixed>(start) << kPhaseFractionBits;
+    slot->phase_step = step_for(sample, engine_sample_rate, config->pitch_ratio);
+    slot->gain = velocity * config->gain;
     slot->started_at = m_next_sequence++;
     slot->peak = 0.0F;
-    slot->pad = pad;
+    slot->pad = config->pad;
+    slot->env.trigger(config->env);
     slot->active = true;
+
+    // After the new voice is live, and skipping it by identity rather than by
+    // pad: retriggering a pad that chokes its own group must cut the previous
+    // hit, which is exactly what a closed hi-hat does to itself.
+    choke_group(config->choke_group, slot);
     return true;
+  }
+
+  // AUDIO THREAD. The player let go of a pad.
+  //
+  // Only gate voices care. A one-shot ignoring note-off is the definition of
+  // one-shot, so it lives here rather than as a condition at every call site --
+  // which matters because M3's keyboard, M4's MIDI and M5's sequencer will all
+  // send note-offs without knowing how the pad is configured.
+  void note_off(std::uint8_t pad) noexcept {
+    for (Voice& voice : m_voices) {
+      if (voice.active && voice.pad == pad && voice.config != nullptr &&
+          voice.config->trigger == TriggerMode::kGate) {
+        voice.env.release();
+      }
+    }
+  }
+
+  // AUDIO THREAD. Releases every sounding voice in `group`, except `keep`.
+  //
+  // Group 0 means "not in a group" and chokes nothing -- otherwise every
+  // unconfigured pad would cut every other one, which is a spectacular default.
+  void choke_group(std::uint8_t group, const Voice* keep) noexcept {
+    if (group == 0) {
+      return;
+    }
+    for (Voice& voice : m_voices) {
+      if (&voice == keep || !voice.active || voice.config == nullptr) {
+        continue;
+      }
+      if (voice.config->choke_group == group) {
+        voice.env.release();
+      }
+    }
   }
 
   // AUDIO THREAD. Mixes every active voice into `channels`, additively.
@@ -161,15 +242,15 @@ class VoicePool {
   std::size_t reclaim(GarbageSink& garbage) noexcept {
     std::size_t reclaimed = 0;
     for (Voice& voice : m_voices) {
-      if (voice.active || voice.sample == nullptr) {
+      if (voice.active || voice.config == nullptr) {
         continue;
       }
-      if (garbage.retire(std::move(voice.sample))) {
+      if (garbage.retire(std::move(voice.config))) {
         ++reclaimed;
       } else {
         // retire() left the pointer with us on failure. Put it back so the slot
         // stays non-free and we try again next block.
-        assert(voice.sample != nullptr && "GarbageRing::retire must not consume on failure");
+        assert(voice.config != nullptr && "GarbageRing::retire must not consume on failure");
       }
     }
     return reclaimed;
@@ -183,13 +264,13 @@ class VoicePool {
     return count;
   }
 
-  // Voices that have finished but still hold a sample the janitor has not taken.
+  // Voices that have finished but still hold a config the janitor has not taken.
   // Persistently non-zero means the garbage ring is undersized or the janitor
   // is not running.
   [[nodiscard]] std::size_t pending_reclaim_count() const noexcept {
     std::size_t count = 0;
     for (const Voice& voice : m_voices) {
-      count += (!voice.active && voice.sample != nullptr) ? 1U : 0U;
+      count += (!voice.active && voice.config != nullptr) ? 1U : 0U;
     }
     return count;
   }
@@ -197,30 +278,36 @@ class VoicePool {
   [[nodiscard]] std::uint64_t triggers_started() const noexcept { return m_next_sequence; }
 
  private:
-  [[nodiscard]] static PhaseFixed step_for(const Sample& sample,
-                                           std::uint32_t engine_sample_rate) noexcept {
-    // Deterministic: the same two integers always produce the same step, so the
-    // same trigger always plays the same frames.
-    const double ratio =
+  [[nodiscard]] static PhaseFixed step_for(const Sample& sample, std::uint32_t engine_sample_rate,
+                                           float pitch_ratio) noexcept {
+    // Deterministic: the same inputs always produce the same step, so the same
+    // trigger always plays the same frames. Computed in double and truncated
+    // once, rather than accumulated -- see the PhaseFixed note above.
+    const double rate_ratio =
         static_cast<double>(sample.sample_rate()) / static_cast<double>(engine_sample_rate);
-    return static_cast<PhaseFixed>(ratio * static_cast<double>(kPhaseOne));
+    // A non-positive or non-finite ratio would make phase run backwards or stop,
+    // and this value crossed a thread boundary. Clamped rather than asserted:
+    // the audio thread does not get to abort on bad input.
+    const double tuning =
+        pitch_ratio > 0.0F && pitch_ratio < 64.0F ? static_cast<double>(pitch_ratio) : 1.0;
+    return static_cast<PhaseFixed>(rate_ratio * tuning * static_cast<double>(kPhaseOne));
   }
 
   [[nodiscard]] Voice* find_free_slot() noexcept {
     // Lowest free index, never "the first one we notice": voice identity has to
     // be reproducible for the offline renderer to match the live one.
     for (Voice& voice : m_voices) {
-      if (!voice.active && voice.sample == nullptr) {
+      if (!voice.active && voice.config == nullptr) {
         return &voice;
       }
     }
     return nullptr;
   }
 
-  // Returns a slot that is either empty or already owns `sample`, or nullptr if
+  // Returns a slot that is either empty or already owns `config`, or nullptr if
   // no slot can be made available without breaking the no-destruction rule.
   template <typename GarbageSink>
-  [[nodiscard]] Voice* acquire_slot(const std::shared_ptr<const Sample>& sample,
+  [[nodiscard]] Voice* acquire_slot(const std::shared_ptr<const PadConfig>& config,
                                     GarbageSink& garbage) noexcept {
     if (Voice* free_slot = find_free_slot(); free_slot != nullptr) {
       return free_slot;
@@ -241,29 +328,54 @@ class VoicePool {
 
     // Retriggering a pad that is already sounding is the single most common
     // thing anyone does with a sampler — a rolled hi-hat, a stuttered kick. When
-    // the stolen voice already holds this exact sample there is nothing to hand
+    // the stolen voice already holds this exact config there is nothing to hand
     // the janitor: reusing the reference in place means zero refcount traffic
     // and, more importantly, zero garbage-ring pressure. Retiring here instead
     // would let a fast roll fill the ring and start dropping hits.
-    if (oldest->sample == sample) {
+    //
+    // "This exact config" and not "this exact sample": after a live
+    // reassignment the pad has a new config, and reusing the slot in place would
+    // leave the voice reading the old slice bounds and envelope.
+    if (oldest->config == config) {
       oldest->active = false;
+      oldest->env.stop();
       return oldest;
     }
 
-    // Different sample: the displaced one must reach the janitor before the slot
+    // Different config: the displaced one must reach the janitor before the slot
     // is reused. If the ring is full we cannot steal, because the only way to
     // proceed would be to drop the reference here — on the audio thread.
-    if (!garbage.retire(std::move(oldest->sample))) {
+    if (!garbage.retire(std::move(oldest->config))) {
       return nullptr;
     }
     oldest->active = false;
+    oldest->env.stop();
     return oldest;
+  }
+
+  // The declick gain for one position within the slice: a linear ramp up over
+  // the first fade_in frames and down over the last fade_out.
+  //
+  // Two compares and at most one multiply per frame, and the compares predict
+  // almost perfectly -- a slice is thousands of frames long and the fades are
+  // tens. The alternative, splitting the block into three regions, would mean
+  // three loops to maintain and three places for the phase arithmetic to
+  // disagree with itself.
+  [[nodiscard]] static float declick_gain(const Voice& voice, std::size_t index) noexcept {
+    const std::size_t into = index - voice.start_frame;
+    if (into < voice.fade_in) {
+      return static_cast<float>(into) * voice.inv_fade_in;
+    }
+    const std::size_t remaining = voice.end_frame - index;
+    if (remaining <= voice.fade_out) {
+      return static_cast<float>(remaining) * voice.inv_fade_out;
+    }
+    return 1.0F;
   }
 
   static void render_voice(Voice& voice, std::span<float* const> channels,
                            std::size_t num_frames) noexcept {
-    const Sample& sample = *voice.sample;
-    const std::size_t sample_frames = sample.num_frames();
+    const Sample& sample = *voice.config->sample;
     const std::uint16_t sample_channels = sample.num_channels();
     const std::size_t out_channels = channels.size();
 
@@ -274,12 +386,32 @@ class VoicePool {
 
     for (std::size_t frame = 0; frame < num_frames; ++frame) {
       const auto index = static_cast<std::size_t>(voice.phase >> kPhaseFractionBits);
-      if (index >= sample_frames) {
+
+      // The END OF THE SLICE, not the end of the sample. This is the line that
+      // turns a sample player into a chopper.
+      if (index >= voice.end_frame) {
         voice.active = false;
         voice.peak = block_peak;
         return;
       }
 
+      // A released envelope reaching zero ends the voice too -- otherwise a
+      // choked hit would hold its slot silently until its slice ran out, and
+      // sixteen of those exhaust the pool.
+      //
+      // Checked BEFORE next(), not after: next() returns the current level and
+      // then advances, so testing afterwards would discard the frame it just
+      // produced. That frame is the last of the release and is nearly silent, so
+      // dropping it is inaudible -- but it also makes the envelope's frame count
+      // depend on where the block boundary fell, which is exactly the class of
+      // bug the frame-denominated design exists to rule out.
+      if (voice.env.idle()) {
+        voice.active = false;
+        voice.peak = block_peak;
+        return;
+      }
+
+      const float amplitude = voice.gain * voice.env.next() * declick_gain(voice, index);
       const auto fraction = static_cast<float>(voice.phase & kPhaseFractionMask) * kPhaseToFloat;
       const auto offset = static_cast<std::ptrdiff_t>(index);
 
@@ -292,10 +424,13 @@ class VoicePool {
         const float* frame0 = sample.frame0(source_channel);
 
         // The guard frames are what make these four reads safe at index 0 and at
-        // sample_frames - 1 without a bounds check here.
+        // num_frames - 1 without a bounds check here. A slice boundary in the
+        // MIDDLE of the sample needs no guards at all -- there is real audio on
+        // both sides of it, which is exactly why it clicks and why declick_gain
+        // exists.
         const float value = hermite4(frame0[offset - 1], frame0[offset], frame0[offset + 1],
                                      frame0[offset + 2], fraction);
-        const float scaled = voice.gain * value;
+        const float scaled = amplitude * value;
         channels[channel][frame] += scaled;
 
         // Channel 0 only. A pad meter is one bar, so metering every channel

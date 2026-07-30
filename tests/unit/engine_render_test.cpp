@@ -1,4 +1,5 @@
 #include "engine/engine.hpp"
+#include "rt/pad_config.hpp"
 #include "rt/pad_event.hpp"
 #include "rt/sample.hpp"
 
@@ -24,8 +25,12 @@ engine::Engine::Config test_config() {
       .sample_rate = 48'000, .num_channels = kChannels, .max_block_frames = kMaxBlock, .seed = 0};
 }
 
-// Holds the output of a whole render pass as one contiguous, channel-interleaved
-// block so it can be hashed and compared byte for byte.
+// Holds the output of a whole render pass as one contiguous block so it can be
+// hashed and compared byte for byte.
+//
+// Layout is CHANNEL-MAJOR, matching rt::Sample and the engine's own buffers:
+// channel c occupies [c * total_frames, (c + 1) * total_frames). Nothing here
+// interleaves, because nothing downstream of the device layer ever does.
 class RenderCapture {
  public:
   RenderCapture(std::size_t total_frames, std::uint16_t channels)
@@ -334,6 +339,113 @@ TEST_CASE("Engine reports a full event ring rather than blocking", "[unit]") {
 
   CHECK(accepted == engine::Engine::kEventRingCapacity);
   CHECK(eng.dropped_events() == 10);
+}
+
+TEST_CASE("Engine plays only the slice a pad config names", "[unit]") {
+  // The whole point of M3, through the real path: a config published from the
+  // control thread, adopted by render(), and heard as a sub-range.
+  engine::Engine eng{test_config()};
+
+  // A ramp, so every source frame is identifiable by its value.
+  constexpr std::size_t kFrames = 1'000;
+  auto sample = std::make_shared<rt::Sample>(48'000U, static_cast<std::uint16_t>(1), kFrames);
+  std::span<float> data = sample->mutable_channel(0);
+  for (std::size_t frame = 0; frame < kFrames; ++frame) {
+    data[frame] = static_cast<float>(frame) / 1'000.0F;
+  }
+
+  REQUIRE(eng.publish_pad_config(
+      std::make_shared<const rt::PadConfig>(rt::PadConfig{.sample = std::move(sample),
+                                                          .pad = 0,
+                                                          .start_frame = 400,
+                                                          .end_frame = 420,
+                                                          .fade_in_frames = 0,
+                                                          .fade_out_frames = 0})));
+  trigger(eng, 0, 1.0F);
+
+  constexpr std::size_t kCaptured = 256;
+  RenderCapture capture{kCaptured, kChannels};
+  const std::array<std::size_t, 1> blocks{kCaptured};
+  capture.render_in_blocks(eng, blocks);
+
+  // Channel-major: channel 1 starts at kCaptured. A mono source feeds both.
+  const std::span<const float> samples = capture.samples();
+  CHECK(samples[0] == 0.4F);          // output frame 0 is source frame 400
+  CHECK(samples[19] == 0.419F);       // ...and frame 19 is source 419, the last
+  CHECK(samples[20] == 0.0F);         // half-open: source 420 is not played
+  CHECK(samples[kCaptured] == 0.4F);  // channel 1 matches
+  CHECK(eng.active_voices() == 0);
+}
+
+TEST_CASE("Engine honours note-off for a gate pad only", "[unit]") {
+  // The note-off path exists from M3 with one producer (the Kitty keyboard
+  // protocol). M4's MIDI and M5's sequencer become further producers of an event
+  // the engine already understands, rather than each inventing their own idea of
+  // what letting go means -- which is why it is tested here and not there.
+  auto make_pad = [](std::uint8_t pad, rt::TriggerMode mode) {
+    auto sample = std::make_shared<rt::Sample>(48'000U, static_cast<std::uint16_t>(1),
+                                               static_cast<std::size_t>(48'000));
+    std::span<float> data = sample->mutable_channel(0);
+    for (float& value : data) {
+      value = 0.5F;
+    }
+    return std::make_shared<const rt::PadConfig>(rt::PadConfig{.sample = std::move(sample),
+                                                               .pad = pad,
+                                                               .fade_in_frames = 0,
+                                                               .fade_out_frames = 0,
+                                                               .trigger = mode});
+  };
+
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.publish_pad_config(make_pad(0, rt::TriggerMode::kGate)));
+  REQUIRE(eng.publish_pad_config(make_pad(1, rt::TriggerMode::kOneShot)));
+  trigger(eng, 0, 1.0F);
+  trigger(eng, 1, 1.0F);
+
+  RenderCapture capture{4'096, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  capture.render_in_blocks(eng, blocks);
+  REQUIRE(eng.active_voices() == 2);
+
+  REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 0, .kind = rt::PadEventKind::kNoteOff}));
+  REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 1, .kind = rt::PadEventKind::kNoteOff}));
+  capture.render_in_blocks(eng, blocks);
+
+  // The gate pad let go; the one-shot kept playing its full second of audio.
+  CHECK(eng.active_voices() == 1);
+}
+
+TEST_CASE("Engine chokes a group through the event path", "[unit]") {
+  auto make_hat = [](std::uint8_t pad) {
+    auto sample = std::make_shared<rt::Sample>(48'000U, static_cast<std::uint16_t>(1),
+                                               static_cast<std::size_t>(48'000));
+    std::span<float> data = sample->mutable_channel(0);
+    for (float& value : data) {
+      value = 0.5F;
+    }
+    return std::make_shared<const rt::PadConfig>(rt::PadConfig{.sample = std::move(sample),
+                                                               .pad = pad,
+                                                               .fade_in_frames = 0,
+                                                               .fade_out_frames = 0,
+                                                               .choke_group = 1});
+  };
+
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.publish_pad_config(make_hat(0)));
+  REQUIRE(eng.publish_pad_config(make_hat(1)));
+
+  trigger(eng, 0, 1.0F);
+  RenderCapture capture{4'096, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  capture.render_in_blocks(eng, blocks);
+  REQUIRE(eng.active_voices() == 1);
+
+  trigger(eng, 1, 1.0F);
+  capture.render_in_blocks(eng, blocks);
+
+  // The open hat was cut by the closed one, rather than both ringing on for a
+  // second.
+  CHECK(eng.active_voices() == 1);
 }
 
 TEST_CASE("Engine retires finished samples to the janitor", "[unit]") {
