@@ -151,13 +151,58 @@ across toolchains.
 
 | Path | Owns | May depend on |
 |---|---|---|
-| `src/rt/` | SPSC rings, garbage ring, RT guard, `Result`, voice pool, mixer graph, DSP primitives | nothing outside `src/rt/`; header-only where possible |
+| `src/rt/` | SPSC rings, garbage ring, RT guard, `Result`, `Sample`, interpolator, voice pool, mixer graph, DSP primitives | nothing outside `src/rt/`; header-only where possible |
 | `src/engine/` | Engine facade, transport, sequencer, offline bounce | `src/rt/` |
 | `src/ingest/` | FFmpeg decode, resampling, peak pyramid, onset detection, yt-dlp subprocess | `src/rt/` types only |
 | `src/tui/` | FTXUI components: waveform, pad grid, mixer, command line | `src/engine/` via messages |
 | `src/lua/` | sol2 bindings, config loader, chop-algo and macro API | `src/engine/` |
 | `src/host/` | CLAP hosting; LV2 via lilv | `src/rt/` process interface |
 | `src/io/` | RtAudio + RtMidi device layer — the **only** files that may include those headers | `src/engine/` |
+
+`scripts/check_layering.sh` enforces this table mechanically and runs inside
+`scripts/ci.sh`. These are the rules that decay silently: nothing breaks the day
+someone includes `RtAudio.h` in the engine "just for the device enum" — it
+builds, it runs, and the cost only appears later when offline export or a
+container needs an engine that works with no sound card. A grep in CI is cheap;
+discovering at M6 that the engine cannot be built headless is not.
+
+It checks that device headers appear only in `src/io/` and only from a `.cpp`
+(a device type in a public header leaks one level down instead), that `src/rt/`
+includes nothing outside itself, that the engine never sees `io/` or `tui/`, and
+that ingest never sees the engine.
+
+## Sample lifetime
+
+A `Sample` is built by a worker, published as `shared_ptr<const Sample>`, and
+read — never written — by the audio thread. The lifetime question is who
+releases the last reference, because that runs a destructor and therefore a
+`free()`.
+
+- **Triggering** copies the pad table's `shared_ptr` into a voice. That is an
+  atomic increment: no allocation, no lock, legal in the callback.
+- **Finishing** hands the voice's reference to the `GarbageRing`, and the janitor
+  destroys it. A voice that cannot retire (ring full) keeps its reference and
+  stays un-reusable until the next block, rather than dropping it.
+- **Retriggering the same pad** reuses the reference already in the stolen voice.
+  Rolling one pad is the most common thing anyone does with a sampler; retiring
+  on every hit filled the ring and started dropping hits.
+
+The pad table itself is **written only before the stream starts**
+(`Engine::set_pad_sample`). The audio thread reads it without synchronisation,
+which is what keeps triggering free of atomics. Hot-swapping a loaded pad needs
+a publish protocol that arrives with the ingest path in M2/M3; offering it now
+would be an API the tests could not honestly check.
+
+## Playback position is fixed point
+
+Voice phase is 32.32 fixed point (`rt::PhaseFixed`), not a float or a double.
+
+A float accumulator loses fractional bits as the integer part grows, so
+block-size invariance would hold by luck for short samples and quietly fail for
+long ones — exactly the kind of bug that reproduces only on the one file someone
+cares about. Integer addition is exact, so the invariance holds by construction.
+32 fractional bits give a step resolution of ~2.3e-10 frames; over a ten-minute
+48 kHz file the accumulated position error is zero.
 
 ## Dependency staging
 
@@ -191,9 +236,38 @@ it.
 - Audio fixtures are fetched, never committed; `scripts/verify_fixtures.py` runs
   inside `ci.sh` so checksum drift fails the build (docs/TESTING.md).
 
-## Current state (M0)
+## Current state (M1)
 
-Implemented: `rt::kCacheLine`, `rt::Result`, `rt::SpscRing`, `rt::GarbageRing`,
-`RT_SCOPE`, and `engine::Engine::render()` producing deterministic silence.
-Everything else in the map above is a placeholder for the milestone that builds
-it — see `docs/ROADMAP.md`.
+CRATEDIG plays a sample. `cratedig <file>` decodes it, resamples it to the
+engine rate, assigns it to pad 0, opens the default output device, and triggers
+it on the spacebar.
+
+Implemented:
+
+- `src/rt/` — `kCacheLine`, `Result`, `SpscRing`, `GarbageRing`, `RT_SCOPE`,
+  `Sample`, `hermite4`, `PadEvent`, `VoicePool`.
+- `src/engine/` — pad table, event drain, voice mixing, garbage retirement.
+  Still device-free and thread-free: it spawns nothing, so offline rendering
+  stays single-threaded and reproducible.
+- `src/ingest/` — FFmpeg demux/decode, libsamplerate conversion at load.
+- `src/io/` — the RtAudio adapter, and the only file that includes `RtAudio.h`.
+- `src/tui/` — **temporary.** A termios shell that exists only so M1's
+  acceptance criterion can be met without pulling FTXUI forward from M2. It is
+  marked as such in every file and is deleted in M2, which builds the real
+  interface from `docs/design/*.html` with PTY snapshot tests as ground truth.
+
+Not yet built: the peak pyramid and waveform (M2), chopping and the pad grid
+(M3), MIDI and the sequencer (M4), the mixer graph (M5). See `docs/ROADMAP.md`.
+
+### Known M1 limitations
+
+These are deliberate scope boundaries, not oversights:
+
+- One pad is wired to one key. The `PadEvent` path is general; the shell is not.
+- `PadEvent::frame_offset` is carried but always zero — triggers land on block
+  boundaries. Sample-accurate offsets are M4's job, and the field exists now so
+  the wire format does not change when MIDI, the sequencer and the offline
+  renderer all already speak it.
+- Pad samples cannot be swapped while the stream runs (see above).
+- Voices have no envelope, so a sample plays to its end and stops. Per-pad ADSR
+  and choke groups are M3.

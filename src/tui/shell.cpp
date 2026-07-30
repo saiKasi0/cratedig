@@ -31,8 +31,8 @@ void print_status(const engine::Engine& engine, const io::AudioDevice& device) {
   // entire extent of this shell's "rendering".
   std::cout << "\r  voices " << engine.active_voices() << '/' << engine::Engine::kMaxVoices
             << "   xruns " << device.xrun_count() << "   dropped " << engine.dropped_events() << '/'
-            << engine.dropped_triggers() << "   frames " << engine.frames_rendered()
-            << "        " << std::flush;
+            << engine.dropped_triggers() << "   frames " << engine.frames_rendered() << "        "
+            << std::flush;
 }
 
 }  // namespace
@@ -68,8 +68,8 @@ int list_devices() {
 
   for (const io::DeviceInfo& info : devices) {
     std::cout << "  [" << info.id << "] " << info.name << "  " << info.output_channels << " ch, "
-              << info.preferred_sample_rate << " Hz" << (info.is_default_output ? "  (default)" : "")
-              << '\n';
+              << info.preferred_sample_rate << " Hz"
+              << (info.is_default_output ? "  (default)" : "") << '\n';
   }
   return 0;
 }
@@ -159,8 +159,7 @@ int run_shell(const ShellOptions& options) {
     if (key.has_value()) {
       switch (*key) {
         case kTriggerKey:
-          if (!engine.trigger_pad(
-                  rt::PadEvent{.pad = kPad, .velocity = 1.0F, .frame_offset = 0})) {
+          if (!engine.trigger_pad(rt::PadEvent{.pad = kPad, .velocity = 1.0F, .frame_offset = 0})) {
             // The ring is full, which at human typing speed means the audio
             // thread has stopped draining it. Worth seeing rather than swallowing.
             std::cerr << "\nwarning: event ring full, hit dropped\n";

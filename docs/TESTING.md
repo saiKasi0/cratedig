@@ -8,12 +8,33 @@ exists to keep it that way.
 | Layer | Location | Label | What it proves |
 |---|---|---|---|
 | Unit | `tests/unit/` | `unit` | One class/function. No threads unless the class is a threading primitive. Fast (< 1 s each). |
-| Stress | `tests/unit/`, tagged | `stress` | Concurrency primitives under millions of operations. Only meaningful under TSan. |
+| Stress | `tests/unit/`, tagged | `stress` | Concurrency primitives under load. Only meaningful under TSan. |
 | Integration | `tests/integration/` | `integration` | Several modules together — e.g. the engine running under the RT allocation guard. |
+| Fixture | tagged `[fixture]` | `fixture` | Needs the fetched CC0 starter pack. **Skips** when it is absent. |
+| Device | tagged `[device]` | `device` | Needs real audio hardware. **Skips** in a container. |
 | TUI snapshot | `tests/tui/` (M2+) | `tui` | PTY-driven render of FTXUI components against committed snapshots. |
 | End-to-end | `tests/e2e/` (M3+) | `e2e` | Offline render + scripted TUI session, checked by output hash. |
 
 Run a layer with `ctest --preset dev -L <label>`.
+
+`fixture` and `device` tests stay in the default run rather than being excluded,
+because a test that skips loudly is more useful than one nobody remembers to
+invoke. Neither can pass vacuously: both `SKIP()` with the reason and the command
+that would fix it.
+
+### Nothing important is allowed to depend on them
+
+Both skipping layers cover *material*, never *correctness*:
+
+- Decoder correctness is pinned by a WAV assembled byte by byte in
+  `tests/unit/decode_test.cpp`, with every expected float known exactly. No file,
+  no network, no ffmpeg CLI — it cannot skip.
+- Real-time safety is pinned by `tests/integration/rt_safety_test.cpp`, which
+  runs the engine and voices under the allocation guard with no hardware at all.
+- Determinism is pinned by synthetic samples built in the test, so the goldens
+  never depend on a fetched file.
+
+A machine with no sound card and no network still checks everything that matters.
 
 ## Catch2 conventions
 
@@ -51,6 +72,19 @@ the same platform. Tests enforce this in two ways:
 2. **Golden hashes** — an FNV-1a hash over the raw output bytes, compared against a
    value committed in the test. A hash change is a *behavior* change: it must be
    explained and justified in the same commit, never silently updated.
+
+**Invariance tests must render something.** The M0 version of this test rendered
+silence, which is block-invariant no matter how badly the phase is handled — it
+could not have failed. The current one plays voices at a *fractional* rate ratio
+(44.1 kHz material on a 48 kHz engine), and asserts the output is not all zeros
+so that three identical hashes cannot be three identical silences.
+
+That is what the 32.32 fixed-point voice phase exists for; see ARCHITECTURE.md.
+Negative-controlled by dropping the phase fraction at each block boundary, which
+fails both invariance tests and passes again when restored.
+
+The M0 silence golden `0xEB05052EA5B62325` is still asserted for an engine with
+nothing triggered. It costs nothing to keep and guards the whole render path.
 
 ## Golden vectors and golden audio
 

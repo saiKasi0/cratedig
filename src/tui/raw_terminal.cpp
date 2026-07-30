@@ -1,10 +1,10 @@
 #include "tui/raw_terminal.hpp"
 
-#include <csignal>
-#include <cstring>
-
 #include <termios.h>
 #include <unistd.h>
+
+#include <csignal>
+#include <cstring>
 
 namespace tui {
 namespace {
@@ -40,6 +40,7 @@ extern "C" void handle_fatal_signal(int signal_number) {
 
 void install_handler(int signal_number) noexcept {
   struct sigaction action {};
+
   action.sa_handler = &handle_fatal_signal;
   sigemptyset(&action.sa_mask);
   // Cast because glibc defines SA_RESETHAND as unsigned while sa_flags is int;
@@ -83,7 +84,9 @@ RawTerminal::RawTerminal() {
   install_handler(SIGHUP);
 }
 
-RawTerminal::~RawTerminal() { restore_terminal(); }
+RawTerminal::~RawTerminal() {
+  restore_terminal();
+}
 
 std::optional<char> RawTerminal::read_key(std::chrono::milliseconds timeout) const {
   if (!m_active) {
