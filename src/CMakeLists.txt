@@ -15,6 +15,7 @@ target_sources(
             ${CMAKE_CURRENT_SOURCE_DIR}
             FILES
             rt/arch.hpp
+            rt/garbage_ring.hpp
             rt/result.hpp
             rt/rt_scope.hpp
             rt/spsc_ring.hpp)

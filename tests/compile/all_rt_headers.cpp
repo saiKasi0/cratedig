@@ -7,6 +7,7 @@
 // they must work both ways. Nothing here runs; it only has to compile.
 
 #include "rt/arch.hpp"
+#include "rt/garbage_ring.hpp"
 #include "rt/result.hpp"
 #include "rt/spsc_ring.hpp"
 
@@ -21,6 +22,7 @@ enum class ProbeError : std::uint8_t { kNone, kOverflow };
 // is only partially checked.
 using ProbeResult = rt::Result<std::size_t, ProbeError>;
 using ProbeRing = rt::SpscRing<std::uint64_t, 8>;
+using ProbeGarbage = rt::GarbageRing<4>;
 
 constexpr ProbeResult kOkResult{std::size_t{7}};
 constexpr ProbeResult kErrResult{rt::Err<ProbeError>{ProbeError::kOverflow}};
@@ -32,6 +34,7 @@ static_assert(kErrResult.error() == ProbeError::kOverflow);
 static_assert(kErrResult.value_or(99) == 99);
 
 static_assert(ProbeRing::capacity() == 8);
+static_assert(ProbeGarbage::capacity() == 4);
 static_assert(rt::kCacheLine == 64);
 
 [[maybe_unused]] void instantiate_ring_members(ProbeRing& ring, std::uint64_t& slot) noexcept {

@@ -10,6 +10,7 @@ target_compile_options(cratedig_rt_nofx_check PRIVATE -fno-exceptions -fno-rtti)
 add_executable(
   cratedig_unit_tests
   unit/smoke_test.cpp
+  unit/garbage_ring_test.cpp
   unit/result_test.cpp
   unit/rt_scope_test.cpp
   unit/spsc_ring_test.cpp

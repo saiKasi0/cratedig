@@ -12,6 +12,10 @@
 #     Fires on every (buffer, length) and (start, end) pair in DSP code.
 #   modernize-use-trailing-return-type
 #     Contradicts the house style in CLAUDE.md.
+#   clang-analyzer-optin.core.EnumCastOutOfRange
+#     Fires inside Catch2's assertion macros on a legitimate flag-enum pattern.
+#     Path-sensitive analyzer results are not reliably suppressed by
+#     HeaderFilterRegex, so the check itself has to go.
 ---
 Checks: >
   bugprone-*,
@@ -25,10 +29,14 @@ Checks: >
   -bugprone-easily-swappable-parameters,
   -modernize-use-trailing-return-type,
   -modernize-avoid-c-arrays,
-  -clang-analyzer-optin.performance.Padding
+  -clang-analyzer-optin.performance.Padding,
+  -clang-analyzer-optin.core.EnumCastOutOfRange
 
 WarningsAsErrors: '*'
-HeaderFilterRegex: '(src|tests)/.*\.(hpp|cpp)$'
+# Only our own headers. Must be specific enough to exclude the FetchContent tree:
+# a bare '(src|tests)/' also matches _deps/catch2-src/src/catch2/..., which made
+# clang-tidy report (and, with WarningsAsErrors, fail on) third-party code.
+HeaderFilterRegex: '.*/(src/(rt|engine|io|ingest|tui|lua|host)|tests/(unit|integration|compile|tui|e2e))/[^/]*\.(hpp|cpp)$'
 FormatStyle: file
 
 CheckOptions:
