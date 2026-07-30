@@ -10,22 +10,26 @@ target_compile_options(cratedig_rt_nofx_check PRIVATE -fno-exceptions -fno-rtti)
 add_executable(
   cratedig_unit_tests
   unit/smoke_test.cpp
+  unit/engine_render_test.cpp
   unit/garbage_ring_test.cpp
   unit/result_test.cpp
   unit/rt_scope_test.cpp
   unit/spsc_ring_test.cpp
+  integration/rt_safety_test.cpp
   # The guard's operator new/delete replacements must be linked into the
   # executable directly, not via a library — see src/CMakeLists.txt.
   $<TARGET_OBJECTS:cratedig_rt_guard>)
 
 target_link_libraries(
-  cratedig_unit_tests PRIVATE Catch2::Catch2WithMain cratedig_rt cratedig_warnings
+  cratedig_unit_tests PRIVATE Catch2::Catch2WithMain cratedig_rt cratedig_engine cratedig_warnings
                               cratedig_sanitizer)
 
 # Building the no-exceptions check is part of building the tests.
 add_dependencies(cratedig_unit_tests cratedig_rt_nofx_check)
 
-catch_discover_tests(cratedig_unit_tests PROPERTIES LABELS unit)
+# Labels come from each TEST_CASE's Catch2 tag, so the integration cases in this
+# binary are labelled integration rather than unit.
+catch_discover_tests(cratedig_unit_tests ADD_TAGS_AS_LABELS)
 
 # --- standalone integration executables ---------------------------------------
 # The default violation handler aborts, so it cannot be exercised from inside the
