@@ -79,6 +79,8 @@ TEST_CASE("Engine survives control, audio and janitor threads at once", "[stress
   std::atomic<bool> audio_done{false};
   std::atomic<std::uint64_t> events_sent{0};
   std::atomic<std::size_t> collected{0};
+  std::atomic<std::uint64_t> telemetry_reads{0};
+  std::atomic<bool> telemetry_saw_playing{false};
 
   std::thread audio([&] {
     for (std::size_t block = 0; block < kBlocks; ++block) {
@@ -130,11 +132,53 @@ TEST_CASE("Engine survives control, audio and janitor threads at once", "[stress
     collected.store(total, std::memory_order_relaxed);
   });
 
+  // A fourth lane: the UI, reading telemetry while the audio thread publishes it.
+  //
+  // This is what makes the telemetry block's atomics testable at all. Every
+  // field is written by the audio thread every block and read here with no
+  // synchronisation beyond relaxed atomics, so if any of them were a plain
+  // float or uint64_t this is where TSan would say so.
+  std::thread ui([&] {
+    std::uint64_t reads = 0;
+    bool saw_playing = false;
+    while (!audio_done.load(std::memory_order_acquire)) {
+      const engine::Telemetry state = eng.telemetry();
+      saw_playing = saw_playing || state.playing;
+      // Touch every field, so nothing is elided and every atomic is genuinely
+      // read on this thread.
+      volatile float sink = state.master_peak;
+      for (const float level : state.pad_peak) {
+        sink += level;
+      }
+      static_cast<void>(sink);
+      static_cast<void>(state.playhead_frame);
+      ++reads;
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    telemetry_reads.store(reads, std::memory_order_relaxed);
+    telemetry_saw_playing.store(saw_playing, std::memory_order_relaxed);
+  });
+
   audio.join();
   control.join();
   janitor.join();
+  ui.join();
 
   CHECK(eng.frames_rendered() == static_cast<std::uint64_t>(kBlocks) * kBlockFrames);
+
+  // Anti-vacuity guard: a UI thread that never ran would leave TSan nothing to
+  // inspect on this path. The read count is the right guard because the loop
+  // touches every telemetry field unconditionally -- TSan instruments the loads,
+  // not their values.
+  CHECK(telemetry_reads.load(std::memory_order_relaxed) > 0);
+
+  // Deliberately reported, not asserted. Whether a 200 us poll ever lands while
+  // a ~2-block voice is sounding depends entirely on the scheduler: the audio
+  // thread here renders as fast as it can rather than in real time, so the whole
+  // run can be over in a few milliseconds. Asserting it produced a test that
+  // passed on dev, asan and tsan and failed on ubsan for no reason but timing.
+  INFO("telemetry polls: " << telemetry_reads.load(std::memory_order_relaxed) << ", saw a voice: "
+                           << telemetry_saw_playing.load(std::memory_order_relaxed));
 
   // Nothing must be left holding a reference: every retired sample reached the
   // janitor, and no voice is stuck waiting for ring space.

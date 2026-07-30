@@ -3,7 +3,11 @@
 #include "rt/rt_scope.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <span>
 #include <utility>
 
 namespace engine {
@@ -63,12 +67,16 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
     // Copying the shared_ptr is an atomic increment — allocation-free and
     // lock-free, so it is legal here. The voice releases it through the garbage
     // ring, never by dropping it on this thread.
-    if (!m_voices.trigger(sample, event.velocity, m_config.sample_rate, m_garbage)) {
-      m_dropped_triggers.fetch_add(1, std::memory_order_relaxed);
+    if (!m_voices.trigger(sample, event.velocity, m_config.sample_rate, m_garbage, event.pad)) {
+      m_published.dropped_triggers.fetch_add(1, std::memory_order_relaxed);
     }
   }
 
   m_voices.render_add(channels, num_frames);
+
+  // Before reclaim(), which clears finished voices: a voice that ended inside
+  // this block still has a position and a level worth showing for one frame.
+  publish_telemetry(channels, num_frames);
 
   // After rendering, so a voice that ended inside this block is handed over in
   // the same block it finished. Failure here is not an error: the voice keeps
@@ -77,8 +85,77 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
 
   // relaxed: publishes progress to the UI's poll loop; nothing else is ordered
   // by it, and the audio thread is the only writer.
-  m_frames_rendered.store(m_frames_rendered.load(std::memory_order_relaxed) + num_frames,
-                          std::memory_order_relaxed);
+  m_published.frames_rendered.store(
+      m_published.frames_rendered.load(std::memory_order_relaxed) + num_frames,
+      std::memory_order_relaxed);
+}
+
+void Engine::publish_telemetry(std::span<float* const> channels, std::size_t num_frames) noexcept {
+  // Linear fall rather than exponential: one multiply and a subtract, no
+  // transcendental in the audio callback, and on a small bar meter the
+  // difference is not visible. Deriving it from num_frames rather than from a
+  // per-block constant keeps the fall time the same whatever block size the
+  // device negotiated.
+  const auto elapsed = static_cast<float>(num_frames) / static_cast<float>(m_config.sample_rate);
+  const float fall = elapsed / kPeakFallSeconds;
+
+  std::array<float, rt::kNumPads> pad_peak{};
+  std::uint64_t newest_sequence = 0;
+  std::uint64_t playhead = kNothingPlaying;
+
+  for (const rt::Voice& voice : m_voices.voices()) {
+    if (voice.pad < rt::kNumPads) {
+      pad_peak[voice.pad] = std::max(pad_peak[voice.pad], voice.peak);
+    }
+    // The newest voice wins the playhead. With one pad it makes no difference;
+    // with a chord it means the marker follows the hit you just played rather
+    // than whichever slot the loop reached last.
+    if (voice.active && (playhead == kNothingPlaying || voice.started_at >= newest_sequence)) {
+      newest_sequence = voice.started_at;
+      const std::uint64_t frame =
+          static_cast<std::uint64_t>(voice.phase >> rt::kPhaseFractionBits) & kPlayheadFrameMask;
+      playhead = (static_cast<std::uint64_t>(voice.pad) << kPlayheadPadShift) | frame;
+    }
+  }
+
+  for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+    const float previous = m_published.pad_peak[pad].load(std::memory_order_relaxed);
+    m_published.pad_peak[pad].store(std::max(pad_peak[pad], previous - fall),
+                                    std::memory_order_relaxed);
+  }
+
+  float master = 0.0F;
+  for (float* channel : channels) {
+    for (std::size_t frame = 0; frame < num_frames; ++frame) {
+      const float value = channel[frame];
+      master = std::max(master, value < 0.0F ? -value : value);
+    }
+  }
+  const float previous_master = m_published.master_peak.load(std::memory_order_relaxed);
+  m_published.master_peak.store(std::max(master, previous_master - fall),
+                                std::memory_order_relaxed);
+
+  // relaxed everywhere: the UI wants a recent value, not a synchronised one, and
+  // an acquire/release pair here would put a barrier in the audio thread's hot
+  // path to make a meter one frame fresher.
+  m_published.playhead.store(playhead, std::memory_order_relaxed);
+}
+
+Telemetry Engine::telemetry() const noexcept {
+  Telemetry snapshot;
+
+  const std::uint64_t playhead = m_published.playhead.load(std::memory_order_relaxed);
+  snapshot.playing = playhead != kNothingPlaying;
+  if (snapshot.playing) {
+    snapshot.playhead_frame = playhead & kPlayheadFrameMask;
+    snapshot.playhead_pad = static_cast<std::uint8_t>(playhead >> kPlayheadPadShift);
+  }
+
+  snapshot.master_peak = m_published.master_peak.load(std::memory_order_relaxed);
+  for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+    snapshot.pad_peak[pad] = m_published.pad_peak[pad].load(std::memory_order_relaxed);
+  }
+  return snapshot;
 }
 
 std::size_t Engine::collect_garbage() noexcept {

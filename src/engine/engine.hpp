@@ -1,6 +1,7 @@
 #ifndef CRATEDIG_ENGINE_ENGINE_HPP
 #define CRATEDIG_ENGINE_ENGINE_HPP
 
+#include "rt/arch.hpp"
 #include "rt/garbage_ring.hpp"
 #include "rt/pad_event.hpp"
 #include "rt/sample.hpp"
@@ -11,10 +12,32 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <span>
 
 namespace engine {
+
+// What the interface needs to know about what the audio thread is doing, as one
+// consistent snapshot.
+//
+// None of this feeds back into the audio path, so it is deliberately NOT part of
+// the determinism contract: the peak fall rate depends on the block size, which
+// varies with the device, while render()'s output does not.
+struct Telemetry {
+  // Position within the sample of the most recently started voice still
+  // sounding, and which pad it came from. `playing` is false when nothing is.
+  std::uint64_t playhead_frame = 0;
+  std::uint8_t playhead_pad = 0;
+  bool playing = false;
+
+  // Loudest absolute output sample, with a fall time so a meter read at 30 Hz
+  // does not show whichever 5 ms block it happened to land on.
+  float master_peak = 0.0F;
+
+  // Per-pad level, same fall behaviour. Indexed by pad.
+  std::array<float, rt::kNumPads> pad_peak{};
+};
 
 // The engine facade. Everything audible eventually happens behind render().
 //
@@ -97,8 +120,20 @@ class Engine {
   // -- the compiler simply hoisted the load out of a poll loop, so a caller
   // watching for progress saw zero forever while the callback ran normally.
   [[nodiscard]] std::uint64_t frames_rendered() const noexcept {
-    return m_frames_rendered.load(std::memory_order_relaxed);
+    return m_published.frames_rendered.load(std::memory_order_relaxed);
   }
+
+  // ANY THREAD. What the audio thread published at the end of its last block.
+  //
+  // Every field is a relaxed atomic: the UI wants a recent value, not a
+  // synchronised one, and acquiring here would put a barrier in the audio
+  // thread's hot path to make a meter one frame fresher.
+  [[nodiscard]] Telemetry telemetry() const noexcept;
+
+  // Full scale to silence in this long, when nothing louder arrives. Fast enough
+  // to follow a drum pattern, slow enough that a 30 Hz UI never samples the gap
+  // between two hits and reports silence.
+  static constexpr float kPeakFallSeconds = 0.4F;
 
   [[nodiscard]] const Config& config() const noexcept { return m_config; }
 
@@ -110,7 +145,7 @@ class Engine {
 
   // Also audio-thread-written and UI-read; same reasoning as frames_rendered().
   [[nodiscard]] std::uint64_t dropped_triggers() const noexcept {
-    return m_dropped_triggers.load(std::memory_order_relaxed);
+    return m_published.dropped_triggers.load(std::memory_order_relaxed);
   }
 
   [[nodiscard]] std::uint64_t garbage_overflows() const noexcept {
@@ -118,8 +153,35 @@ class Engine {
   }
 
  private:
+  // The playhead is pad and frame packed into ONE 64-bit word rather than two
+  // atomics, so the UI can never read a frame position from one voice with the
+  // pad label of another. Low 56 bits are the frame -- 2.3e16 of them, about
+  // 15 000 years at 48 kHz -- and the top 8 are the pad.
+  static constexpr std::uint64_t kNothingPlaying = std::numeric_limits<std::uint64_t>::max();
+  static constexpr std::uint32_t kPlayheadPadShift = 56;
+  static constexpr std::uint64_t kPlayheadFrameMask = (std::uint64_t{1} << kPlayheadPadShift) - 1;
+
+  // Everything the audio thread writes and the UI reads, on its own cache lines.
+  //
+  // Grouped rather than scattered through the class because these are written
+  // every block and the rings below are touched by the control thread: left
+  // interleaved, a UI poll would keep invalidating the line the event ring lives
+  // on. Same reason CLAUDE.md asks for alignas(kCacheLine) on shared state.
+  struct alignas(rt::kCacheLine) Published {
+    std::atomic<std::uint64_t> frames_rendered{0};
+    std::atomic<std::uint64_t> dropped_triggers{0};
+
+    std::atomic<std::uint64_t> playhead{kNothingPlaying};
+
+    std::atomic<float> master_peak{0.0F};
+    std::array<std::atomic<float>, rt::kNumPads> pad_peak{};
+  };
+
+  // AUDIO THREAD, once per block, after rendering.
+  void publish_telemetry(std::span<float* const> channels, std::size_t num_frames) noexcept;
+
   Config m_config;
-  std::atomic<std::uint64_t> m_frames_rendered{0};
+  Published m_published;
 
   std::array<std::shared_ptr<const rt::Sample>, rt::kNumPads> m_pads{};
 
@@ -130,9 +192,6 @@ class Engine {
   // Written by the control thread only, and read by it -- no cross-thread access,
   // so no atomic.
   std::uint64_t m_dropped_events = 0;
-
-  // Written by the audio thread, read by the UI while it runs.
-  std::atomic<std::uint64_t> m_dropped_triggers{0};
 };
 
 }  // namespace engine

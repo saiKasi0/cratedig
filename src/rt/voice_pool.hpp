@@ -53,6 +53,17 @@ struct Voice {
   // "steal the oldest" an exact rule rather than "whichever we happen to find".
   std::uint64_t started_at = 0;
 
+  // Loudest absolute value this voice contributed during the last block, on the
+  // first output channel. Written by render_voice, read by the engine when it
+  // publishes telemetry -- never by the DSP, so it cannot affect the audio and
+  // is therefore not part of the determinism contract.
+  float peak = 0.0F;
+
+  // Which pad started this voice. Carried so the engine can attribute level and
+  // playhead back to a pad without a side table; M3's choke groups need the same
+  // answer, and adding it then would mean touching every trigger path twice.
+  std::uint8_t pad = 0;
+
   // Producing audio. A voice that has run off the end of its sample clears this
   // but keeps `sample` until the GarbageRing accepts it — see reclaim().
   bool active = false;
@@ -83,7 +94,8 @@ class VoicePool {
   // releasing a reference on the audio thread.
   template <typename GarbageSink>
   bool trigger(const std::shared_ptr<const Sample>& sample, float gain,
-               std::uint32_t engine_sample_rate, GarbageSink& garbage) noexcept {
+               std::uint32_t engine_sample_rate, GarbageSink& garbage,
+               std::uint8_t pad = 0) noexcept {
     if (sample == nullptr || sample->empty() || engine_sample_rate == 0) {
       return false;
     }
@@ -105,6 +117,8 @@ class VoicePool {
     slot->phase_step = step_for(*sample, engine_sample_rate);
     slot->gain = gain;
     slot->started_at = m_next_sequence++;
+    slot->peak = 0.0F;
+    slot->pad = pad;
     slot->active = true;
     return true;
   }
@@ -121,11 +135,19 @@ class VoicePool {
 
     for (Voice& voice : m_voices) {
       if (!voice.active) {
+        voice.peak = 0.0F;  // a silent voice must not hold a meter up
         continue;
       }
       render_voice(voice, channels, num_frames);
     }
   }
+
+  // AUDIO THREAD. Read-only view of the pool, for publishing telemetry.
+  //
+  // Const rather than a bespoke accessor per consumer: the engine already needs
+  // pad, peak, phase and active together to publish a playhead and pad meters,
+  // and M3's choke groups and M5's per-strip metering want the same walk.
+  [[nodiscard]] std::span<const Voice> voices() const noexcept { return m_voices; }
 
   // AUDIO THREAD, once per block after rendering. Hands finished voices' samples
   // to the janitor.
@@ -245,10 +267,16 @@ class VoicePool {
     const std::uint16_t sample_channels = sample.num_channels();
     const std::size_t out_channels = channels.size();
 
+    // Tracked locally and stored once, rather than through voice.peak on every
+    // frame: this is a register, that is a memory round-trip in the innermost
+    // loop of the audio callback.
+    float block_peak = 0.0F;
+
     for (std::size_t frame = 0; frame < num_frames; ++frame) {
       const auto index = static_cast<std::size_t>(voice.phase >> kPhaseFractionBits);
       if (index >= sample_frames) {
         voice.active = false;
+        voice.peak = block_peak;
         return;
       }
 
@@ -267,11 +295,21 @@ class VoicePool {
         // sample_frames - 1 without a bounds check here.
         const float value = hermite4(frame0[offset - 1], frame0[offset], frame0[offset + 1],
                                      frame0[offset + 2], fraction);
-        channels[channel][frame] += voice.gain * value;
+        const float scaled = voice.gain * value;
+        channels[channel][frame] += scaled;
+
+        // Channel 0 only. A pad meter is one bar, so metering every channel
+        // would double the work in the hottest loop in the program to produce a
+        // number nothing displays.
+        if (channel == 0) {
+          const float magnitude = scaled < 0.0F ? -scaled : scaled;
+          block_peak = magnitude > block_peak ? magnitude : block_peak;
+        }
       }
 
       voice.phase += voice.phase_step;
     }
+    voice.peak = block_peak;
   }
 
   std::array<Voice, Capacity> m_voices{};
