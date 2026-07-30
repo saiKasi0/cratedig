@@ -1,6 +1,7 @@
 build/
 .cache/
 .DS_Store
+__pycache__/
 
 # Audio fixtures are fetched by scripts/fetch_starter_pack.sh, never committed
 # (docs/TESTING.md). The manifest and hand-labeled ground truth ARE tracked.

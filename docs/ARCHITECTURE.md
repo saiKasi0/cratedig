@@ -154,7 +154,7 @@ across toolchains.
 | `src/rt/` | SPSC rings, garbage ring, RT guard, `Result`, `Sample`, interpolator, voice pool, mixer graph, DSP primitives | nothing outside `src/rt/`; header-only where possible |
 | `src/engine/` | Engine facade, transport, sequencer, offline bounce | `src/rt/` |
 | `src/ingest/` | FFmpeg decode, resampling, peak pyramid, onset detection, yt-dlp subprocess | `src/rt/` types only |
-| `src/tui/` | FTXUI components: waveform, pad grid, mixer, command line | `src/engine/` via messages |
+| `src/tui/` | FTXUI components: waveform, pad grid, mixer, command line. The **only** module that may include `ftxui/` headers | `src/engine/` via messages, `src/ingest/` for loading |
 | `src/lua/` | sol2 bindings, config loader, chop-algo and macro API | `src/engine/` |
 | `src/host/` | CLAP hosting; LV2 via lilv | `src/rt/` process interface |
 | `src/io/` | RtAudio + RtMidi device layer — the **only** files that may include those headers | `src/engine/` |
@@ -168,8 +168,10 @@ discovering at M6 that the engine cannot be built headless is not.
 
 It checks that device headers appear only in `src/io/` and only from a `.cpp`
 (a device type in a public header leaks one level down instead), that `src/rt/`
-includes nothing outside itself, that the engine never sees `io/` or `tui/`, and
-that ingest never sees the engine.
+includes nothing outside itself, that the engine never sees `io/` or `tui/`, that
+ingest never sees the engine, that `ftxui/` headers appear only in `src/tui/`, and
+that nothing in `src/tui/` includes `termios.h` — FTXUI owns raw mode and signal
+handling now, and two owners of one global means a user's terminal left unusable.
 
 ## Sample lifetime
 
@@ -192,6 +194,85 @@ The pad table itself is **written only before the stream starts**
 which is what keeps triggering free of atomics. Hot-swapping a loaded pad needs
 a publish protocol that arrives with the ingest path in M2/M3; offering it now
 would be an API the tests could not honestly check.
+
+## The peak pyramid
+
+The waveform is drawn from a multi-resolution min/max summary
+(`src/ingest/peak_pyramid.hpp`), not from the samples. At full zoom-out one
+column of a five-minute file spans ~147 000 frames; rescanning them 196 times per
+frame at 30 Hz is not a thing a UI can do.
+
+Min/max rather than averages, because a waveform drawn from averages loses every
+transient: a one-sample kick spike averaged over 147 000 frames is
+indistinguishable from silence.
+
+- **Base bin 256 frames, ratio 4.** The small ratio is the point: the level whose
+  bins fit inside a column is never more than 4x finer than the column, so
+  `summarize()` reads about five bins per column at *any* zoom. That bound, not
+  memory, is why the ratio is small.
+- **Memory is ~0.8% of the audio.** Five minutes of 48 kHz stereo is 115 MB of
+  samples and ~1.2 MB of pyramid.
+- **The guarantee is one-sided.** A column's reported range is a *superset* of the
+  truth, over-reporting by at most one bin. A transient can smear sideways by
+  less than a character; it can never disappear. Under-reporting would be a lie
+  about the audio; over-reporting is invisible at four dots per character.
+- **Exact when zoomed in.** Below one base bin per column, `summarize()` reads raw
+  frames. The pyramid is an acceleration structure, never a source of
+  approximation error the caller cannot reason about.
+- Built on the control thread at load — ~46 ms for five minutes of stereo.
+  Moving it onto a worker so the interface can appear first is M6's ingest job.
+
+Measured cost of one redraw of a five-minute file at full zoom-out: 0.004 ms with
+the pyramid, 6.8 ms without. `tests/tui/waveform_perf_test.cpp` asserts it.
+
+## Telemetry: what the audio thread tells the interface
+
+The audio thread publishes a small block of relaxed atomics at the end of every
+`render()` — playhead, per-pad level, master level — and the UI reads them
+whenever it draws. Everything is on its own cache lines
+(`alignas(kCacheLine)`), grouped rather than scattered through `Engine`, so a UI
+poll does not keep invalidating the line the control thread's event ring lives
+on.
+
+- **Relaxed, everywhere.** The UI wants a *recent* value, not a synchronised one.
+  An acquire/release pair here would put a barrier in the audio thread's hot path
+  to make a meter one frame fresher.
+- **The playhead is one packed word, not two atomics.** Pad in the top 8 bits,
+  frame in the low 56 (about 15 000 years at 48 kHz). Two atomics would let the
+  UI read a frame position from one voice with the pad label of another —
+  cosmetic today, wrong once M4 shows transport position.
+- **Meters fall linearly to zero over 0.4 s**, derived from `num_frames` so the
+  behaviour does not change with the block size the device negotiated. Linear
+  rather than exponential keeps a transcendental out of the callback. Both
+  failure modes it avoids are real: no fall pins the meter at the loudest thing
+  that ever happened, and no hold shows whichever 5 ms block a 30 Hz redraw
+  sampled — which, for a drum pattern, is usually silence.
+- **Telemetry is NOT part of the determinism contract.** The fall rate depends on
+  block size; `render()`'s output does not. The silence golden and the block-size
+  invariance tests are what guard that publishing it never perturbs a sample.
+
+## The interface is a pure function
+
+`tui::render(const UiState&, columns, rows) -> ftxui::Element`. `UiState` holds no
+`Engine`, no `AudioDevice`, no `Sample` and no clock, and the terminal size is a
+parameter rather than read from `ftxui::Terminal::Size()`.
+
+That is what makes the layout testable: a snapshot test builds a `UiState`
+literal and renders it to an offscreen `Screen` at three sizes in one process.
+Determinism comes from there being nothing non-deterministic in scope, rather
+than from suppressing sources of variance one at a time.
+
+The app assembles that struct once per frame from engine telemetry and a
+freshly-summarised set of peak bins, and re-summarises against the *current*
+width so a resize is a correct redraw rather than a stretched one.
+
+**Redraws are posted with `App::Post`, not `App::PostEvent`.** FTXUI's own
+documentation recommends `PostEvent(Event::Custom)` from a refresh thread, and in
+7.0.1 that is a data race: it lands in `MultiReceiverBuffer::Push`, which does an
+unsynchronised `push_back` on a deque shared with the main loop. `Post` carries
+the same event through `TaskRunner::PostTask`, whose queue is mutex-guarded. TSan
+found it; reading FTXUI's source is what settled that it was real rather than
+TSan mis-reading an uninstrumented library.
 
 ## Playback position is fixed point
 
@@ -217,7 +298,7 @@ it.
 | RtAudio, libsamplerate, CLI11 | M1 | static; RtAudio only reachable from `src/io/`, and its API set is pinned (ALSA on Linux, CoreAudio on macOS) so host-detected JACK/Pulse cannot change the binary |
 | FFmpeg | M1 | **system package, dynamically linked.** Not a FetchContent dependency — see docs/LICENSING.md. Version floor 5.1 (`AVChannelLayout` API) |
 | RtMidi | M4 | static; `src/io/` only |
-| FTXUI | M2 | |
+| FTXUI | M2 | v7.0.1, static; `src/tui/` only. Owns raw mode, signal handling and terminal restoration |
 | PFFFT | M3 | onset detection |
 | Lua 5.4 + sol2 | M7 | |
 | CLAP, lilv | M8 | lilv is a system package |
@@ -236,38 +317,83 @@ it.
 - Audio fixtures are fetched, never committed; `scripts/verify_fixtures.py` runs
   inside `ci.sh` so checksum drift fails the build (docs/TESTING.md).
 
-## Current state (M1)
+## Current state (M2)
 
-CRATEDIG plays a sample. `cratedig <file>` decodes it, resamples it to the
-engine rate, assigns it to pad 0, opens the default output device, and triggers
-it on the spacebar.
+CRATEDIG shows you the audio. `cratedig <file>` decodes it, resamples it to the
+engine rate, builds a peak pyramid, assigns it to pad 0, opens the default
+output device, and draws the PERFORM screen from `docs/design`: a braille
+waveform with a live playhead and a time ruler, a 4x4 pad grid with meters, a
+tabbed information panel, and a mode line. Space plays; `h l` scroll, `+ -`
+zoom, `f` fits, `g G` jump to the ends, `tab` switches the panel, `q` quits.
 
 Implemented:
 
 - `src/rt/` — `kCacheLine`, `Result`, `SpscRing`, `GarbageRing`, `RT_SCOPE`,
-  `Sample`, `hermite4`, `PadEvent`, `VoicePool`.
-- `src/engine/` — pad table, event drain, voice mixing, garbage retirement.
-  Still device-free and thread-free: it spawns nothing, so offline rendering
-  stays single-threaded and reproducible.
-- `src/ingest/` — FFmpeg demux/decode, libsamplerate conversion at load.
+  `Sample`, `hermite4`, `PadEvent`, `VoicePool` (now carrying pad and per-block
+  peak for telemetry).
+- `src/engine/` — pad table, event drain, voice mixing, garbage retirement, and
+  the published telemetry block. Still device-free and thread-free: it spawns
+  nothing, so offline rendering stays single-threaded and reproducible.
+- `src/ingest/` — FFmpeg demux/decode, libsamplerate conversion at load, and the
+  peak pyramid.
 - `src/io/` — the RtAudio adapter, and the only file that includes `RtAudio.h`.
-- `src/tui/` — **temporary.** A termios shell that exists only so M1's
-  acceptance criterion can be met without pulling FTXUI forward from M2. It is
-  marked as such in every file and is deleted in M2, which builds the real
-  interface from `docs/design/*.html` with PTY snapshot tests as ground truth.
+  The backend is constructed on first use, so `--no-audio` never initialises one.
+- `src/tui/` — FTXUI. `waveform.cpp` (braille, no FTXUI dependency),
+  `ui_state.cpp` (the view model), `render.cpp` (the pure layout function),
+  `theme.hpp` (colour roles), `app.cpp` (the loop), `cli.cpp` (`--version`,
+  `--list-devices`).
 
-Not yet built: the peak pyramid and waveform (M2), chopping and the pad grid
-(M3), MIDI and the sequencer (M4), the mixer graph (M5). See `docs/ROADMAP.md`.
+The M1 termios shell is gone. FTXUI owns raw mode, signal handling and terminal
+restoration.
 
-### Known M1 limitations
+Not yet built: chopping and the full pad map (M3), MIDI and the sequencer (M4),
+the mixer graph (M5). See `docs/ROADMAP.md`.
+
+### What M3 inherits
+
+- **The wave panel's ruler row is a placeholder for slice markers.** The mockups
+  draw numbered slice boundaries there; until there are slices, elapsed time is
+  what a listener actually wants to read off a waveform. Replacing it is a
+  change to `wave_ruler()` in `src/tui/render.cpp` and nothing else.
+- **The pad grid is drawn but only pad 0 is wired.** The QWERTY map from the
+  mockups is printed in the caption row already; binding all sixteen keys and
+  the PERFORM-mode key handling is M3's.
+- **`Voice::pad` exists** so choke groups have the attribution they need.
+- The `pattern` tab is a selectable placeholder; M4 fills it in rather than
+  re-cutting the layout.
+- The six new CC0 percussion loops in the starter pack are chopping material.
+
+### Known M2 limitations
 
 These are deliberate scope boundaries, not oversights:
 
-- One pad is wired to one key. The `PadEvent` path is general; the shell is not.
+- One pad is wired to one key. The `PadEvent` path is general; the key map is not.
 - `PadEvent::frame_offset` is carried but always zero — triggers land on block
   boundaries. Sample-accurate offsets are M4's job, and the field exists now so
   the wire format does not change when MIDI, the sequencer and the offline
   renderer all already speak it.
-- Pad samples cannot be swapped while the stream runs (see above).
+- Pad samples cannot be swapped while the stream runs: `set_pad_sample()` is
+  pre-start only, because the audio thread reads the pad table without
+  synchronisation. Hot-swapping needs a publish protocol, which arrives with the
+  ingest path in M3/M6.
 - Voices have no envelope, so a sample plays to its end and stops. Per-pad ADSR
   and choke groups are M3.
+- The playhead is drawn *inside* the wave panel rather than as a tick in its top
+  and bottom border as the mockups show. Reaching into an FTXUI `window`'s border
+  would mean hand-drawing the panel, and contorting FTXUI to imitate the mockups
+  is what CLAUDE.md says not to do.
+- The mockups' near-black background is not painted. Repainting a user's whole
+  terminal is the "un-terminal flourish" to drop silently; structure comes from
+  the colour roles instead.
+- **Loading blocks the interface.** `cratedig long_form_drums.flac` shows nothing
+  for 3.85 s: decode, resample and pyramid all happen before the first frame.
+  Measured split on the 5.5-minute fixture — 3.85 s at a 48 kHz engine rate
+  against 0.86 s at 44.1 kHz, where the resampler short-circuits to bit-exact
+  passthrough — so about three of those seconds are
+  `SRC_SINC_BEST_QUALITY` over 14.5 million frames. Moving ingest onto a worker
+  and showing a loading state is M6's job; the pyramid itself is only ~46 ms of
+  it and is not the problem.
+- A library that writes to stderr while the UI is up will corrupt the display —
+  there is no redirection. This is why `--no-audio` no longer constructs an
+  RtAudio: on a Linux box with no sound card, libasound wrote several lines onto
+  the terminal the TUI was drawing on.

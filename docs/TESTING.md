@@ -12,7 +12,7 @@ exists to keep it that way.
 | Integration | `tests/integration/` | `integration` | Several modules together — e.g. the engine running under the RT allocation guard. |
 | Fixture | tagged `[fixture]` | `fixture` | Needs the fetched CC0 starter pack. **Skips** when it is absent. |
 | Device | tagged `[device]` | `device` | Needs real audio hardware. **Skips** in a container. |
-| TUI snapshot | `tests/tui/` (M2+) | `tui` | PTY-driven render of FTXUI components against committed snapshots. |
+| TUI snapshot | `tests/tui/` | `tui` | Offscreen renders of the layout and one PTY-driven session, against committed snapshots. Also the M2 frame-budget acceptance. |
 | End-to-end | `tests/e2e/` (M3+) | `e2e` | Offline render + scripted TUI session, checked by output hash. |
 
 Run a layer with `ctest --preset dev -L <label>`.
@@ -249,7 +249,8 @@ are negative-controlled rather than assumed:
 |---|---|---|
 | Checksum drift | flip one byte of a fetched fixture | fails, printing manifest vs on-disk hash |
 | License policy | change a manifest row to `CC-BY-4.0` | fails, naming the allowed set |
-| Skip-when-absent | move the fetched files away | 5 tests skip with a reason; none fail, none pass |
+| Skip-when-absent | move the fetched files away | tests skip with a reason; none fail, none pass |
+| Derived provenance | name a source in `derived_from` that is not itself a fixture | fails, naming the unlisted source |
 
 Derived (transcoded) fixtures are **not** hash-enforced — ffmpeg writes an
 encoder tag into the WAV header and the bytes differ between builds. They are
@@ -257,6 +258,91 @@ validated by decoding instead: `kick_44k.wav` is a lossless transcode of
 `drum_heavy_kick.flac`, so the two must decode to identical samples through two
 different containers and two different decoders. That is a stronger check than a
 hash, because it would also catch a transcode that silently resampled.
+
+## The TUI snapshots
+
+`tests/tui/snapshots/*.txt` are **the ground truth for what CRATEDIG's interface
+is**; the mockups in `docs/design/` are what it aspires to (CLAUDE.md). A diff of
+one character is a real change to the product and has to be explained in the
+commit the same way a changed golden hash does.
+
+Two layers, and they catch different things:
+
+| Test | Renders | Catches |
+|---|---|---|
+| `layout_snapshot_test.cpp` | `UiState` literal → offscreen `Screen`, at 100x30, 80x24, 120x40, 60x20 and one below-minimum | Layout, degradation, colour roles |
+| `pty_session.py` | The real binary under a pseudo-terminal, driven by keystrokes | That the program starts, keys reach it, and it hands the terminal back |
+
+Removing the tab-key handler fails the PTY test with a precise row diff while all
+nine offscreen snapshots still pass — they set the tab in the `UiState` directly.
+That is the whole reason both exist.
+
+**Determinism comes from there being nothing non-deterministic in scope.**
+`render()` is a pure function of a plain struct: no engine, no device, no file, no
+clock. The one piece of global state that would leak in is FTXUI's *detected*
+colour support — whether the escape says `38;2;255;79;0` or `38;5;202` otherwise
+depends on which terminal launched the test — and the test pins it.
+
+Escape codes are stripped from the goldens. The colour roles are asserted
+separately through `Screen::CellAt`, because an ANSI-laden golden diff is
+unreadable and an unreadable diff gets accepted without being read.
+
+### Things learned the hard way here
+
+- **Trailing whitespace is content.** Every line of a terminal frame is padded to
+  the full width, so pre-commit's `trailing-whitespace`, `end-of-file-fixer` and
+  `mixed-line-ending` hooks rewrote all nine snapshots and broke the tests.
+  `tests/tui/snapshots/` is excluded from them.
+- **FTXUI redraws differentially**, so the byte stream with escapes stripped is
+  the first screen plus a pile of edits, not the screen. `pty_session.py`
+  contains a small terminal emulator for that reason; asserting on the raw
+  stream would pass just as happily if every frame after the first were garbage.
+- **Read boundaries split UTF-8.** Decoding each `read()` on its own turned
+  whichever box-drawing character straddled a boundary into a replacement
+  character — an intermittent failure by construction. Bytes are buffered and
+  decoded once.
+- **Uniqueness must go in the path, not the name.** The PTY fixture's filename
+  reaches the screen, in the header and the pad label, so a PID in it made the
+  snapshot non-deterministic. Found by running the test three times in a row.
+
+`scripts/update_tui_snapshots.sh` regenerates both layers and prints the diff.
+Look at the rendered output in a real terminal before running it (CLAUDE.md).
+
+## The frame-budget acceptance
+
+`tests/tui/waveform_perf_test.cpp` is the ROADMAP's M2 criterion — "5-minute file
+scrolls at full frame rate" — made measurable. It **never skips**: the buffer is
+synthesised in the test, so the acceptance holds with no network and no fixtures.
+A `[fixture]`-tagged variant runs the same measurement on the real
+`long_form_drums.flac`.
+
+Measured on an M-series Mac, worst case over 200 scrolling frames at full
+zoom-out, redrawing exactly as the app does:
+
+| Implementation | Worst ms/frame | |
+|---|---|---|
+| correct | 0.004 | |
+| level selection pinned to level 0 | 0.089 | correct, ~20x slower |
+| no pyramid, raw frames | 6.84 | **what the budget catches** |
+
+Pyramid build for five minutes of 48 kHz stereo: ~46 ms.
+
+The committed budget is **2 ms per frame**: ~500x above the real figure and ~3x
+below the no-pyramid figure. 60 fps is 16.67 ms for *everything*, and the
+waveform is one panel of one frame while the audio thread has a hard deadline of
+its own.
+
+**It deliberately does not catch a level-selection regression**, and the test says
+so. Pinning to level 0 is still correct and still 250x inside budget; choosing a
+level *coarser* than the column fails three of `peak_pyramid_test`'s containment
+tests instead, which is where a correctness question belongs. A perf threshold
+that claimed to guard correctness would be worse than one that admits it does not.
+
+Timing is only asserted where it means something. Under a sanitizer every load
+goes through instrumentation, so the budget is not checked, the buffer drops to
+30 seconds, and the `[fixture]` variant is skipped under TSan — at full size it
+took the TSan suite from 5 seconds to 80, for a single-threaded test with nothing
+for TSan to inspect.
 
 ## RT-safety testing
 
