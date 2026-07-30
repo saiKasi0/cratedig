@@ -24,7 +24,7 @@ constexpr char32_t kBrailleBase = 0x2800;
   const float clamped = std::clamp(value, -1.0F, 1.0F);
   const auto span = static_cast<float>(dot_rows - 1);
   const float position = (1.0F - clamped) * 0.5F * span;
-  const auto rounded = static_cast<long>(std::lround(position));
+  const long rounded = std::lround(position);
   return static_cast<std::size_t>(std::clamp<long>(rounded, 0, static_cast<long>(dot_rows - 1)));
 }
 

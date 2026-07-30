@@ -23,7 +23,9 @@ add_executable(
   unit/sample_test.cpp
   unit/spsc_ring_test.cpp
   unit/voice_pool_test.cpp
+  unit/wave_view_test.cpp
   unit/waveform_test.cpp
+  tui/layout_snapshot_test.cpp
   integration/engine_threading_test.cpp
   integration/rt_safety_test.cpp
   # The guard's operator new/delete replacements must be linked into the
@@ -39,6 +41,12 @@ target_link_libraries(
 # lives beside the sources because it is fetched once and reused by every preset.
 target_compile_definitions(
   cratedig_unit_tests PRIVATE CRATEDIG_STARTER_PACK_DIR="${CMAKE_SOURCE_DIR}/assets/starter-pack")
+
+# Snapshots live beside their test in the source tree, not the build tree: they
+# are committed goldens (docs/TESTING.md), and scripts/update_tui_snapshots.sh
+# rewrites them in place.
+target_compile_definitions(
+  cratedig_unit_tests PRIVATE CRATEDIG_TUI_SNAPSHOT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tui/snapshots")
 
 # Building the no-exceptions check is part of building the tests.
 add_dependencies(cratedig_unit_tests cratedig_rt_nofx_check)

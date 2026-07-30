@@ -2,23 +2,28 @@
 
 #include "engine/engine.hpp"
 #include "ingest/decoder.hpp"
+#include "ingest/peak_pyramid.hpp"
 #include "io/audio_device.hpp"
 #include "rt/pad_event.hpp"
+#include "tui/render.hpp"
+#include "tui/ui_state.hpp"
+#include "tui/waveform.hpp"
 
 #include <ftxui/component/app.hpp>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/terminal.hpp>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
-#include <iomanip>
 #include <iostream>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -39,11 +44,11 @@ constexpr auto kFrameInterval = std::chrono::milliseconds(33);
 
 constexpr std::uint8_t kPad = 0;
 
-std::string format_seconds(double seconds) {
-  std::ostringstream out;
-  out << std::fixed << std::setprecision(2) << seconds << " s";
-  return out.str();
-}
+// A step is an eighth of the view, so scrolling feels the same at every zoom --
+// the alternative, a fixed number of frames, is either glacial when zoomed out
+// or a jump-cut when zoomed in.
+constexpr std::size_t kScrollDivisor = 8;
+constexpr double kZoomStep = 0.5;
 
 }  // namespace
 
@@ -62,7 +67,7 @@ int run_app(const AppOptions& options) {
   //    where decoding belongs.
   std::shared_ptr<const rt::Sample> sample;
   std::string sample_name;
-  std::string sample_summary = "no sample loaded";
+  ingest::PeakPyramid pyramid;
 
   if (!options.sample_path.empty()) {
     const ingest::SampleLoad load = ingest::load_sample(options.sample_path, options.sample_rate);
@@ -77,11 +82,10 @@ int run_app(const AppOptions& options) {
     sample = load.sample;
     sample_name = options.sample_path.filename().string();
 
-    const double seconds =
-        static_cast<double>(sample->num_frames()) / static_cast<double>(sample->sample_rate());
-    sample_summary = sample_name + " · " + std::to_string(sample->sample_rate()) + " Hz · " +
-                     (sample->num_channels() == 1 ? "mono" : "stereo") + " · " +
-                     format_seconds(seconds);
+    // Built here, on the control thread, before anything real-time exists.
+    // ~100-200 ms for a five-minute file; moving it onto a worker so the
+    // interface can come up first is M6's ingest job, not M2's.
+    pyramid = ingest::PeakPyramid::build(*sample);
   }
 
   // 2. Build the engine and assign the pad. set_pad_sample() is documented as
@@ -130,54 +134,63 @@ int run_app(const AppOptions& options) {
     audio_running = true;
   }
 
-  // 4. The interface.
-  //
-  // NOTE (M2 task 1): this frame is deliberately thin -- it exists so the
-  // FTXUI loop, the key path and the janitor tick can be verified on their own,
-  // before the real PERFORM layout from docs/design/*.html lands with the
-  // waveform. It is replaced wholesale, not extended.
+  // 4. The interface. render() is a pure function of a UiState, so everything
+  //    below is about assembling that struct once per frame; the layout itself
+  //    lives in src/tui/render.cpp and is what the snapshot tests exercise.
   ftxui::App screen = ftxui::App::Fullscreen();
 
   // Nothing in this interface responds to the mouse, and leaving tracking on
   // makes a terminal emit mouse escape sequences into the PTY snapshot tests.
   screen.TrackMouse(false);
 
-  const std::string audio_summary =
-      options.no_audio
-          ? std::string{"no audio"}
-          : device.api_name() + " · " + std::to_string(device.actual_block_frames()) + " frames";
+  const std::size_t total_frames = sample != nullptr ? sample->num_frames() : 0;
+
+  UiState state;
+  state.version = CRATEDIG_VERSION;
+  state.engine_rate = options.sample_rate;
+  state.max_voices = engine::Engine::kMaxVoices;
+  if (sample != nullptr) {
+    state.sample_name = sample_name;
+    state.sample_rate = sample->sample_rate();
+    state.sample_channels = sample->num_channels();
+    state.sample_frames = total_frames;
+    state.pads[kPad] =
+        PadState{.name = options.sample_path.stem().string(), .level = 0.0F, .loaded = true};
+    state.view.fit(total_frames);
+  }
+  if (!options.no_audio) {
+    state.audio_api = device.api_name();
+    state.block_frames = device.actual_block_frames();
+  }
 
   auto frame = ftxui::Renderer([&] {
-    std::ostringstream counters;
-    counters << "voices " << engine.active_voices() << '/' << engine::Engine::kMaxVoices
-             << "   xruns " << device.xrun_count() << "   dropped " << engine.dropped_events()
-             << '/' << engine.dropped_triggers() << "   frames " << engine.frames_rendered();
+    const ftxui::Dimensions size = ftxui::Terminal::Size();
+    const auto columns = static_cast<std::size_t>(std::max(size.dimx, 1));
+    const auto rows = static_cast<std::size_t>(std::max(size.dimy, 1));
 
-    return ftxui::vbox({
-               ftxui::hbox({
-                   ftxui::text(" cratedig ") | ftxui::bold,
-                   ftxui::text(CRATEDIG_VERSION) | ftxui::dim,
-                   ftxui::text("  perform"),
-                   ftxui::filler(),
-                   ftxui::text(sample_summary) | ftxui::dim,
-                   ftxui::text(" "),
-               }),
-               ftxui::separatorEmpty(),
-               ftxui::vbox({
-                   ftxui::text(counters.str()),
-                   ftxui::separatorEmpty(),
-                   ftxui::text(sample == nullptr ? "no sample on pad 01"
-                                                 : "pad 01  " + sample_name),
-               }) | ftxui::borderRounded |
-                   ftxui::flex,
-               ftxui::hbox({
-                   ftxui::text("  perform   ") | ftxui::dim,
-                   ftxui::text(std::to_string(options.sample_rate) + " Hz · " + audio_summary),
-                   ftxui::filler(),
-                   ftxui::text("[space] trigger   [q] quit ") | ftxui::dim,
-               }),
-           }) |
-           ftxui::flex;
+    const engine::Telemetry telemetry = engine.telemetry();
+    state.playing = telemetry.playing;
+    state.playhead_frame = telemetry.playhead_frame;
+    state.playhead_pad = telemetry.playhead_pad;
+    state.master_peak = telemetry.master_peak;
+    for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+      state.pads[pad].level = telemetry.pad_peak[pad];
+    }
+    state.active_voices = engine.active_voices();
+    state.xruns = device.xrun_count();
+    state.dropped = engine.dropped_events() + engine.dropped_triggers();
+
+    // Re-summarised every frame against the CURRENT width, so a resize is a
+    // correct redraw rather than a stretched one. At any zoom this reads about
+    // five pyramid bins per column, which is what makes it affordable at 30 Hz
+    // on a five-minute file.
+    if (sample != nullptr && !pyramid.empty()) {
+      const std::size_t wave_columns = wave_columns_for(columns);
+      state.bins.assign(bins_for_columns(wave_columns), ingest::PeakBin{});
+      pyramid.summarize(*sample, 0, state.view.first_frame, state.view.frames_visible, state.bins);
+    }
+
+    return render(state, columns, rows);
   });
 
   auto root = ftxui::CatchEvent(frame, [&](const ftxui::Event& event) {
@@ -197,7 +210,43 @@ int run_app(const AppOptions& options) {
       screen.Exit();
       return true;
     }
-    return false;
+    if (event == ftxui::Event::Tab) {
+      state.tab = state.tab == PanelTab::kSample ? PanelTab::kPattern : PanelTab::kSample;
+      return true;
+    }
+
+    // Everything below moves the view, which only means something with a sample
+    // loaded.
+    if (total_frames == 0) {
+      return false;
+    }
+    const auto step = static_cast<std::ptrdiff_t>(
+        std::max<std::size_t>(state.view.frames_visible / kScrollDivisor, 1));
+
+    if (event == ftxui::Event::Character('h') || event == ftxui::Event::ArrowLeft) {
+      state.view.scroll_by(-step, total_frames);
+    } else if (event == ftxui::Event::Character('l') || event == ftxui::Event::ArrowRight) {
+      state.view.scroll_by(step, total_frames);
+    } else if (event == ftxui::Event::Character('H')) {
+      state.view.scroll_by(-static_cast<std::ptrdiff_t>(state.view.frames_visible), total_frames);
+    } else if (event == ftxui::Event::Character('L')) {
+      state.view.scroll_by(static_cast<std::ptrdiff_t>(state.view.frames_visible), total_frames);
+    } else if (event == ftxui::Event::Character('+') || event == ftxui::Event::Character('=')) {
+      state.view.zoom_by(kZoomStep, total_frames);
+    } else if (event == ftxui::Event::Character('-') || event == ftxui::Event::Character('_')) {
+      state.view.zoom_by(1.0 / kZoomStep, total_frames);
+    } else if (event == ftxui::Event::Character('f')) {
+      state.view.fit(total_frames);
+    } else if (event == ftxui::Event::Character('g')) {
+      state.view.first_frame = 0;
+      state.view.clamp(total_frames);
+    } else if (event == ftxui::Event::Character('G')) {
+      state.view.first_frame = total_frames;
+      state.view.clamp(total_frames);
+    } else {
+      return false;
+    }
+    return true;
   });
 
   // The refresh thread exists because Loop() is blocking and the counters change

@@ -5,8 +5,15 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
+      # The TUI snapshots are golden terminal frames: every line is padded to the
+      # full width, so a trailing space is content -- it is the blank right
+      # margin -- and a missing final newline is what ftxui::Screen::ToString()
+      # actually produces. These three hooks silently rewrote all nine of them
+      # and broke the tests, which is how the exclusion got here.
       - id: trailing-whitespace
+        exclude: ^tests/tui/snapshots/
       - id: end-of-file-fixer
+        exclude: ^tests/tui/snapshots/
       - id: check-yaml
       - id: check-toml
       - id: check-merge-conflict
@@ -16,6 +23,7 @@ repos:
       - id: check-executables-have-shebangs
       - id: mixed-line-ending
         args: [--fix=lf]
+        exclude: ^tests/tui/snapshots/
 
   # Pinned to 18.x to match clang-format-18 in docker/Dockerfile — a version
   # mismatch here means CI and local disagree about formatting.

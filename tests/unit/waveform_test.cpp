@@ -13,6 +13,8 @@
 
 #include "ingest/peak_pyramid.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string>
