@@ -1,6 +1,17 @@
 # Project-wide static analysis. This is the THIRD line of RT-safety enforcement —
 # RT_SCOPE() (runtime abort) is first, -fno-exceptions on rt/engine targets is
 # second. src/rt/ and src/engine/ add stricter nested configs.
+#
+# Note on disabled checks (comments cannot live inside the folded Checks scalar
+# below — YAML would fold them into the check string):
+#   clang-analyzer-optin.performance.Padding
+#     Cache-line padding of cross-thread state is mandatory here (CLAUDE.md:
+#     "shared cross-thread state uses alignas(kCacheLine)"). This check flags
+#     every correct use of it as waste — noise for this codebase by construction.
+#   bugprone-easily-swappable-parameters
+#     Fires on every (buffer, length) and (start, end) pair in DSP code.
+#   modernize-use-trailing-return-type
+#     Contradicts the house style in CLAUDE.md.
 ---
 Checks: >
   bugprone-*,
@@ -13,7 +24,8 @@ Checks: >
   readability-redundant-*,
   -bugprone-easily-swappable-parameters,
   -modernize-use-trailing-return-type,
-  -modernize-avoid-c-arrays
+  -modernize-avoid-c-arrays,
+  -clang-analyzer-optin.performance.Padding
 
 WarningsAsErrors: '*'
 HeaderFilterRegex: '(src|tests)/.*\.(hpp|cpp)$'
