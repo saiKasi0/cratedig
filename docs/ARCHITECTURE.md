@@ -397,3 +397,180 @@ These are deliberate scope boundaries, not oversights:
   there is no redirection. This is why `--no-audio` no longer constructs an
   RtAudio: on a Linux box with no sound card, libasound wrote several lines onto
   the terminal the TUI was drawing on.
+
+---
+
+# Planned architecture
+
+Everything below is **specified, not built**. It is here rather than only in
+`docs/ROADMAP.md` because each item constrains code that already exists, and
+because three of them turn out to be the same problem — which is worth writing
+down once instead of discovering three times.
+
+Milestone placement is in `docs/ROADMAP.md`.
+
+## Live reconfiguration: one problem, one protocol
+
+Three separate features need to change what the audio thread is using, while it
+is using it:
+
+- **Assigning a slice to a pad** (M3) — `:chop transient` then `slot assign`,
+  with the stream running.
+- **Recording into a pad** (M6) — the whole point is that the new sample is
+  playable the moment it exists.
+- **Changing a pad's plugin chain** (M8) — instances cannot be constructed or
+  destroyed on the audio thread.
+
+Today `Engine::set_pad_sample()` is documented pre-start only, because the audio
+thread reads `m_pads` with no synchronisation at all. That is honest for M2 and
+is a hard blocker for all three of the above.
+
+**The protocol, once, for all of them:**
+
+1. **Build off-thread.** The control thread constructs the whole new
+   thing — a `Sample`, a plugin chain, a strip configuration — with allocation,
+   file I/O and plugin instantiation all happening where they are allowed.
+2. **Publish through an SPSC ring of owning handles.** A ring of
+   `std::shared_ptr<const T>` works and needs no new primitive: the control
+   thread *move-assigns* into a slot that is already empty, so no destructor runs
+   on either side; the audio thread move-assigns out, leaving it empty again.
+   The existing `SpscRing` requires trivially-copyable elements because it
+   overwrites slots by assignment — so this is a **sibling** ring
+   (`rt::HandoffRing`), not a change to that one.
+3. **Swap on the audio thread**, which is a pointer exchange.
+4. **Retire the displaced handle into the `GarbageRing`.** Exactly the mechanism
+   voices already use. Nothing is destroyed on the audio thread, ever.
+
+The pieces for this already exist and are tested. What is missing is the ring
+that carries owning handles and the drain step in `Engine::render()`.
+
+**The rule that falls out of it:** anything the audio thread reads which the
+control thread can change must be reachable through one pointer, so that
+swapping it is a single operation. That is a design constraint on `PadConfig`
+and on the per-pad chain below, not an implementation detail — a config struct
+the control thread mutates field by field cannot be published safely at all.
+
+## The record lane
+
+A fourth lane, symmetric with ingest: the audio thread produces, a worker
+consumes.
+
+- **Capture is a duplex stream.** `RtAudio::openStream` already takes input
+  parameters; `src/io/` opens input and output together so both run on one
+  callback with one clock. Two streams would mean two clocks and resampling
+  between them.
+- **The callback writes into preallocated chunks, never a growing buffer.**
+  Recording length is unbounded and allocation is banned, so the worker owns a
+  pool of fixed chunks and hands empty ones to the audio thread through one ring;
+  the audio thread fills them and hands them back through another. Running out of
+  empty chunks drops audio and increments a counter — the same back-pressure
+  shape as `GarbageRing` overflow, and for the same reason: the alternative is
+  allocating in the callback.
+- **The worker assembles a `Sample`** from the chunks, resamples if the input
+  device rate differs from the engine rate, and publishes it to a pad through the
+  reconfiguration protocol above.
+- **Monitoring is a routing decision, not a feature.** Input frames can be summed
+  into the output within the same callback. Whether that is useful depends
+  entirely on output latency — see below.
+- **Determinism is unaffected.** Live input is non-deterministic by nature; it
+  enters the system as a finished `Sample`, and `Engine::render()` still has the
+  bit-exactness contract it has now.
+- **Resampling the master bus** — recording what the sampler itself plays — needs
+  the mixer (M5) and is otherwise the same path with a different source.
+
+## PadConfig and per-pad processing
+
+"Each pad can have different plugins and settings" is currently spread across
+three milestones, which is how it ends up invented three times. One model,
+specified once:
+
+```
+PadConfig {
+  sample + slice range          // M3
+  amp envelope, choke group     // M3
+  tuning, reverse, loop mode    // M3
+  gain, pan, sends              // M5
+  EQ / comp / saturation        // M5
+  ordered insert chain          // M8
+}
+```
+
+- **The audio thread reaches it through one pointer per pad**, per the rule above.
+  Editing a pad builds a new `PadConfig`, publishes it, and retires the old one.
+  A struct edited in place cannot be published atomically.
+- **A "plugin chain" is ordered and variable-length**, which means the chain
+  object owns its instances and is swapped whole. Bypass is a flag in the new
+  chain, not a mutation of the live one.
+- **Plugin latency is per-pad and therefore per-path.** Sixteen pads with
+  different chains have sixteen different latencies, so plugin delay compensation
+  is a graph property, not a number — it is deliberately v2, and until then the
+  UI must *report* per-pad latency rather than silently misalign.
+- **Persistence and scripting come free** if the model is one struct: project
+  save/load (M6) serialises it, and the Lua config tier (M7) reads and writes it.
+  They do not each need their own idea of what a pad is.
+
+## Pad glow
+
+Pads should light on trigger and during playback. Most of the machinery exists —
+per-pad peak is already published and already decays — but peak is the **wrong
+signal**: it follows audio level, so a quiet sample barely lights its pad, and a
+pad triggered at velocity 1 into silence does not light at all.
+
+- **Publish frames-since-trigger and trigger velocity per pad**, alongside the
+  existing peak. The audio thread sets the counter to zero on trigger and adds
+  `num_frames` each block; two relaxed stores, into the telemetry block that
+  already exists.
+- **The UI maps that to a glow ramp**, independent of level: bold accent →
+  accent → dim → off. In sixteen colours there is no glow, so the ramp is
+  intensity and weight, and the brightest step may invert the cell.
+- **Live and sequenced hits should look different** (M4). Hardware samplers
+  distinguish "you played this" from "the machine played this", and the
+  distinction is genuinely useful when overdubbing.
+- **Sequenced glow belongs in listener time, not engine time.** With 180 ms of
+  output latency the sound arrives 180 ms after the block that rendered it, so a
+  pad that lights when the block renders lights early and looks wrong. Delaying
+  the *sequenced* glow by the measured output latency lines it up with what is
+  heard. Live triggers need no such treatment: the reference is the user's
+  finger, and nothing can be done about that gap anyway.
+
+That last point is why the latency work below is not only a Bluetooth concern.
+
+## Output latency, and the honest Bluetooth answer
+
+Bluetooth adds 100–200 ms with SBC or AAC, roughly 40 ms with aptX Low Latency,
+and 20–30 ms with LC3 / LE Audio. Those figures are approximate and belong to the
+codec, the link scheduler and the sink's own buffering.
+
+**None of that is fixable from inside this application, and the spec must not
+pretend otherwise.** An application cannot choose the A2DP codec, cannot shorten
+the sink's buffer, and cannot play a sound before the pad is hit. "Low-latency
+Bluetooth playback" is not an achievable feature; there is no clever engineering
+that recovers it.
+
+What *is* achievable is worth doing, and no DAW does it well:
+
+1. **Measure it, rather than trusting the report.** `RtAudio::getStreamLatency()`
+   is an under-report on macOS: the CoreAudio backend reads only
+   `kAudioDevicePropertyLatency` and ignores `kAudioDevicePropertySafetyOffset`
+   and `kAudioStreamPropertyLatency` (verified in `RtAudio.cpp`). The trustworthy
+   number comes from a **loopback calibration** — emit a click, capture it back
+   through the input, correlate, and report round-trip frames. That is one
+   measurement, stored per device.
+2. **Compensate everything that can be compensated.** Anything *scheduled* can be
+   shifted: sequencer events, the metronome, sequenced pad glow, and the
+   alignment of material recorded while monitoring. This is the difference
+   between "in sync but late" and "out of sync", and it is the whole ballgame for
+   overdubbing.
+3. **Say what cannot be.** Live triggering is irreducible. The interface should
+   state the measured figure plainly — a latency readout in the mode line, and a
+   warning when the output device is one where playing live will feel wrong.
+4. **Add nothing ourselves.** Our contribution is block size plus the engine, and
+   it is already near zero; a per-device latency budget breakdown
+   ("engine 5.3 ms + device 182 ms") makes that visible and keeps it honest.
+5. **Prefer the low-latency path where the OS exposes one.** Detect LC3 / LE Audio
+   and report it; recommend a wired path for live playing. Detection and advice
+   only — the codec is not ours to choose.
+
+The valuable product here is a sampler that knows exactly how late it is and
+corrects everything it can, on a class of device every other DAW simply tells you
+not to use.
