@@ -3,6 +3,8 @@
 
 #include "rt/arch.hpp"
 #include "rt/garbage_ring.hpp"
+#include "rt/handoff_ring.hpp"
+#include "rt/pad_config.hpp"
 #include "rt/pad_event.hpp"
 #include "rt/sample.hpp"
 #include "rt/spsc_ring.hpp"
@@ -47,10 +49,10 @@ struct Telemetry {
 // possible: render() works in a plain loop with no audio hardware present.
 //
 // Threading, in one place:
-//   - CONTROL calls set_pad_sample() before the stream starts, then trigger_pad()
-//     while it runs. Nothing else.
+//   - CONTROL calls publish_pad_config() and trigger_pad(), at any time, running
+//     or not. Nothing else.
 //   - AUDIO calls render(). It allocates nothing, locks nothing, and never runs
-//     a Sample destructor.
+//     a Sample or PadConfig destructor.
 //   - JANITOR calls collect_garbage(). The engine spawns no threads of its own;
 //     whoever owns the run loop decides when collection happens, which is what
 //     keeps offline rendering single-threaded and reproducible.
@@ -68,6 +70,12 @@ class Engine {
   // the janitor may be a whole UI frame behind.
   static constexpr std::size_t kGarbageRingCapacity = 64;
 
+  // Pad reconfigurations in flight, control -> audio. Sixteen is one full grid
+  // reassigned between two blocks, which is what `:chop transient` does; a
+  // human editing pads cannot outrun a 5 ms block, so this is a burst allowance
+  // rather than a throughput budget.
+  static constexpr std::size_t kPadHandoffCapacity = 16;
+
   struct Config {
     std::uint32_t sample_rate = 48'000;
     std::uint16_t num_channels = 2;
@@ -83,14 +91,41 @@ class Engine {
 
   explicit Engine(const Config& config) noexcept;
 
-  // CONTROL THREAD, BEFORE THE AUDIO STREAM STARTS.
+  // CONTROL THREAD, AT ANY TIME — running or not.
   //
-  // Not safe to call while render() may be running: the audio thread reads this
-  // table without synchronisation, which is what keeps triggering free of
-  // atomics. Hot-swapping a loaded pad needs a publish protocol that arrives
-  // with the ingest path in M2/M3; offering it now would be an API the tests
-  // could not honestly check.
-  void set_pad_sample(std::uint8_t pad, std::shared_ptr<const rt::Sample> sample) noexcept;
+  // Hands the audio thread a complete replacement for one pad. The config is
+  // built here, where allocation and file I/O are legal; the audio thread swaps
+  // a pointer and retires what it displaced. Nothing is constructed or destroyed
+  // on the audio thread, which is what makes this safe mid-stream.
+  //
+  // This is the protocol M6's recording and M8's plugin chains reuse unchanged
+  // (docs/ARCHITECTURE.md, "Live reconfiguration: one problem, one protocol").
+  //
+  // Returns false if the handoff ring is full, in which case THE CALLER STILL
+  // OWNS `config` and the pad is unchanged — the edit did not happen, and
+  // saying so is better than dropping it silently. `config` must be non-null and
+  // name a pad below kNumPads; anything else is refused here rather than on the
+  // audio thread, so a bad index costs a control-thread branch and not a block.
+  [[nodiscard]] bool publish_pad_config(std::shared_ptr<const rt::PadConfig> config) noexcept;
+
+  // CONTROL THREAD. Convenience for the common case: play this whole sample on
+  // this pad, everything else default.
+  //
+  // Before M3 this wrote the pad table directly and was documented pre-start
+  // only. It now goes through publish_pad_config() like everything else, so the
+  // caveat is gone.
+  [[nodiscard]] bool set_pad_sample(std::uint8_t pad,
+                                    std::shared_ptr<const rt::Sample> sample) noexcept;
+
+  // CONTROL THREAD. What this thread has most recently published for a pad —
+  // NOT what the audio thread is currently using, which may still be one block
+  // behind.
+  //
+  // That distinction is the honest one for a UI: the interface should show the
+  // edit the moment it is made, and the block boundary is not a fact about the
+  // pad. Reading the audio thread's table from here would be a data race, which
+  // is exactly the problem this whole task exists to fix.
+  [[nodiscard]] std::shared_ptr<const rt::PadConfig> pad_config(std::uint8_t pad) const noexcept;
 
   [[nodiscard]] std::shared_ptr<const rt::Sample> pad_sample(std::uint8_t pad) const noexcept;
 
@@ -152,6 +187,13 @@ class Engine {
     return m_garbage.overflow_count();
   }
 
+  // publish_pad_config() calls refused because the handoff ring was full. A
+  // non-zero value means pad edits were rejected — either nothing is rendering,
+  // so the ring never drains, or something is republishing in a loop.
+  [[nodiscard]] std::uint64_t rejected_pad_configs() const noexcept {
+    return m_pad_handoff.rejected_count();
+  }
+
  private:
   // The playhead is pad and frame packed into ONE 64-bit word rather than two
   // atomics, so the UI can never read a frame position from one voice with the
@@ -177,17 +219,40 @@ class Engine {
     std::array<std::atomic<float>, rt::kNumPads> pad_peak{};
   };
 
+  // AUDIO THREAD, at the top of every block. Adopts whatever the control thread
+  // has published and retires what it displaced.
+  void adopt_pad_configs() noexcept;
+
   // AUDIO THREAD, once per block, after rendering.
   void publish_telemetry(std::span<float* const> channels, std::size_t num_frames) noexcept;
 
   Config m_config;
   Published m_published;
 
-  std::array<std::shared_ptr<const rt::Sample>, rt::kNumPads> m_pads{};
+  // AUDIO THREAD ONLY. Read every block, written only by adopt_pad_configs().
+  // No synchronisation is needed on it precisely because the control thread
+  // never touches it — that is the whole point of the handoff ring.
+  std::array<std::shared_ptr<const rt::PadConfig>, rt::kNumPads> m_pads{};
+
+  // AUDIO THREAD ONLY, and a MEMBER rather than a local in adopt_pad_configs()
+  // on purpose.
+  //
+  // A displaced config that the garbage ring refuses has to survive to the next
+  // block: it cannot stay on the audio thread's stack, because letting a local
+  // shared_ptr go out of scope there would run the destructor this whole
+  // mechanism exists to avoid. Holding it here means the retry is free and the
+  // failure mode is "one block late", not "freed in the callback".
+  std::shared_ptr<const rt::PadConfig> m_retiring;
 
   rt::SpscRing<rt::PadEvent, kEventRingCapacity> m_events;
+  rt::HandoffRing<rt::PadConfig, kPadHandoffCapacity> m_pad_handoff;
   rt::VoicePool<kMaxVoices> m_voices;
   rt::GarbageRing<kGarbageRingCapacity> m_garbage;
+
+  // CONTROL THREAD ONLY: what this thread has published, so pad_config() can
+  // answer without reading the audio thread's table. Not a cache of m_pads — it
+  // is deliberately one block *ahead* of it.
+  std::array<std::shared_ptr<const rt::PadConfig>, rt::kNumPads> m_published_pads{};
 
   // Written by the control thread only, and read by it -- no cross-thread access,
   // so no atomic.

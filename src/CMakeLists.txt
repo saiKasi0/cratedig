@@ -16,7 +16,9 @@ target_sources(
             FILES
             rt/arch.hpp
             rt/garbage_ring.hpp
+            rt/handoff_ring.hpp
             rt/interpolator.hpp
+            rt/pad_config.hpp
             rt/pad_event.hpp
             rt/result.hpp
             rt/rt_scope.hpp

@@ -66,7 +66,7 @@ void trigger(engine::Engine& eng, std::uint8_t pad, float velocity = 1.0F) {
 
 TEST_CASE("an idle engine reports nothing playing and no level", "[unit]") {
   engine::Engine eng{test_config()};
-  eng.set_pad_sample(0, make_flat_sample(0.5F));
+  REQUIRE(eng.set_pad_sample(0, make_flat_sample(0.5F)));
 
   render_frames(eng, 1'024);
   const engine::Telemetry idle = eng.telemetry();
@@ -82,7 +82,7 @@ TEST_CASE("an idle engine reports nothing playing and no level", "[unit]") {
 
 TEST_CASE("the playhead names the pad that is sounding and advances with it", "[unit]") {
   engine::Engine eng{test_config()};
-  eng.set_pad_sample(3, make_flat_sample(0.5F));
+  REQUIRE(eng.set_pad_sample(3, make_flat_sample(0.5F)));
 
   trigger(eng, 3);
   render_frames(eng, 512);
@@ -104,7 +104,7 @@ TEST_CASE("the playhead advances at the resampled rate", "[unit]") {
   // instead of source frames would drift by 8% -- enough to put the marker in
   // the wrong place on a long file and not enough to notice on a short one.
   engine::Engine eng{test_config()};
-  eng.set_pad_sample(0, make_flat_sample(0.5F, 44'100, 8'000));
+  REQUIRE(eng.set_pad_sample(0, make_flat_sample(0.5F, 44'100, 8'000)));
 
   trigger(eng, 0);
   constexpr std::size_t kRendered = 1'000;
@@ -124,8 +124,8 @@ TEST_CASE("the playhead follows the newest voice", "[unit]") {
   // With a chord down, the marker should track the hit just played rather than
   // whichever pool slot the publishing loop reached last.
   engine::Engine eng{test_config()};
-  eng.set_pad_sample(2, make_flat_sample(0.5F));
-  eng.set_pad_sample(9, make_flat_sample(0.5F));
+  REQUIRE(eng.set_pad_sample(2, make_flat_sample(0.5F)));
+  REQUIRE(eng.set_pad_sample(9, make_flat_sample(0.5F)));
 
   trigger(eng, 2);
   render_frames(eng, 256);
@@ -140,7 +140,7 @@ TEST_CASE("nothing playing clears the playhead again", "[unit]") {
   engine::Engine eng{test_config()};
   // 300 source frames at 44.1 kHz is ~327 engine frames; one 1024-frame block
   // outlives it comfortably.
-  eng.set_pad_sample(0, make_flat_sample(0.5F, 44'100, 300));
+  REQUIRE(eng.set_pad_sample(0, make_flat_sample(0.5F, 44'100, 300)));
 
   trigger(eng, 0);
   render_frames(eng, 128);
@@ -154,7 +154,7 @@ TEST_CASE("pad meters attribute level to the pad that made it", "[unit]") {
   // A meter that lights the wrong pad is worse than no meter: it teaches the
   // wrong mapping between the grid and the sound.
   engine::Engine eng{test_config()};
-  eng.set_pad_sample(5, make_flat_sample(0.5F));
+  REQUIRE(eng.set_pad_sample(5, make_flat_sample(0.5F)));
 
   trigger(eng, 5);
   render_frames(eng, 512);
@@ -174,7 +174,7 @@ TEST_CASE("pad meters attribute level to the pad that made it", "[unit]") {
 TEST_CASE("velocity scales the metered level", "[unit]") {
   const auto peak_at_velocity = [](float velocity) {
     engine::Engine eng{test_config()};
-    eng.set_pad_sample(1, make_flat_sample(0.5F));
+    REQUIRE(eng.set_pad_sample(1, make_flat_sample(0.5F)));
     trigger(eng, 1, velocity);
     render_frames(eng, 512);
     return eng.telemetry().pad_peak[1];
@@ -196,7 +196,7 @@ TEST_CASE("meters fall rather than sticking or flickering", "[unit]") {
   // loudest thing that ever happened; one with no hold shows whichever 5 ms
   // block a 30 Hz redraw sampled, which for a drum pattern is usually silence.
   engine::Engine eng{test_config()};
-  eng.set_pad_sample(0, make_flat_sample(0.8F, 44'100, 300));
+  REQUIRE(eng.set_pad_sample(0, make_flat_sample(0.8F, 44'100, 300)));
 
   trigger(eng, 0);
   render_frames(eng, 256);
@@ -223,7 +223,7 @@ TEST_CASE("the fall time does not depend on the block size", "[unit]") {
   // because it handed back 64 frames instead of 512.
   const auto peak_after_fall = [](std::size_t block) {
     engine::Engine eng{test_config()};
-    eng.set_pad_sample(0, make_flat_sample(0.8F, 44'100, 300));
+    REQUIRE(eng.set_pad_sample(0, make_flat_sample(0.8F, 44'100, 300)));
     trigger(eng, 0);
     render_frames(eng, 256);
 

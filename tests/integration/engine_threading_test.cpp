@@ -16,6 +16,7 @@
 #include "rt/pad_event.hpp"
 #include "rt/sample.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -59,15 +60,18 @@ TEST_CASE("Engine survives control, audio and janitor threads at once", "[stress
                                       .seed = 0};
   engine::Engine eng{config};
 
-  // Pads are loaded before any thread starts. The audio thread reads this table
-  // without synchronisation, which is exactly why set_pad_sample() is documented
-  // as pre-start only — if that contract were violated, this is the test that
-  // would report it as a data race.
+  // Pads are loaded before any thread starts, which was a requirement until M3
+  // and is now merely the simple case — the reconfiguration test below is the
+  // one that loads them while the audio thread runs.
   std::vector<std::shared_ptr<const rt::Sample>> loaded;
   for (std::uint8_t pad = 0; pad < 4; ++pad) {
     auto sample = make_short_sample(44'100U + pad, 300 + (pad * 50U));
     loaded.push_back(sample);
-    eng.set_pad_sample(pad, std::move(sample));
+    // Evaluated before the assertion rather than inside it: REQUIRE expands to a
+    // loop, and clang-analyzer reads a std::move inside one as a move that could
+    // happen twice.
+    const bool published = eng.set_pad_sample(pad, std::move(sample));
+    REQUIRE(published);
   }
 
   std::vector<std::vector<float>> storage(kChannels, std::vector<float>(kBlockFrames, 0.0F));
@@ -180,14 +184,36 @@ TEST_CASE("Engine survives control, audio and janitor threads at once", "[stress
   INFO("telemetry polls: " << telemetry_reads.load(std::memory_order_relaxed) << ", saw a voice: "
                            << telemetry_saw_playing.load(std::memory_order_relaxed));
 
+  // Quiesce the engine before counting references, on this thread, with every
+  // other one joined and nothing left in the event ring.
+  //
+  // This is not tidying: without it the reference count below is a scheduling
+  // outcome rather than a property. The control thread can land a trigger that
+  // the audio thread drains in its very last block, which leaves a voice
+  // sounding and holding a Sample reference when render() stops being called —
+  // and the count is then 3, not 2, through nobody's fault. Rendering until the
+  // pool is empty makes the end state the same on every run.
+  //
+  // The samples here are at most 450 frames against a 256-frame block, so two
+  // blocks drain any voice; the bound is far above that and is asserted rather
+  // than assumed, so a pool that never empties fails loudly instead of quietly
+  // passing the checks below.
+  constexpr std::size_t kQuiesceBlocks = 32;
+  std::size_t quiesce_blocks = 0;
+  while (eng.active_voices() > 0 && quiesce_blocks < kQuiesceBlocks) {
+    eng.render(std::span<float* const>{channels}, kBlockFrames);
+    ++quiesce_blocks;
+  }
+  REQUIRE(eng.active_voices() == 0);
+
   // Nothing must be left holding a reference: every retired sample reached the
   // janitor, and no voice is stuck waiting for ring space.
+  static_cast<void>(eng.collect_garbage());
   CHECK(eng.collect_garbage() == 0);
 
-  // The strongest assertion available here, and the one that holds no matter how
-  // hard the control thread pushes: every reference a voice ever took has been
-  // released, and released by the janitor. Each sample should be down to two
-  // owners -- this vector and the engine's pad table.
+  // The strongest assertion available here: every reference a voice ever took
+  // has been released, and released by the janitor. Each sample is down to two
+  // owners -- this vector, and the one PadConfig the engine holds for that pad.
   for (const std::shared_ptr<const rt::Sample>& sample : loaded) {
     CHECK(sample.use_count() == 2);
   }
@@ -212,6 +238,105 @@ TEST_CASE("Engine survives control, audio and janitor threads at once", "[stress
   // a bounded, realistic rate is asserted by the deterministic test below.
 }
 
+TEST_CASE("Engine reassigns pads while the audio thread is rendering", "[stress]") {
+  // The M3 acceptance criterion: "a pad reassigned while the stream runs makes
+  // no allocation on the audio thread and destroys nothing there".
+  //
+  // This is the TSan half. The RT-guard half — that the swap and the retire
+  // allocate nothing — is in rt_safety_test.cpp, because allocation detection is
+  // compiled out under TSan and the two halves therefore cannot live in the same
+  // run (see rt_scope.hpp).
+  //
+  // Before M3 this test could not have been written at all: the audio thread
+  // read the pad table with no synchronisation, so writing to it from another
+  // thread was a data race by construction. That it is now writable from the
+  // control thread mid-render IS the feature.
+  const engine::Engine::Config config{.sample_rate = 48'000,
+                                      .num_channels = kChannels,
+                                      .max_block_frames = kBlockFrames,
+                                      .seed = 0};
+  engine::Engine eng{config};
+
+  std::vector<std::vector<float>> storage(kChannels, std::vector<float>(kBlockFrames, 0.0F));
+  std::vector<float*> channels(kChannels);
+  for (std::uint16_t i = 0; i < kChannels; ++i) {
+    channels[i] = storage[i].data();
+  }
+
+  std::atomic<bool> audio_done{false};
+  std::atomic<std::uint64_t> published{0};
+  std::atomic<std::size_t> collected{0};
+
+  std::thread audio([&] {
+    for (std::size_t block = 0; block < kBlocks; ++block) {
+      eng.render(std::span<float* const>{channels}, kBlockFrames);
+    }
+    audio_done.store(true, std::memory_order_release);  // release: see the first test
+  });
+
+  // The control thread builds a brand-new Sample and PadConfig for every publish
+  // — allocating freely, which is the entire point of doing it here — and hands
+  // it over while the audio thread is mid-flight.
+  std::thread control([&] {
+    std::uint64_t sent = 0;
+    while (!audio_done.load(std::memory_order_acquire) && sent < 400) {
+      const auto pad = static_cast<std::uint8_t>(sent % rt::kNumPads);
+      if (eng.set_pad_sample(pad, make_short_sample(44'100U, 200 + (sent % 100)))) {
+        ++sent;
+        // Also play the pad we just replaced, so voices are holding references
+        // to configs that are being displaced underneath them.
+        static_cast<void>(
+            eng.trigger_pad(rt::PadEvent{.pad = pad, .velocity = 0.5F, .frame_offset = 0}));
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+    published.store(sent, std::memory_order_relaxed);
+  });
+
+  std::thread janitor([&] {
+    std::size_t total = 0;
+    while (!audio_done.load(std::memory_order_acquire)) {
+      total += eng.collect_garbage();
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    total += eng.collect_garbage();
+    collected.store(total, std::memory_order_relaxed);
+  });
+
+  audio.join();
+  control.join();
+  janitor.join();
+
+  // Anti-vacuity: a control thread that published nothing, or an audio thread
+  // that never adopted anything, would leave TSan nothing to look at and every
+  // assertion below trivially true.
+  CHECK(published.load(std::memory_order_relaxed) > 0);
+  CHECK(collected.load(std::memory_order_relaxed) > 0);
+
+  // Every pad the control thread actually reached reads back as loaded. Bounded
+  // by the publish count rather than asserted for all sixteen: the audio thread
+  // renders as fast as it can rather than in real time, so how far round the
+  // grid the control thread gets before it stops is a scheduling outcome, not a
+  // property. This is the control-side view, which is deliberately one step
+  // ahead of the audio thread's — see Engine::pad_config.
+  const auto reached = static_cast<std::uint8_t>(
+      std::min<std::uint64_t>(published.load(std::memory_order_relaxed), rt::kNumPads));
+  for (std::uint8_t pad = 0; pad < reached; ++pad) {
+    CHECK(eng.pad_config(pad) != nullptr);
+  }
+
+  // Deliberately reported rather than asserted, for the same reason as
+  // garbage_overflows() in the first test: the audio thread here renders as fast
+  // as it can rather than in real time, so it can finish while the control
+  // thread is still publishing, and the last publish or two then find a ring
+  // nobody is draining any more. That is the back-pressure mechanism working,
+  // not a defect — and the caller keeping ownership on refusal is asserted
+  // directly in handoff_ring_test.cpp, where it is a property rather than a race.
+  INFO("pad configs published: " << published.load(std::memory_order_relaxed)
+                                 << ", refused: " << eng.rejected_pad_configs()
+                                 << ", garbage overflows: " << eng.garbage_overflows());
+}
+
 TEST_CASE("Engine does not overflow the garbage ring at a realistic rate", "[integration]") {
   // Single-threaded and deterministic, so this is an assertion about capacity
   // rather than about scheduling. The rate here is already aggressive: a hit on
@@ -223,7 +348,7 @@ TEST_CASE("Engine does not overflow the garbage ring at a realistic rate", "[int
                                       .seed = 0};
   engine::Engine eng{config};
   for (std::uint8_t pad = 0; pad < 4; ++pad) {
-    eng.set_pad_sample(pad, make_short_sample(44'100U + pad, 300 + (pad * 50U)));
+    REQUIRE(eng.set_pad_sample(pad, make_short_sample(44'100U + pad, 300 + (pad * 50U))));
   }
 
   std::vector<std::vector<float>> storage(kChannels, std::vector<float>(kBlockFrames, 0.0F));

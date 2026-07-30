@@ -14,18 +14,75 @@ namespace engine {
 
 Engine::Engine(const Config& config) noexcept : m_config(config) {}
 
-void Engine::set_pad_sample(std::uint8_t pad, std::shared_ptr<const rt::Sample> sample) noexcept {
-  if (pad >= rt::kNumPads) {
-    return;
+bool Engine::publish_pad_config(std::shared_ptr<const rt::PadConfig> config) noexcept {
+  if (config == nullptr || config->pad >= rt::kNumPads) {
+    return false;
   }
-  m_pads[pad] = std::move(sample);
+  const std::uint8_t pad = config->pad;
+
+  // The control-side view is updated only on success, so a rejected publish
+  // leaves pad_config() reporting what is actually loaded rather than an edit
+  // that never reached the audio thread.
+  if (!m_pad_handoff.try_publish(std::shared_ptr<const rt::PadConfig>{config})) {
+    return false;
+  }
+  m_published_pads[pad] = std::move(config);
+  return true;
 }
 
-std::shared_ptr<const rt::Sample> Engine::pad_sample(std::uint8_t pad) const noexcept {
+bool Engine::set_pad_sample(std::uint8_t pad, std::shared_ptr<const rt::Sample> sample) noexcept {
+  if (pad >= rt::kNumPads) {
+    return false;
+  }
+  // make_shared allocates. That is fine and expected: this is the control
+  // thread, which is where building the new object is supposed to happen.
+  return publish_pad_config(std::make_shared<const rt::PadConfig>(
+      rt::PadConfig{.sample = std::move(sample), .pad = pad}));
+}
+
+std::shared_ptr<const rt::PadConfig> Engine::pad_config(std::uint8_t pad) const noexcept {
   if (pad >= rt::kNumPads) {
     return nullptr;
   }
-  return m_pads[pad];
+  return m_published_pads[pad];
+}
+
+std::shared_ptr<const rt::Sample> Engine::pad_sample(std::uint8_t pad) const noexcept {
+  const std::shared_ptr<const rt::PadConfig> config = pad_config(pad);
+  return config == nullptr ? nullptr : config->sample;
+}
+
+void Engine::adopt_pad_configs() noexcept {
+  // A handle held over from a previous block, because the garbage ring was full
+  // when we tried to retire it. Nothing else can proceed until it is gone: the
+  // only other place to put it would be this thread's stack, and letting it die
+  // there is the one outcome the whole mechanism exists to prevent.
+  if (m_retiring != nullptr && !m_garbage.retire(std::move(m_retiring))) {
+    return;
+  }
+
+  while (m_pad_handoff.try_take(m_retiring)) {
+    // Read BEFORE the swap: afterwards m_retiring points at the displaced
+    // config, whose pad is not necessarily this one.
+    //
+    // Validated on the control thread already; re-checked here because m_pads
+    // is indexed by it and a bad index would be a buffer overrun rather than a
+    // silent nothing.
+    const std::uint8_t pad = m_retiring->pad;
+    if (pad < rt::kNumPads) {
+      // The swap IS the reconfiguration: one pointer exchange, no allocation, no
+      // lock, and afterwards m_retiring holds the OLD config instead of the new
+      // one. Everything before this line was preparation and everything after
+      // is cleanup.
+      m_retiring.swap(m_pads[pad]);
+    }
+
+    // retire() of a null handle succeeds and consumes nothing, which is the
+    // common case the first time a pad is loaded.
+    if (!m_garbage.retire(std::move(m_retiring))) {
+      return;  // hold it and try again next block
+    }
+  }
 }
 
 bool Engine::trigger_pad(const rt::PadEvent& event) noexcept {
@@ -52,6 +109,10 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
     std::fill_n(channel, num_frames, 0.0F);
   }
 
+  // Reconfigurations before triggers, so a pad assigned and played in the same
+  // UI frame sounds the new material rather than one block of the old.
+  adopt_pad_configs();
+
   // Drain first, so a hit that arrived during the previous block sounds in this
   // one. M1 starts every voice at the block boundary; PadEvent::frame_offset is
   // where M4 will make that sample-accurate.
@@ -60,10 +121,11 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
     if (event.pad >= rt::kNumPads) {
       continue;  // came from a key handler or MIDI; not trusted
     }
-    const std::shared_ptr<const rt::Sample>& sample = m_pads[event.pad];
-    if (sample == nullptr) {
+    const std::shared_ptr<const rt::PadConfig>& config = m_pads[event.pad];
+    if (config == nullptr || config->sample == nullptr) {
       continue;  // an unloaded pad is silent, not an error
     }
+    const std::shared_ptr<const rt::Sample>& sample = config->sample;
     // Copying the shared_ptr is an atomic increment — allocation-free and
     // lock-free, so it is legal here. The voice releases it through the garbage
     // ring, never by dropping it on this thread.

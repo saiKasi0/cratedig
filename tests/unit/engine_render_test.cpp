@@ -219,8 +219,8 @@ std::shared_ptr<const rt::Sample> make_test_sample(std::uint32_t rate = 44'100,
 // and a GarbageRing, both of which delete their move constructors on purpose, so
 // Engine is neither copyable nor movable.
 void load_pads(engine::Engine& eng) {
-  eng.set_pad_sample(0, make_test_sample());
-  eng.set_pad_sample(1, make_test_sample(48'000, 1, 1'500));
+  REQUIRE(eng.set_pad_sample(0, make_test_sample()));
+  REQUIRE(eng.set_pad_sample(1, make_test_sample(48'000, 1, 1'500)));
 }
 
 void trigger(engine::Engine& eng, std::uint8_t pad, float velocity) {
@@ -342,7 +342,7 @@ TEST_CASE("Engine retires finished samples to the janitor", "[unit]") {
   // is released -- and that it happens in collect_garbage(), not in render().
   auto sample = make_test_sample(48'000, 1, 64);
   engine::Engine eng{test_config()};
-  eng.set_pad_sample(0, sample);
+  REQUIRE(eng.set_pad_sample(0, sample));
   CHECK(sample.use_count() == 2);  // ours plus the pad table
 
   trigger(eng, 0, 1.0F);

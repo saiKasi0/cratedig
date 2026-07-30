@@ -16,6 +16,7 @@ add_executable(
   unit/engine_telemetry_test.cpp
   unit/fixture_decode_test.cpp
   unit/garbage_ring_test.cpp
+  unit/handoff_ring_test.cpp
   unit/interpolator_test.cpp
   unit/peak_pyramid_test.cpp
   unit/result_test.cpp

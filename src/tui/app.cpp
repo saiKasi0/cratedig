@@ -88,14 +88,23 @@ int run_app(const AppOptions& options) {
     pyramid = ingest::PeakPyramid::build(*sample);
   }
 
-  // 2. Build the engine and assign the pad. set_pad_sample() is documented as
-  //    pre-start only, and this is that moment.
+  // 2. Build the engine and assign the pad.
+  //
+  //    The assignment goes through the handoff ring like every other pad edit,
+  //    so it takes effect on the first render() rather than immediately. Before
+  //    the device is even open there is nothing to be one block behind, and
+  //    doing it the same way here as at `:chop` time means there is only one
+  //    path to get right.
   engine::Engine engine{engine::Engine::Config{.sample_rate = options.sample_rate,
                                                .num_channels = 2,
                                                .max_block_frames = kMaxBlockFrames,
                                                .seed = 0}};
-  if (sample != nullptr) {
-    engine.set_pad_sample(kPad, sample);
+  if (sample != nullptr && !engine.set_pad_sample(kPad, sample)) {
+    // Only reachable if the handoff ring is full, which cannot happen on the
+    // very first publish. Checked anyway rather than discarded: a pad that
+    // silently failed to load would present as "the spacebar does nothing".
+    std::cerr << "error: could not assign " << sample_name << " to pad 1\n";
+    return 1;
   }
 
   // 3. Open the device, unless we were told not to.

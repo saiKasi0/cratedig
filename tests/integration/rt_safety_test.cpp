@@ -7,6 +7,7 @@
 // the RT_SCOPE guard and requires zero violations.
 
 #include "engine/engine.hpp"
+#include "rt/pad_config.hpp"
 #include "rt/pad_event.hpp"
 #include "rt/rt_scope.hpp"
 #include "rt/sample.hpp"
@@ -15,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <new>
 #include <random>
 #include <span>
 #include <utility>
@@ -116,7 +118,7 @@ TEST_CASE("Engine::render allocates nothing while voices are playing", "[integra
         data[frame] = 0.1F * static_cast<float>((frame % 17) + 1);
       }
     }
-    eng.set_pad_sample(pad, std::move(sample));
+    REQUIRE(eng.set_pad_sample(pad, std::move(sample)));
   }
 
   std::vector<std::vector<float>> storage(kChannels, std::vector<float>(kMaxBlock, 0.0F));
@@ -158,6 +160,113 @@ TEST_CASE("Engine::render allocates nothing while voices are playing", "[integra
   CHECK(collected > 0);
   CHECK(eng.garbage_overflows() == 0);
   CHECK(eng.dropped_events() == 0);
+}
+
+TEST_CASE("Engine::render allocates nothing while pads are being reassigned", "[integration]") {
+  // The M3 acceptance criterion: "a pad reassigned while the stream runs makes
+  // no allocation on the audio thread and destroys nothing there". TSan covers
+  // the race in engine_threading_test.cpp; this covers the heap, and the two
+  // cannot share a run because allocation detection is compiled out under TSan
+  // (rt_scope.hpp).
+  //
+  // The two halves need two different mechanisms, and it matters which:
+  //
+  //   - "allocates nothing" is the RT guard, via HandlerSwap below.
+  //   - "destroys nothing" is NOT. The guard checks allocation only and says so
+  //     (rt_scope.cpp): a check inside operator delete cannot tell an object
+  //     allocated inside the scope from one allocated before it, so it was left
+  //     out deliberately. Asserting zero violations here would therefore say
+  //     nothing at all about destruction — verified by dropping the displaced
+  //     config on the audio thread instead of retiring it, which this test
+  //     passed until the deleter below was added.
+  //
+  // So destruction is observed where it actually happens: a custom deleter that
+  // asks rt::in_rt_scope() at the moment the last reference goes. Inside
+  // render() that answer is true by construction, which is exactly the question.
+  if constexpr (!rt::kAllocationDetectionEnabled) {
+    SKIP("allocation detection is compiled out (TSan build) — see rt_scope.hpp");
+  }
+
+  // Declared BEFORE the engine, and it has to be. Locals are destroyed in
+  // reverse order, so the engine dies first and releases the pad configs it
+  // still holds — which runs the deleters below. Declared after, these counters
+  // would already be gone by then: ASan reports it as a stack-use-after-scope,
+  // and a dev build does not notice at all.
+  constexpr std::size_t kConfigCount = 64;
+  std::size_t destroyed_total = 0;
+  std::size_t destroyed_in_rt_scope = 0;
+
+  const engine::Engine::Config config{
+      .sample_rate = 48'000, .num_channels = kChannels, .max_block_frames = kMaxBlock, .seed = 0};
+  engine::Engine eng{config};
+
+  std::vector<std::vector<float>> storage(kChannels, std::vector<float>(kMaxBlock, 0.0F));
+  std::vector<float*> channels(kChannels);
+  for (std::uint16_t i = 0; i < kChannels; ++i) {
+    channels[i] = storage[i].data();
+  }
+
+  // The test keeps NO strong reference to the configs it publishes, deliberately.
+  // With one, the engine would never hold the last one, nothing would ever be
+  // destroyed, and the deleter below would never run.
+  const HandlerSwap swap;
+  std::size_t collected = 0;
+  std::size_t adopted = 0;
+  for (std::size_t index = 0; index < kConfigCount; ++index) {
+    // Built and published on the control thread, inside the loop. Allocation
+    // here is legal and expected: the guard only reports allocations made while
+    // the thread is inside an RT_SCOPE, and only render() opens one.
+    const auto pad = static_cast<std::uint8_t>(index % rt::kNumPads);
+    auto sample = std::make_shared<rt::Sample>(44'100U, std::uint16_t{1}, std::size_t{600});
+    std::span<float> data = sample->mutable_channel(0);
+    for (std::size_t frame = 0; frame < data.size(); ++frame) {
+      data[frame] = 0.05F * static_cast<float>((frame + index) % 19);
+    }
+
+    // new + a custom deleter rather than make_shared, so the moment of
+    // destruction is observable. This is the "destroys nothing there" half.
+    std::shared_ptr<const rt::PadConfig> pad_config{
+        new rt::PadConfig{.sample = std::move(sample), .pad = pad},
+        [&destroyed_total, &destroyed_in_rt_scope](const rt::PadConfig* victim) {
+          ++destroyed_total;
+          if (rt::in_rt_scope()) {
+            ++destroyed_in_rt_scope;
+          }
+          delete victim;  // NOLINT(cppcoreguidelines-owning-memory)
+        }};
+
+    if (eng.publish_pad_config(std::move(pad_config))) {
+      ++adopted;
+    }
+    static_cast<void>(
+        eng.trigger_pad(rt::PadEvent{.pad = pad, .velocity = 0.9F, .frame_offset = 0}));
+
+    // Two blocks per publish: the first adopts, swaps and retires; the second
+    // proves the steady state has nothing left to do.
+    eng.render(std::span<float* const>{channels}, 128);
+    eng.render(std::span<float* const>{channels}, 128);
+
+    // The janitor, on this thread and outside the callback, where freeing is
+    // exactly what is supposed to happen.
+    collected += eng.collect_garbage();
+  }
+  collected += eng.collect_garbage();
+
+  CHECK(HandlerSwap::count() == 0);
+  CHECK(adopted == kConfigCount);
+
+  // THE assertion of this test.
+  CHECK(destroyed_in_rt_scope == 0);
+
+  // ...and its anti-vacuity guard. Sixteen pads start empty, so the first
+  // sixteen publishes displace a null; every later one must have been destroyed
+  // by now, somewhere. Zero destructions would make the line above true of an
+  // empty room.
+  CHECK(destroyed_total >= kConfigCount - rt::kNumPads);
+
+  CHECK(collected >= kConfigCount - rt::kNumPads);
+  CHECK(eng.garbage_overflows() == 0);
+  CHECK(eng.rejected_pad_configs() == 0);
 }
 
 TEST_CASE("the RT guard is armed during the render test", "[integration]") {
