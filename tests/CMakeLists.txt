@@ -22,6 +22,7 @@ add_executable(
   unit/sample_test.cpp
   unit/spsc_ring_test.cpp
   unit/voice_pool_test.cpp
+  unit/waveform_test.cpp
   integration/engine_threading_test.cpp
   integration/rt_safety_test.cpp
   # The guard's operator new/delete replacements must be linked into the
@@ -30,7 +31,7 @@ add_executable(
 
 target_link_libraries(
   cratedig_unit_tests PRIVATE Catch2::Catch2WithMain cratedig_rt cratedig_engine cratedig_ingest
-                              cratedig_io cratedig_warnings cratedig_sanitizer)
+                              cratedig_io cratedig_tui cratedig_warnings cratedig_sanitizer)
 
 # Fixture tests locate the starter pack from the source tree, not the working
 # directory: ctest runs tests from the build directory, and the pack deliberately

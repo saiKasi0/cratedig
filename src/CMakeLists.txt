@@ -78,7 +78,7 @@ target_link_libraries(cratedig_io PRIVATE rtaudio cratedig_warnings cratedig_san
 # Exceptions stay enabled here for the same reason as src/ingest/: -fno-exceptions
 # applies to src/rt/ and src/engine/ (CLAUDE.md), and both FTXUI and std::string
 # are used freely on the control thread.
-add_library(cratedig_tui STATIC tui/app.cpp tui/cli.cpp)
+add_library(cratedig_tui STATIC tui/app.cpp tui/cli.cpp tui/waveform.cpp)
 target_link_libraries(cratedig_tui PUBLIC cratedig_engine cratedig_ingest cratedig_io
                                           ftxui::ftxui)
 target_link_libraries(cratedig_tui PRIVATE cratedig_warnings cratedig_sanitizer)
