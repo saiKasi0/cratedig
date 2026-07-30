@@ -95,6 +95,10 @@ TEST_CASE("GarbageRing defers destruction until collect", "[unit]") {
 }
 
 TEST_CASE("GarbageRing retire does not allocate", "[unit]") {
+  if constexpr (!rt::kAllocationDetectionEnabled) {
+    SKIP("allocation detection is compiled out (TSan build) — see rt_scope.hpp");
+  }
+
   // The reason this type exists: retiring must be callable from the audio
   // callback. Creating the object allocates, so that happens outside the scope.
   TrackedBuffer::reset_counters();

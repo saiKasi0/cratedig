@@ -38,7 +38,7 @@ void default_violation_handler(const char* what) {
 // interleaving is worth more here than saving a fence on a cold branch.
 std::atomic<ViolationHandler> g_violation_handler{&default_violation_handler};
 
-#if CRATEDIG_RT_GUARD
+#if CRATEDIG_RT_DETECT_ALLOCATIONS
 // Single choke point for every replaced operator new below.
 void check_rt_allocation(const char* what) noexcept {
   if (t_rt_depth == 0) {
@@ -89,7 +89,7 @@ void* allocate_aligned_or_throw(std::size_t size, std::size_t alignment, const c
   }
   return memory;
 }
-#endif  // CRATEDIG_RT_GUARD
+#endif  // CRATEDIG_RT_DETECT_ALLOCATIONS
 
 }  // namespace
 
@@ -120,7 +120,7 @@ ScopedRtGuard::~ScopedRtGuard() {
 
 }  // namespace rt
 
-#if CRATEDIG_RT_GUARD
+#if CRATEDIG_RT_DETECT_ALLOCATIONS
 
 // Replacements for the global allocation functions. All eight forms must be
 // replaced together: leaving one unreplaced would let that path allocate
@@ -228,4 +228,4 @@ void operator delete[](void* memory, std::align_val_t /*alignment*/,
   std::free(memory);
 }
 
-#endif  // CRATEDIG_RT_GUARD
+#endif  // CRATEDIG_RT_DETECT_ALLOCATIONS

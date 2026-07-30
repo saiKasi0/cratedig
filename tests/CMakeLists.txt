@@ -39,14 +39,22 @@ add_executable(cratedig_rt_scope_abort_test integration/rt_scope_abort_test.cpp
 target_link_libraries(cratedig_rt_scope_abort_test PRIVATE cratedig_rt cratedig_warnings
                                                            cratedig_sanitizer)
 
-add_test(
-  NAME rt_scope_default_handler_aborts
-  COMMAND
-    ${CMAKE_COMMAND} -DTEST_EXECUTABLE=$<TARGET_FILE:cratedig_rt_scope_abort_test>
-    -DEXPECT_REGEX=RT_SCOPE\ violation -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/expect_abort.cmake)
-set_tests_properties(
-  rt_scope_default_handler_aborts
-  PROPERTIES LABELS integration
-             # The abort is the expected outcome, so the sanitizers must not turn
-             # it into their own louder failure.
-             ENVIRONMENT "ASAN_OPTIONS=abort_on_error=0;TSAN_OPTIONS=abort_on_error=0")
+# Under TSan the operator replacements are compiled out (its runtime defines them
+# as strong symbols — see src/rt/rt_scope.hpp), so there is nothing to abort.
+# Registering the test anyway would report a failure for a deliberate,
+# documented configuration.
+if(CRATEDIG_RT_GUARD AND NOT CRATEDIG_SANITIZER STREQUAL "thread")
+  add_test(
+    NAME rt_scope_default_handler_aborts
+    COMMAND
+      ${CMAKE_COMMAND} -DTEST_EXECUTABLE=$<TARGET_FILE:cratedig_rt_scope_abort_test>
+      -DEXPECT_REGEX=RT_SCOPE\ violation -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/expect_abort.cmake)
+  set_tests_properties(
+    rt_scope_default_handler_aborts
+    PROPERTIES LABELS integration
+               # The abort is the expected outcome, so the sanitizers must not
+               # turn it into their own louder failure.
+               ENVIRONMENT "ASAN_OPTIONS=abort_on_error=0")
+else()
+  message(STATUS "cratedig: RT_SCOPE abort test disabled (guard off or TSan build)")
+endif()

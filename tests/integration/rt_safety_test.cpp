@@ -50,6 +50,10 @@ constexpr std::uint32_t kMaxBlock = 1'024;
 }  // namespace
 
 TEST_CASE("Engine::render allocates nothing", "[integration]") {
+  if constexpr (!rt::kAllocationDetectionEnabled) {
+    SKIP("allocation detection is compiled out (TSan build) — see rt_scope.hpp");
+  }
+
   const engine::Engine::Config config{
       .sample_rate = 48'000, .num_channels = kChannels, .max_block_frames = kMaxBlock, .seed = 0};
   engine::Engine eng{config};
@@ -82,6 +86,10 @@ TEST_CASE("Engine::render allocates nothing", "[integration]") {
 }
 
 TEST_CASE("the RT guard is armed during the render test", "[integration]") {
+  if constexpr (!rt::kAllocationDetectionEnabled) {
+    SKIP("allocation detection is compiled out (TSan build) — see rt_scope.hpp");
+  }
+
   // Without this, a build that silently lost the guard would make the test above
   // pass by measuring nothing at all.
   const HandlerSwap swap;

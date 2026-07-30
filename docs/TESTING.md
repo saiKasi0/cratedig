@@ -137,6 +137,13 @@ everything our code does: `new`, `std::vector` growth, `std::string`,
 nothing in the callback is allowed to call into such a library, and malloc-level
 interposition is tracked as later hardening in ARCHITECTURE.md.
 
+**Allocation detection is compiled out in TSan builds** — TSan's runtime defines
+the operator new/delete family itself and collides with ours (see
+ARCHITECTURE.md). Those tests call `SKIP()` with a reason, so a TSan run reports
+fewer tests than a dev run and says why. That is expected; the same assertions
+run under `dev`, `asan`, and `ubsan`. If you are changing the guard, verify it on
+`asan` — a green TSan run proves nothing about it.
+
 ## Adding a test
 
 1. Put it in the right layer directory; add the source file to `tests/CMakeLists.txt`.

@@ -24,7 +24,46 @@
 // Enabled by the CRATEDIG_RT_GUARD compile definition. When off, RT_SCOPE()
 // expands to nothing and the operator replacements are not compiled at all.
 
+// ThreadSanitizer detection. TSan's runtime defines the whole operator
+// new/delete family as STRONG symbols on Linux, so our replacements collide at
+// link time ("multiple definition of operator new"). ASan's equivalents are weak
+// and coexist fine; macOS sanitizer runtimes interpose instead of defining, so
+// this only bites on Linux + TSan — which is precisely why the Docker CI path
+// exists.
+//
+// Under TSan we therefore compile out the operator replacements but keep scope
+// tracking. This is applied on every platform, not just Linux, so a TSan build
+// behaves the same everywhere — a guard that is present on macOS and absent on
+// Linux would be worse than one that is predictably absent on both.
+//
+// Nothing goes unchecked overall: TSan's job is race detection, and dev/asan/
+// ubsan still enforce the allocation rule on the same code. Tests that assert
+// allocation *detection* skip themselves loudly rather than passing vacuously —
+// see rt::kAllocationDetectionEnabled.
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define CRATEDIG_RT_TSAN 1
+#endif
+#endif
+#if defined(__SANITIZE_THREAD__)
+#define CRATEDIG_RT_TSAN 1
+#endif
+#ifndef CRATEDIG_RT_TSAN
+#define CRATEDIG_RT_TSAN 0
+#endif
+
+#if CRATEDIG_RT_GUARD && !CRATEDIG_RT_TSAN
+#define CRATEDIG_RT_DETECT_ALLOCATIONS 1
+#else
+#define CRATEDIG_RT_DETECT_ALLOCATIONS 0
+#endif
+
 namespace rt {
+
+// True when allocation inside an RT_SCOPE is actually detected and reported.
+// False under TSan (see above) and when the guard is compiled out. Scope depth
+// tracking works either way.
+inline constexpr bool kAllocationDetectionEnabled = CRATEDIG_RT_DETECT_ALLOCATIONS != 0;
 
 // Called on the offending thread, at the point of allocation. Must be
 // async-signal-safe: it may run inside the audio callback.

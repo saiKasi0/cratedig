@@ -52,6 +52,10 @@ class HandlerSwap {
 }  // namespace
 
 TEST_CASE("no RT scope means no violations", "[unit]") {
+  if constexpr (!rt::kAllocationDetectionEnabled) {
+    SKIP("allocation detection is compiled out (TSan build) — see rt_scope.hpp");
+  }
+
   const HandlerSwap swap;
 
   std::vector<int> values;
@@ -64,6 +68,10 @@ TEST_CASE("no RT scope means no violations", "[unit]") {
 }
 
 TEST_CASE("allocating inside an RT scope is a violation", "[unit]") {
+  if constexpr (!rt::kAllocationDetectionEnabled) {
+    SKIP("allocation detection is compiled out (TSan build) — see rt_scope.hpp");
+  }
+
   const HandlerSwap swap;
 
   // Allocate the vector's storage BEFORE the scope; only the growth inside it
@@ -87,6 +95,10 @@ TEST_CASE("allocating inside an RT scope is a violation", "[unit]") {
 }
 
 TEST_CASE("std::string allocation inside an RT scope is caught", "[unit]") {
+  if constexpr (!rt::kAllocationDetectionEnabled) {
+    SKIP("allocation detection is compiled out (TSan build) — see rt_scope.hpp");
+  }
+
   const HandlerSwap swap;
 
   {
@@ -101,6 +113,10 @@ TEST_CASE("std::string allocation inside an RT scope is caught", "[unit]") {
 }
 
 TEST_CASE("RT scopes nest and only the outermost re-permits allocation", "[unit]") {
+  if constexpr (!rt::kAllocationDetectionEnabled) {
+    SKIP("allocation detection is compiled out (TSan build) — see rt_scope.hpp");
+  }
+
   const HandlerSwap swap;
 
   CHECK(rt::rt_scope_depth() == 0);
@@ -147,6 +163,10 @@ TEST_CASE("RT scope depth is per-thread", "[unit]") {
 }
 
 TEST_CASE("the guard is actually linked in", "[unit]") {
+  if constexpr (!rt::kAllocationDetectionEnabled) {
+    SKIP("allocation detection is compiled out (TSan build) — see rt_scope.hpp");
+  }
+
   // Guards against the OBJECT-library-versus-static-library trap: if the
   // replacement operators were dropped at link time, every other test in this
   // file would pass vacuously because no violation could ever be reported.
