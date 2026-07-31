@@ -356,6 +356,24 @@ struct Session {
   return want;
 }
 
+// One MIDI message, decoded, with the emptiness checked where the analysis can
+// see it.
+//
+// A plain `if` rather than REQUIRE(event.has_value()), because clang-tidy's
+// dataflow cannot see through a Catch2 macro and reads every dereference after
+// one as unchecked. FAIL() throws, so the return after it never runs -- it is
+// there for the analysis as much as for the reader. Same shape and same reason
+// as decoded() in tests/unit/keys_test.cpp.
+[[nodiscard]] rt::PadEvent decoded(std::initializer_list<std::uint8_t> bytes) {
+  const std::vector<std::uint8_t> message{bytes};
+  const std::optional<rt::PadEvent> event = io::decode_midi(message, io::MidiMap{});
+  if (!event.has_value()) {
+    FAIL("did not decode as a note");
+    return rt::PadEvent{};
+  }
+  return *event;
+}
+
 // A pattern with only one pad's steps in it, so its onsets can be measured
 // without another pad's audio in the way.
 [[nodiscard]] rt::Pattern only_pad(const rt::Pattern& source, std::size_t pad) {
@@ -668,13 +686,11 @@ TEST_CASE("e2e: MIDI bytes reach the audio", "[e2e]") {
   constexpr std::size_t kProbeFrames = 4'096;
 
   const auto play_note = [&](std::initializer_list<std::uint8_t> bytes) {
-    const std::vector<std::uint8_t> message{bytes};
-    const std::optional<rt::PadEvent> event = io::decode_midi(message, io::MidiMap{});
-    REQUIRE(event.has_value());
+    const rt::PadEvent event = decoded(bytes);
 
     engine::Engine eng{e2e_config()};
     REQUIRE(assign_kit(eng, material) == rt::kNumPads);
-    REQUIRE(eng.submit_midi_event(*event));
+    REQUIRE(eng.submit_midi_event(event));
 
     Render render{kProbeFrames, kChannels};
     render.run(eng, blocks);
@@ -701,14 +717,12 @@ TEST_CASE("e2e: MIDI bytes reach the audio", "[e2e]") {
   // A note-on at velocity 0 is a NOTE-OFF, which is what a large share of
   // controllers send instead of 0x80. Read as a note-on it would start a voice;
   // here it must start nothing, and on a one-shot pad a note-off is ignored.
-  const std::vector<std::uint8_t> release{0x90, 36, 0};
-  const std::optional<rt::PadEvent> off = io::decode_midi(release, io::MidiMap{});
-  REQUIRE(off.has_value());
-  CHECK(off->kind == rt::PadEventKind::kNoteOff);
+  const rt::PadEvent off = decoded({0x90, 36, 0});
+  CHECK(off.kind == rt::PadEventKind::kNoteOff);
 
   engine::Engine eng{e2e_config()};
   REQUIRE(assign_kit(eng, material) == rt::kNumPads);
-  REQUIRE(eng.submit_midi_event(*off));
+  REQUIRE(eng.submit_midi_event(off));
   Render silence{kProbeFrames, kChannels};
   silence.run(eng, blocks);
   CHECK(silence.peak() == 0.0F);
@@ -737,13 +751,9 @@ TEST_CASE("e2e: a MIDI note and a sequenced step reach the same pad the same way
   Render from_pattern{kProbeFrames, kChannels};
   from_pattern.run(sequenced, blocks);
 
-  const std::vector<std::uint8_t> note{0x90, 36, 127};
-  const std::optional<rt::PadEvent> event = io::decode_midi(note, io::MidiMap{});
-  REQUIRE(event.has_value());
-
   engine::Engine live{e2e_config()};
   REQUIRE(assign_kit(live, material) == rt::kNumPads);
-  REQUIRE(live.submit_midi_event(*event));
+  REQUIRE(live.submit_midi_event(decoded({0x90, 36, 127})));
   Render from_midi{kProbeFrames, kChannels};
   from_midi.run(live, blocks);
 

@@ -310,7 +310,7 @@ struct SongPosition {
     return SongPosition{};  // unreachable: pattern_length() is never zero
   }
 
-  std::size_t into = static_cast<std::size_t>(absolute_step % total);
+  auto into = static_cast<std::size_t>(absolute_step % total);
   for (std::size_t slot = 0; slot < slots; ++slot) {
     const std::uint8_t pattern = song_pattern(state.song, slot);
     const std::size_t length = pattern_length(state.patterns[pattern]);

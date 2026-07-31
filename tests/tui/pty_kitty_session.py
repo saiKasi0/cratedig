@@ -56,6 +56,7 @@ from pty_session import (  # noqa: E402
     ROWS,
     SETTLE_SECONDS,
     Grid,
+    decode_stream,
     drain,
     write_fixture_wav,
 )
@@ -116,7 +117,7 @@ def legacy_flag_phase(binary: Path, fixture: Path) -> list[str]:
     alive = drain(fd, SETTLE_SECONDS, output)
 
     failures: list[str] = []
-    seen = output.decode("utf-8", "replace")
+    seen = decode_stream(output)
     if QUERY in seen:
         failures.append("--legacy-keys still asked the terminal about the protocol")
     if PUSH in seen:
@@ -159,7 +160,7 @@ def main() -> int:
     failures: list[str] = []
 
     def seen() -> str:
-        return output.decode("utf-8", "replace")
+        return decode_stream(output)
 
     def screen_now() -> str:
         grid = Grid(COLUMNS, ROWS)

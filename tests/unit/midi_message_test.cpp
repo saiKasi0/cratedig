@@ -26,38 +26,48 @@ namespace {
   return io::decode_midi(buffer, map);
 }
 
+// The same, for the cases that go on to read the event.
+//
+// A plain `if` rather than REQUIRE(event.has_value()), because clang-tidy's
+// dataflow analysis cannot see through a Catch2 macro and reads every
+// dereference after one as unchecked. FAIL() throws, so the return after it
+// never runs -- it is there to make the guard visible to the analysis as well as
+// to the reader. Same shape, and the same reason, as decoded() in keys_test.cpp.
+[[nodiscard]] rt::PadEvent decoded(std::initializer_list<std::uint8_t> bytes,
+                                   const io::MidiMap& map = {}) {
+  const std::optional<rt::PadEvent> event = decode(bytes, map);
+  if (!event.has_value()) {
+    FAIL("did not decode as a note");
+    return rt::PadEvent{};
+  }
+  return *event;
+}
+
 }  // namespace
 
 TEST_CASE("a note-on becomes a pad hit", "[unit]") {
   // Note 36 is the default base, so it is pad 0. Velocity 127 is full scale.
-  const std::optional<rt::PadEvent> event = decode({0x90, 36, 127});
-  REQUIRE(event.has_value());
-  CHECK(event->pad == 0);
-  CHECK(event->kind == rt::PadEventKind::kNoteOn);
-  CHECK(event->velocity == 1.0F);
-  CHECK(event->frame_offset == 0);
+  const rt::PadEvent event = decoded({0x90, 36, 127});
+  CHECK(event.pad == 0);
+  CHECK(event.kind == rt::PadEventKind::kNoteOn);
+  CHECK(event.velocity == 1.0F);
+  CHECK(event.frame_offset == 0);
 }
 
 TEST_CASE("velocity is scaled by 127, not 128", "[unit]") {
   // Dividing by 128 would make a maximum-velocity hit 0.992 and put a ceiling no
   // pad could ever reach. Silent, permanent, and worth one assertion.
-  const std::optional<rt::PadEvent> full = decode({0x90, 36, 127});
-  REQUIRE(full.has_value());
-  CHECK(full->velocity == 1.0F);
+  CHECK(decoded({0x90, 36, 127}).velocity == 1.0F);
 
-  const std::optional<rt::PadEvent> one = decode({0x90, 36, 1});
-  REQUIRE(one.has_value());
-  CHECK(one->velocity > 0.0F);
-  CHECK(one->velocity < 0.01F);
+  const rt::PadEvent one = decoded({0x90, 36, 1});
+  CHECK(one.velocity > 0.0F);
+  CHECK(one.velocity < 0.01F);
 }
 
 TEST_CASE("notes map onto the pad grid from the base note up", "[unit]") {
   for (std::uint8_t offset = 0; offset < rt::kNumPads; ++offset) {
-    const std::optional<rt::PadEvent> event =
-        decode({0x90, static_cast<std::uint8_t>(36 + offset), 100});
     INFO("note " << static_cast<int>(36 + offset));
-    REQUIRE(event.has_value());
-    REQUIRE(event->pad == offset);
+    REQUIRE(decoded({0x90, static_cast<std::uint8_t>(36 + offset), 100}).pad == offset);
   }
 }
 
@@ -78,21 +88,19 @@ TEST_CASE("a note-on at velocity zero is a note-off", "[unit]") {
   //
   // Read as a note-on, it gives a pad that retriggers silently and never
   // releases -- on a gate pad, a note stuck on forever.
-  const std::optional<rt::PadEvent> event = decode({0x90, 38, 0});
-  REQUIRE(event.has_value());
-  CHECK(event->kind == rt::PadEventKind::kNoteOff);
-  CHECK(event->pad == 2);
-  CHECK(event->velocity == 0.0F);
+  const rt::PadEvent event = decoded({0x90, 38, 0});
+  CHECK(event.kind == rt::PadEventKind::kNoteOff);
+  CHECK(event.pad == 2);
+  CHECK(event.velocity == 0.0F);
 }
 
 TEST_CASE("an explicit note-off is a note-off", "[unit]") {
   // The other form, which must reach the same answer -- including its release
   // velocity being discarded rather than passed on as a level.
-  const std::optional<rt::PadEvent> event = decode({0x80, 38, 64});
-  REQUIRE(event.has_value());
-  CHECK(event->kind == rt::PadEventKind::kNoteOff);
-  CHECK(event->pad == 2);
-  CHECK(event->velocity == 0.0F);
+  const rt::PadEvent event = decoded({0x80, 38, 64});
+  CHECK(event.kind == rt::PadEventKind::kNoteOff);
+  CHECK(event.pad == 2);
+  CHECK(event.velocity == 0.0F);
 }
 
 TEST_CASE("the channel filter accepts one channel or all of them", "[unit]") {
@@ -115,9 +123,7 @@ TEST_CASE("a custom base note moves the whole grid", "[unit]") {
   const io::MidiMap high{.base_note = 60};  // middle C
   CHECK_FALSE(decode({0x90, 36, 100}, high).has_value());
 
-  const std::optional<rt::PadEvent> event = decode({0x90, 60, 100}, high);
-  REQUIRE(event.has_value());
-  CHECK(event->pad == 0);
+  CHECK(decoded({0x90, 60, 100}, high).pad == 0);
 }
 
 TEST_CASE("messages that are not notes are ignored", "[unit]") {
@@ -155,8 +161,7 @@ TEST_CASE("a longer buffer is decoded from its first message", "[unit]") {
   // RtMidi delivers one message per callback, so trailing bytes should not
   // happen -- but reading past three bytes would be a bug waiting for the day
   // they do.
-  const std::optional<rt::PadEvent> event = decode({0x90, 36, 100, 0x90, 37, 100});
-  REQUIRE(event.has_value());
-  CHECK(event->pad == 0);
-  CHECK(event->kind == rt::PadEventKind::kNoteOn);
+  const rt::PadEvent event = decoded({0x90, 36, 100, 0x90, 37, 100});
+  CHECK(event.pad == 0);
+  CHECK(event.kind == rt::PadEventKind::kNoteOn);
 }

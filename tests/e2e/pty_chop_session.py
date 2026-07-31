@@ -57,6 +57,7 @@ from pty_session import (  # noqa: E402
     ROWS,
     SETTLE_SECONDS,
     Grid,
+    decode_stream,
     drain,
 )
 
@@ -152,7 +153,7 @@ def main() -> int:
 
     def screen_now() -> str:
         grid = Grid(COLUMNS, ROWS)
-        grid.feed(output.decode("utf-8", "replace"))
+        grid.feed(decode_stream(output))
         return grid.render()
 
     failures: list[str] = []
@@ -235,7 +236,7 @@ def main() -> int:
         failures.append(f"exit code {exit_code}, expected 0")
 
     tail = Grid(COLUMNS, ROWS)
-    tail.feed(output.decode("utf-8", "replace"))
+    tail.feed(decode_stream(output))
     if not tail.saw_alt_screen_exit:
         failures.append("the program never left the alternate screen buffer (no CSI ?1049l)")
 

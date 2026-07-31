@@ -344,7 +344,7 @@ TEST_CASE("song is the one verb where a trailing word is fatal", "[command]") {
   // become a two-slot song rather than the longer one being typed.
   const Command command = parse_command("song 1 2 x");
   REQUIRE(command.kind == CommandKind::kError);
-  CHECK(command.message.find("x") != std::string::npos);
+  CHECK(command.message.find('x') != std::string::npos);
 
   CHECK(parse_command("song 1 0 2").kind == CommandKind::kError);
   CHECK(parse_command("song 1 17").kind == CommandKind::kError);

@@ -136,6 +136,26 @@ the object**: the edit did not happen, and `Engine::rejected_pad_configs()`
 counts it. Reporting the refusal is better than dropping it silently, because the
 control-side view of the pads must not diverge from what the audio thread has.
 
+**Five rings, as of M4**, and the count is a design statement rather than an
+accident:
+
+| Ring | Direction | Why it is separate |
+|---|---|---|
+| `m_events` | control → audio | keyboard `PadEvent`s |
+| `m_midi_events` | **MIDI thread** → audio | `SpscRing` is single-producer; sharing the keyboard's would be a race that only shows up under load |
+| `m_transport_commands` | control → audio | play/stop/seek as one command, so the audio thread cannot see a position without the state that goes with it |
+| `m_pad_handoff` | control → audio | owning `PadConfig` handles |
+| `m_sequencer_handoff` | control → audio | one owning `SequencerState` handle |
+
+**The handoff rings only drain when something renders**, which is the trap
+`--no-audio` sets. It is sized around on the pad ring and *avoided* on the
+sequencer's: a chop publishes sixteen configs at once and three chops exhaust
+thirty-two slots, but every step toggle publishes a sequencer state, so eight
+keystrokes exhausted eight slots and every later edit was refused for the rest of
+the session. With no stream there is no consumer, so `src/tui/app.cpp` does not
+publish at all in that mode and its own copy is the state. Found by
+`tests/e2e/pty_sequencer_session.py`; the TUI session was making exactly seven.
+
 ## Determinism contract
 
 `Engine::render()` with a fixed seed and fixed input is bit-exact across runs on
@@ -441,6 +461,80 @@ PadConfig {
   reached; jumping up to sustain first is an audible click and the classic way to
   get one.
 
+## The sequencer runs on the audio thread
+
+Not a design preference — the acceptance forces it. `docs/ROADMAP.md` asks for
+"recorded pattern renders bit-exact offline", and offline bounce calls
+`Engine::render()` in a plain loop with no control thread in existence. A
+sequencer that generated events from the control thread would be simpler to write
+and impossible to reproduce offline; it does not fail a taste test, it fails the
+milestone. `tests/e2e/sequencer_e2e_test.cpp` is the proof: it renders patterns
+with nothing running but `render()`.
+
+Two consequences shape everything else about it.
+
+**The pattern data obeys every `src/rt/` rule**, because the audio thread reads
+it: fixed size, trivially copyable (asserted), no pointers, no allocation,
+reached through one `shared_ptr<const SequencerState>` swapped whole through a
+`HandoffRing`. That is the reconfiguration protocol carrying a second payload
+with no change to it, which is what this document argued it was worth building
+once for.
+Editing one step means building a new state and publishing it — about 16 KB
+memcpy per keystroke, which is microseconds at typing speed and buys the
+one-pointer rule.
+
+**Step positions are computed from the absolute frame, never accumulated.** Same
+idiom as `chop_grid()`: `step_frame(step, rate, bpm, swing)` is a pure function of
+the step index, so rounding cannot drift and the answer cannot depend on the block
+size. An accumulator advanced once per block gives different results at 64 frames
+and at 2048 — which is how a sequencer ends up a few milliseconds out after four
+minutes, and how block-size invariance dies. Swing is folded into the step's
+absolute position rather than applied as a delay, for the same reason. All of it
+is integer arithmetic, so there is no float to round differently on another target.
+
+The scan starts one step *before* the block, deliberately: a swung step can land
+inside a block while its unswung base sits before it, and starting at the exact
+index would silently drop it. `step_index_at()` and `step_scan_start()` are named
+for their two different jobs because the transport readout used the wrong one
+once and reported every step one early.
+
+**M6 serialises `rt::SequencerState` directly.** It is plain data with no
+indirection precisely so the project file has a model to write out rather than a
+second one to invent. Adding a pointer, a `std::string` or a `std::vector` to it
+breaks that and breaks RT-safety in the same stroke.
+
+The metronome is **not** a voice. Routing a click through the voice pool would
+give it a pad index, a glow slot and a telemetry entry it has no business owning,
+and would let a dense pattern steal its voice. It is a `constexpr` table mixed
+straight into the output buffer.
+
+## MIDI input has a ring of its own
+
+`rt::SpscRing` is **single-producer** — the header says so and TSan is the
+authority on it. RtMidi delivers on a thread of its own, so a MIDI callback
+calling `Engine::trigger_pad()` would put a second producer on the keyboard's
+ring. It would appear to work.
+
+So MIDI gets `Engine::submit_midi_event()` and `m_midi_events`, drained in the
+same loop as the keyboard's by one templated function — the two paths differ in
+capacity and producer thread, not in what happens to an event once it arrives. A
+second copy of that loop is how they would drift into behaving differently.
+
+Decoding bytes into a `PadEvent` is a **pure function** in `src/io/midi_message.cpp`
+with no RtMidi types in it at all, which is what lets the meaning of a note be
+tested against literal byte arrays on a machine with nothing plugged in. The
+velocity curve lives there, as `rt::PadEvent` has said since M1, so the engine
+never has to know where a hit came from. `midi_device.cpp` is the part that needs
+hardware and contains no interpretation.
+
+One upstream defect is worth recording because it cost a day: RtMidi's CoreMIDI
+backend declares `getCoreMidiClientSingleton()` as `throw()` and then calls
+`error()`, which throws — so a failing `MIDIClientCreate` is `std::terminate`
+before any `catch` can run. It is reachable from enumeration as well as
+construction, because the client is a lazy singleton. Measured at 0 in ~240 runs
+on dev, 1 in ~240 under ASan and 4 in 25 under TSan, so the backend-touching tests
+skip under TSan with a stated reason — the same precedent as the RT guard.
+
 ## The onset pipeline
 
 `:chop transient` is a worker-thread analysis that produces positions. The audio
@@ -508,58 +602,75 @@ care:
   from itself thirty times a second.
 - `--legacy-keys` never asks, which keeps the old path exercised on demand.
 
-## Current state (M3)
+## Current state (M4)
 
-CRATEDIG chops. `cratedig <file>` decodes it, resamples it to the engine rate,
-builds a peak pyramid, puts it on pad 1 and draws the PERFORM screen from
-`docs/design`. `:chop transient` then runs the onset pipeline, cuts the file at
-the hits, snaps the boundaries to zero crossings and lays slice *n* on pad *n*
+CRATEDIG chops and sequences. `cratedig <file>` decodes it, resamples it to the
+engine rate, builds a peak pyramid, puts it on pad 1 and draws the PERFORM screen
+from `docs/design`. `:chop transient` then runs the onset pipeline, cuts the file
+at the hits, snaps the boundaries to zero crossings and lays slice *n* on pad *n*
 across the sixteen-pad grid — live, with the stream running, and clearing the
 pads it does not fill. `qwer asdf zxcv 1234` play them; `Enter` opens EDIT, where
 `[`/`]` step slices and `h l H L` nudge the two boundaries a frame at a time
 against a zero-crossing ruler, with `u` to undo.
 
+M4 made it play itself. `Tab` brings up the pattern lane, `[`/`]` move a step
+cursor and `t` writes the selected pad onto the step under it; `p` runs the
+transport, always from the top. Sixteen patterns of up to thirty-two steps each,
+chained into a song by `:song 1 2 3`, with per-pattern swing, a `constexpr`
+metronome and a tempo held as hundredths so 89.5 bpm survives the trip exactly.
+A MIDI controller plays the same pads at real velocity through a ring of its own.
+Sequenced hits light their pads differently from live ones, scheduled in listener
+time against a latency figure M9 will measure and which is zero until it does.
+
 Implemented:
 
 - `src/rt/` — `kCacheLine`, `Result`, `SpscRing`, `GarbageRing`, `HandoffRing`,
   `RT_SCOPE`, `Sample`, `hermite4`, `PadEvent`, `PadConfig`, `Envelope`,
-  `VoicePool` (slice-ranged playback, ADSR, declick fades, choke groups, tuning).
-- `src/engine/` — pad configs adopted per block, event drain, voice mixing,
-  garbage retirement, telemetry including pad glow. Still device-free and
-  thread-free: it spawns nothing, so offline rendering stays single-threaded and
-  reproducible.
+  `VoicePool` (slice-ranged playback, ADSR, declick fades, choke groups, tuning,
+  sample-accurate start offsets), `SequencerState` and its step arithmetic, the
+  `constexpr` metronome table.
+- `src/engine/` — pad configs and sequencer states adopted per block, event drain
+  from two rings, the step scan, voice mixing, garbage retirement, transport, and
+  telemetry including pad glow. Still device-free and thread-free: it spawns
+  nothing, so offline rendering stays single-threaded and reproducible, which is
+  what makes the sequencer testable at all.
 - `src/ingest/` — FFmpeg demux/decode, libsamplerate conversion at load, the peak
   pyramid, PFFFT-backed STFT, onset detection, zero-crossing snap and the slice
   model (`chop_transient`, `chop_grid`).
-- `src/io/` — the RtAudio adapter, and the only file that includes `RtAudio.h`.
-  The backend is constructed on first use, so `--no-audio` never initialises one.
+- `src/io/` — the RtAudio adapter and the RtMidi adapter, the only files that
+  include those headers, plus `midi_message.cpp`, which is pure decoding and
+  includes neither. Both backends are constructed on first use, so `--no-audio`
+  initialises neither.
 - `src/tui/` — FTXUI. `waveform.cpp` (braille, no FTXUI dependency),
   `ui_state.cpp` (the view model), `render.cpp` and `render_edit.cpp` (two pure
   layout functions over one `UiState`), `render_detail.cpp` (what they share),
   `keys.cpp` (the CSI-u decoder), `command.cpp` (the `:` grammar), `theme.hpp`,
   `app.cpp`, `cli.cpp`.
 
-Not yet built: MIDI and the sequencer (M4), the mixer graph (M5), recording and
-the project file (M6). See `docs/ROADMAP.md`.
+Not yet built: the small playability batch (M4.5), the mixer graph (M5), the
+sample pool and browser (M5.5), recording and the project file (M6). See
+`docs/ROADMAP.md`.
 
-### What M4 inherits
+### What M5 inherits
 
-- **`PadEvent::frame_offset` is carried but always zero.** Triggers land on block
-  boundaries. Sample-accurate offsets are M4's, and the field has existed since
-  M1 so the wire format does not change when MIDI, the sequencer and the offline
-  renderer all already speak it.
-- **The note-off path is built and tested**, engine-side. M3's Kitty keys are one
-  *producer* of it; MIDI is another, and needs no engine change.
-- **The `pattern` tab is a selectable placeholder** with the layout already cut
-  around it, so landing the sequencer is filling in a panel rather than
-  re-cutting the screen — and the tab mechanism is under snapshot test already.
-- **Pad glow distinguishes nothing yet.** Live and sequenced hits should look
-  different (see the planned section below); the packed word has room and the UI
-  maps it in one place.
-- **The reconfiguration protocol generalises.** M6's recording and M8's plugin
-  chains reuse `HandoffRing` unchanged; only the payload type differs.
+- **The reconfiguration protocol has now carried a second payload** — the
+  sequencer state, alongside pad configs — with no change to `HandoffRing` for
+  either. M5's channel strips are the third, and the strip *is* the mixer half of
+  `PadConfig` rather than a parallel struct, so it may not even be a new payload.
+- **`Config::output_latency_frames` exists and is zero.** It delays sequenced
+  glow only, and the path is built and exercised at zero on purpose so M9 fills
+  in a figure rather than bolting on a mechanism.
+- **`rt::SequencerState` is M6's serialisation model**, deliberately. It is plain
+  trivially-copyable data so the project file consumes the struct rather than
+  inventing a second one. M5 must keep it that way.
+- **Telemetry now carries the transport** as two packed words — position with the
+  playing flag, and step/slot/pattern together — for the same reason the playhead
+  and the pad glow are packed: the UI must never pair fields from two blocks and
+  name a step the pattern does not have.
+- **Reverse and loop are still `PadConfig` fields nothing honours**, waiting on
+  M5's DSP. They were deferred out of M3 and again out of M4 for the same reason.
 
-### Known M3 limitations
+### Known limitations
 
 These are deliberate scope boundaries, not oversights:
 
@@ -567,11 +678,23 @@ These are deliberate scope boundaries, not oversights:
   the DSP for them lands — a field nothing honours is worse than no field.
 - **A chop assigns slices to pads positionally**: slice *n* to pad *n*, and
   anything past sixteen is not on a pad at all. `:slot assign` reaches the rest
-  one at a time. Banks are M6.
-- **`--no-audio` never drains the handoff ring**, because nothing renders. Enough
-  chops in one session will fill it, and `publish_pad_config()` then refuses
-  rather than dropping silently. That is what that mode is, not a leak to size
-  around.
+  one at a time, and range assignment is M4.5. Banks are M6.
+- **`--no-audio` never drains the handoff rings**, because nothing renders.
+  Enough chops in one session will fill the pad ring, and `publish_pad_config()`
+  then refuses rather than dropping silently. That is what that mode is, not a
+  leak to size around — but it stopped being defensible for the sequencer, where
+  every step toggle publishes, so that path does not publish without a stream at
+  all. The pad path is the same bug with a longer fuse.
+- **The transport does not run under `--no-audio`.** Nothing calls `render()`, so
+  the sequencer never advances; pressing play says so rather than lighting up a
+  transport that cannot move.
+- **The sequencer has no MIDI clock and no CC mapping.** Clock sync would make
+  tempo a value arriving from a third thread, against the determinism story the
+  offline acceptance rests on. Both stay available for a later milestone.
+- **Step velocity is stored and honoured but nothing writes it yet.** The grid
+  holds 0–127 per cell and the engine plays it; M6's recording is what fills it
+  in from what was played. Zeroing it on a toggle would be a silent loss the day
+  something does.
 - **Held pads need a terminal that answers `CSI ? u`.** In one that does not,
   `:pad gate` behaves as one-shot rather than sticking on. That is the honest
   degradation, and it is why the feature is gated on a reply rather than on a
@@ -620,6 +743,12 @@ pad glow moved up into the built half, and the record lane and plugin chains now
 writing three features down as one problem — it is cheaper to discover the shared
 shape once, on paper, than three times in code.
 
+M4 took the rest of pad glow with it, and gave the protocol a second payload
+without changing it. What is left below is the record lane, the DSP that fills in the
+rest of `PadConfig`, and the latency work — and the last of those is now a
+figure to measure rather than a mechanism to design, because M4 built and
+exercised the mechanism at zero.
+
 Milestone placement is in `docs/ROADMAP.md`.
 
 ## The record lane
@@ -666,31 +795,14 @@ What remains is the DSP that fills in the rest of the struct:
   save/load (M6) serialises it, and the Lua config tier (M7) reads and writes it.
   They do not each need their own idea of what a pad is.
 
-## Pad glow, beyond M3
-
-Glow is built: the audio thread publishes frames-since-trigger and velocity per
-pad, and the UI maps that to a ramp in intensity and weight rather than colour,
-because in sixteen colours there is no glow. Peak was the wrong signal and is
-still published for the meters — it follows audio level, so a quiet sample would
-barely light its pad and a pad triggered into silence would not light at all,
-which is why the acceptance names "at any sample level" and the test uses a
-−60 dBFS sample.
-
-Two refinements belong to M4, once there is a sequencer to distinguish:
-
-- **Live and sequenced hits should look different.** Hardware samplers
-  distinguish "you played this" from "the machine played this", and the
-  distinction is genuinely useful when overdubbing.
-- **Sequenced glow belongs in listener time, not engine time.** With 180 ms of
-  output latency the sound arrives 180 ms after the block that rendered it, so a
-  pad that lights when the block renders lights early and looks wrong. Delaying
-  the *sequenced* glow by the measured output latency lines it up with what is
-  heard. Live triggers need no such treatment: the reference is the user's
-  finger, and nothing can be done about that gap anyway.
-
-That last point is why the latency work below is not only a Bluetooth concern.
-
 ## Output latency, and the honest Bluetooth answer
+
+M4 built the hook this milestone fills in, so the shape is already fixed:
+`Config::output_latency_frames` delays **sequenced** pad glow only, and is zero
+until something measures it. Live triggers get no such treatment and cannot — the
+reference is the player's own finger, and delaying the light would only add to
+that gap. This is why the latency work is not only a Bluetooth concern.
+
 
 Bluetooth adds 100–200 ms with SBC or AAC, roughly 40 ms with aptX Low Latency,
 and 20–30 ms with LC3 / LE Audio. Those figures are approximate and belong to the

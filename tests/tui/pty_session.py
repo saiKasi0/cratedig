@@ -149,6 +149,37 @@ class Grid:
         return "\n".join("".join(row) for row in self.cells)
 
 
+def decode_stream(data: bytes | bytearray) -> str:
+    """Decode the captured stream, dropping a TRUNCATED TAIL rather than corrupting it.
+
+    drain() stops on a wall clock, and the screen is reconstructed from the bytes
+    captured so far -- so on a slow machine it can cut the stream in the middle of
+    a three-byte box-drawing character. Decoded with errors="replace" that becomes
+    a replacement glyph painted at wherever the cursor had reached, which looks
+    exactly like the program painting garbage into the middle of the frame.
+
+    It is not: the character completes on the next read, and the full stream
+    decodes strictly clean under errors="strict". It only ever failed in the
+    Docker CI, because macOS was fast enough that the window always ended on a
+    character boundary -- and it cost a while to find because the evidence (one
+    bad glyph, in the same cell every run) reads as a rendering bug rather than
+    as a measurement one.
+
+    An invalid sequence anywhere but the last few bytes is real corruption and is
+    left visible as one. A decoder that hid those would hide the bug this exists
+    not to be mistaken for.
+    """
+    view = bytes(data)
+    while view:
+        try:
+            return view.decode("utf-8")
+        except UnicodeDecodeError as error:
+            if error.start < len(view) - 3:  # 4 bytes is the longest sequence
+                return view.decode("utf-8", "replace")
+            view = view[: error.start]
+    return ""
+
+
 def write_fixture_wav(path: Path) -> None:
     """A deterministic 48 kHz WAV, written here rather than fetched.
 
@@ -264,7 +295,7 @@ def main() -> int:
         alive = drain(fd, KEY_SECONDS, output)
 
     frame = Grid(COLUMNS, ROWS)
-    frame.feed(output.decode("utf-8", "replace"))
+    frame.feed(decode_stream(output))
     painted = frame.render()
 
     def send(text: str) -> bool:
@@ -273,7 +304,7 @@ def main() -> int:
 
     def screen_now() -> str:
         grid = Grid(COLUMNS, ROWS)
-        grid.feed(output.decode("utf-8", "replace"))
+        grid.feed(decode_stream(output))
         return grid.render()
 
     # The command line, driven through a real terminal.
@@ -461,7 +492,7 @@ def main() -> int:
     # session including the teardown, which is where the alternate-screen exit
     # lives -- the sequence that decides whether a user gets their terminal back.
     tail = Grid(COLUMNS, ROWS)
-    tail.feed(output.decode("utf-8", "replace"))
+    tail.feed(decode_stream(output))
 
     _, status = os.waitpid(pid, 0)
     exit_code = os.waitstatus_to_exitcode(status)

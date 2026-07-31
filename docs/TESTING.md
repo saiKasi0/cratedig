@@ -512,6 +512,26 @@ which is `127/127.0f == 1.0f` exactly, so the product in `amplitude * value` is
 exact and an FMA cannot round it differently. The file says it at length, and the
 rule it follows is the next section.
 
+### The PTY harness reconstructs a screen from a byte stream, and that is a measurement
+
+Worth writing down because it produced a convincing false positive. The sessions
+capture bytes for a fixed wall-clock window and rebuild the grid from whatever
+arrived; on a slow machine that window can end **in the middle of a three-byte
+box-drawing character**. Decoded with `errors="replace"` the partial sequence
+became a replacement glyph, painted at wherever the cursor had reached — one bad
+cell, in the same place on every run, in the Docker CI only.
+
+It looked exactly like a rendering bug and was not: the character completed on
+the next read, and the full stream decoded cleanly under `errors="strict"`.
+`decode_stream()` now drops a truncated tail and leaves genuine mid-stream
+corruption visible, because a decoder that hid both would hide the failure this
+one exists not to be mistaken for.
+
+The general rule: **a test that samples a stream on a timer is measuring, not
+observing.** When such a test disagrees with a golden, rule out the measurement
+before changing the thing measured — and never re-baseline a snapshot to match
+one.
+
 ## RT-safety testing
 
 `src/rt/` correctness has three enforcement layers, tested as follows:

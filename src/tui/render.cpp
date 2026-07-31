@@ -636,7 +636,7 @@ constexpr std::size_t kLaneRows = 8;  // pads per column
     clauses.push_back("showing " + std::to_string(first + 1) + "-" +
                       std::to_string(first + visible));
   }
-  clauses.push_back("1/16");
+  clauses.emplace_back("1/16");
   if (pattern.song) {
     clauses.push_back("slot " + std::to_string(pattern.slot + 1));
   }
@@ -645,7 +645,7 @@ constexpr std::size_t kLaneRows = 8;  // pads per column
   // left running is audible as a click -- and the surprising one is the one
   // worth the columns.
   if (pattern.metronome) {
-    clauses.push_back("metro");
+    clauses.emplace_back("metro");
   }
   if (pattern.swing > 0) {
     clauses.push_back("swing " + std::to_string(pattern.swing) + "%");
