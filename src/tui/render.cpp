@@ -535,16 +535,177 @@ enum class GlowStep : std::uint8_t { kOff = 0, kDim, kLit, kHot };
   return ftxui::vbox(std::move(lines));
 }
 
-[[nodiscard]] Element pattern_tab() {
-  return ftxui::vbox({
-      ftxui::filler(),
-      ftxui::hbox(
-          {ftxui::filler(), ftxui::text("empty") | ftxui::color(theme::muted()), ftxui::filler()}),
-      ftxui::hbox({ftxui::filler(),
-                   ftxui::text("the sequencer arrives at M4") | ftxui::color(theme::structure()),
-                   ftxui::filler()}),
-      ftxui::filler(),
-  });
+// The pattern lane.
+//
+// TWO COLUMNS OF EIGHT, where the mockup draws one column of eight. The mockup
+// was drawn for a machine showing eight rows; this grid has sixteen pads, and a
+// lane that showed half of them would be a lane you cannot trust -- pad 12 being
+// absent looks exactly like pad 12 being empty. The panel is twelve rows tall, so
+// one column of sixteen plus a ruler does not fit and two columns is the only
+// layout that shows every pad at once.
+//
+// THE PAD NAMES ARE DROPPED, which the mockup has. They cost nine columns per
+// row to repeat something already on screen six columns to the left, in the pad
+// grid, at the same moment. The number is the identifier a grid is read by.
+//
+// Velocity is not drawn. The lane answers "which steps are on"; a shade ramp
+// across four levels of block is hard to read at a glance and would trade the
+// question the lane exists for against one a readout can answer better.
+
+// A step and the space between groups: step i sits at i + i/4, so a bar of
+// sixteen is nineteen columns wide.
+constexpr std::size_t kStepsPerGroup = 4;
+
+[[nodiscard]] std::size_t step_column(std::size_t step) noexcept {
+  return step + (step / kStepsPerGroup);
+}
+
+// How many steps the lane can show. Longer patterns are a VIEWPORT and the
+// caption says so -- silently drawing the first half of a 32-step pattern would
+// make the second half look empty.
+constexpr std::size_t kLaneSteps = 16;
+constexpr std::size_t kLaneRows = 8;  // pads per column
+
+// Two digits, matching the pad grid's own labels so the same pad reads the same
+// way in both places.
+[[nodiscard]] std::string lane_number(std::size_t index) {
+  return index < 9 ? "0" + std::to_string(index + 1) : std::to_string(index + 1);
+}
+
+[[nodiscard]] std::string lane_row(const PatternView& pattern, std::size_t pad,
+                                   std::size_t visible) {
+  std::string cells;
+  cells.reserve(visible + (visible / kStepsPerGroup));
+  for (std::size_t step = 0; step < visible; ++step) {
+    if (step > 0 && step % kStepsPerGroup == 0) {
+      cells += ' ';
+    }
+    cells += pattern.rows[pad].on[step] ? "\u2588" : "\u00b7";
+  }
+  return cells;
+}
+
+[[nodiscard]] Element pattern_tab(const UiState& state, std::size_t outer_width) {
+  const PatternView& pattern = state.pattern;
+
+  // The window's borders take a column each. Laying out against the OUTER width
+  // puts every row two columns too wide, which FTXUI then clips -- silently for
+  // the padded rows, and visibly for the caption, which came out reading
+  // "... slot" as though a value had failed to render.
+  const std::size_t width = outer_width > 2 ? outer_width - 2 : 0;
+  const std::size_t visible =
+      std::min({pattern.length, kLaneSteps, static_cast<std::size_t>(rt::kMaxSteps)});
+  const std::size_t bar_cells = visible + ((visible - 1) / kStepsPerGroup);
+
+  // Left column at 1, right column past the left one's bar with a gap. Computed
+  // rather than fixed so a narrower panel degrades to one column instead of
+  // overlapping two.
+  constexpr std::size_t kLabel = 3;  // "01 "
+  const std::size_t left = 1;
+  const std::size_t right = left + kLabel + bar_cells + 4;
+  const bool two_columns = right + kLabel + bar_cells <= width;
+
+  std::vector<Element> lines;
+
+  // Caption: what is playing and how long it is. `1/16` is the step resolution,
+  // fixed at sixteenths (rt::kStepsPerBeat) and stated because a lane with no
+  // unit is a grid of unknown speed.
+  //
+  // ASSEMBLED AS CLAUSES AND DROPPED WHOLE, never cut. A caption trimmed by
+  // character ends in "... · slot", which reads as a value that failed to
+  // render. Same fix the M3 header needed, for the same reason.
+  //
+  // "showing 1-N" is the one clause that is never dropped. Every other clause
+  // is a detail; that one is what stops the lane claiming to be the whole
+  // pattern when it is showing half of it.
+  std::vector<std::string> clauses;
+  clauses.push_back("pattern " + lane_number(pattern.pattern));
+  const std::size_t truncation_clause = pattern.length > visible ? clauses.size() + 1 : 0;
+  clauses.push_back(std::to_string(pattern.length) + " steps");
+  if (pattern.length > visible) {
+    clauses.push_back("showing 1-" + std::to_string(visible));
+  }
+  clauses.push_back("1/16");
+  if (pattern.song) {
+    clauses.push_back("slot " + std::to_string(pattern.slot + 1));
+  }
+  if (pattern.swing > 0) {
+    clauses.push_back("swing " + std::to_string(pattern.swing) + "%");
+  }
+
+  const auto joined = [](const std::vector<std::string>& parts) {
+    std::string text;
+    for (const std::string& part : parts) {
+      if (!text.empty()) {
+        text += " \u00b7 ";
+      }
+      text += part;
+    }
+    return text;
+  };
+
+  // Dropped from the end, which is also least-important-first by construction --
+  // swing, then slot, then the resolution. `pattern` and the truncation notice
+  // are at the front and survive.
+  while (clauses.size() > 1 && detail::utf8_cells(joined(clauses)) + 1 > width) {
+    std::size_t victim = clauses.size() - 1;
+    if (victim == truncation_clause && clauses.size() > 2) {
+      victim = clauses.size() - 2;  // step over the notice rather than dropping it
+    }
+    clauses.erase(clauses.begin() + static_cast<std::ptrdiff_t>(victim));
+  }
+  lines.push_back(ftxui::text(" " + joined(clauses)) | ftxui::color(theme::label()));
+
+  // The playhead, above the grid exactly as the mockup has it. Only while
+  // playing: a marker on a stopped transport would claim a position that is not
+  // moving.
+  {
+    std::string row(width, ' ');
+    if (pattern.playing && pattern.step < visible) {
+      const std::size_t at = step_column(pattern.step);
+      if (left + kLabel + at < row.size()) {
+        row = detail::splice_at(row, left + kLabel + at, "\u252f");
+      }
+      if (two_columns && right + kLabel + at < row.size()) {
+        row = detail::splice_at(row, right + kLabel + at, "\u252f");
+      }
+    }
+    lines.push_back(ftxui::text(row) | ftxui::color(theme::accent()));
+  }
+
+  const std::size_t rows = two_columns ? kLaneRows : std::min<std::size_t>(kLaneRows, rt::kNumPads);
+  for (std::size_t row_index = 0; row_index < rows; ++row_index) {
+    std::string row(width, ' ');
+
+    const std::size_t first = row_index;
+    row = detail::splice_at(row, left, lane_number(first));
+    row = detail::splice_at(row, left + kLabel, lane_row(pattern, first, visible));
+
+    if (two_columns) {
+      const std::size_t second = row_index + kLaneRows;
+      if (second < rt::kNumPads) {
+        row = detail::splice_at(row, right, lane_number(second));
+        row = detail::splice_at(row, right + kLabel, lane_row(pattern, second, visible));
+      }
+    }
+    lines.push_back(ftxui::text(row) | ftxui::color(theme::label()));
+  }
+
+  // The beat ruler, under each group of four.
+  {
+    std::string row(width, ' ');
+    for (std::size_t beat = 0; beat * kStepsPerGroup < visible; ++beat) {
+      const std::string label = std::to_string(beat + 1);
+      row = detail::splice_at(row, left + kLabel + step_column(beat * kStepsPerGroup), label);
+      if (two_columns) {
+        row = detail::splice_at(row, right + kLabel + step_column(beat * kStepsPerGroup), label);
+      }
+    }
+    lines.push_back(ftxui::text(row) | ftxui::color(theme::muted()));
+  }
+
+  lines.push_back(ftxui::filler());
+  return ftxui::vbox(std::move(lines));
 }
 
 [[nodiscard]] Element right_panel(const UiState& state, const Layout& layout, std::size_t width) {
@@ -561,7 +722,8 @@ enum class GlowStep : std::uint8_t { kOff = 0, kDim, kLit, kHot };
       }) |
       ftxui::size(ftxui::WIDTH, ftxui::EQUAL, static_cast<int>(width > 2 ? width - 2 : 1));
 
-  return ftxui::window(std::move(tab_title), on_sample ? sample_tab(state, width) : pattern_tab()) |
+  return ftxui::window(std::move(tab_title),
+                       on_sample ? sample_tab(state, width) : pattern_tab(state, width)) |
          ftxui::color(theme::structure()) |
          ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, static_cast<int>(layout.pads_height));
 }

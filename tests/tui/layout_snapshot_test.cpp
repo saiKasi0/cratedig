@@ -195,6 +195,30 @@ void fill_bins(tui::UiState& state, int columns) {
 
 // A chopped state: sixteen slices across the fixture, assigned to pads, with
 // three pads glowing at different ages so the whole ramp appears in one frame.
+// A pattern with a recognisable shape: four-on-the-floor on pad 1, offbeat on
+// pad 2, sixteenths on pad 4, and one hit on pad 12 so the right-hand column is
+// not uniformly empty.
+[[nodiscard]] tui::PatternView live_pattern() {
+  tui::PatternView pattern;
+  pattern.has_pattern = true;
+  pattern.pattern = 2;
+  pattern.length = 16;
+  pattern.bpm_x100 = 9'260;
+  pattern.playing = true;
+  pattern.step = 6;
+  for (std::size_t step = 0; step < 16; step += 4) {
+    pattern.rows[0].on[step] = true;
+  }
+  for (std::size_t step = 4; step < 16; step += 8) {
+    pattern.rows[1].on[step] = true;
+  }
+  for (std::size_t step = 0; step < 16; step += 2) {
+    pattern.rows[3].on[step] = true;
+  }
+  pattern.rows[11].on[9] = true;
+  return pattern;
+}
+
 [[nodiscard]] tui::UiState chopped_state(int columns) {
   tui::UiState state = playing_state(columns);
   state.chop_algorithm = "transient";
@@ -318,6 +342,30 @@ TEST_CASE("PERFORM renders at the 100x30 design grid", "[tui]") {
     tui::UiState state = playing_state(100);
     state.tab = tui::PanelTab::kPattern;
     check_snapshot("perform_pattern_100x30", state, 100, 30);
+  }
+
+  SECTION("pattern tab, with a pattern playing") {
+    // The one that actually pins the lane. The empty case above would look
+    // identical whether steps were drawn or not.
+    tui::UiState state = playing_state(100);
+    state.tab = tui::PanelTab::kPattern;
+    state.pattern = live_pattern();
+    check_snapshot("perform_pattern_live_100x30", state, 100, 30);
+  }
+
+  SECTION("pattern tab, longer than the lane") {
+    // A 32-step pattern in a 16-step lane. The caption must SAY it is showing
+    // part of it -- drawing the first half silently would make the second half
+    // look empty, which is the failure the whole `showing 1-16` clause exists
+    // to prevent.
+    tui::UiState state = playing_state(100);
+    state.tab = tui::PanelTab::kPattern;
+    state.pattern = live_pattern();
+    state.pattern.length = 32;
+    state.pattern.swing = 58;
+    state.pattern.song = true;
+    state.pattern.slot = 2;
+    check_snapshot("perform_pattern_long_100x30", state, 100, 30);
   }
 
   SECTION("chopped, with pads glowing") {

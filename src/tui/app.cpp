@@ -8,6 +8,7 @@
 #include "rt/pad_config.hpp"
 #include "rt/pad_event.hpp"
 #include "rt/sample.hpp"
+#include "rt/sequencer.hpp"
 #include "tui/command.hpp"
 #include "tui/keys.hpp"
 #include "tui/render.hpp"
@@ -331,6 +332,19 @@ int run_app(const AppOptions& options) {
     // very first publish. Checked anyway rather than discarded: a pad that
     // silently failed to load would present as "the spacebar does nothing".
     std::cerr << "error: could not assign " << sample_name << " to pad 1\n";
+    return 1;
+  }
+
+  // An empty sequencer, published before anything renders.
+  //
+  // So that what the lane draws and what the engine holds are the same object
+  // from the first frame. Without it the interface would show "pattern 01, 16
+  // steps" while the engine had no pattern at all -- true enough to look right
+  // and wrong in the way that matters, since the first edit would appear to
+  // change something that had not existed.
+  auto sequencer = std::make_shared<rt::SequencerState>();
+  if (!engine.publish_sequencer(sequencer)) {
+    std::cerr << "error: could not publish the initial sequencer state\n";
     return 1;
   }
 
@@ -784,7 +798,37 @@ int run_app(const AppOptions& options) {
     }
     state.active_voices = engine.active_voices();
     state.xruns = device.xrun_count();
-    state.dropped = engine.dropped_events() + engine.dropped_triggers();
+    state.dropped =
+        engine.dropped_events() + engine.dropped_triggers() + engine.dropped_midi_events();
+
+    // The pattern lane, copied flat out of what the control thread published.
+    //
+    // The STEP and the PATTERN come from telemetry rather than being recomputed
+    // here: the audio thread is the only place that knows both the transport
+    // position and the tempo those frames were actually rendered at, so a UI
+    // that derived the step itself would disagree after every tempo change.
+    // The grid comes from the published state, which is what this thread owns.
+    state.pattern.playing = telemetry.transport_playing;
+    state.pattern.step = telemetry.transport_step;
+    state.pattern.slot = telemetry.transport_slot;
+    if (const std::shared_ptr<const rt::SequencerState> published = engine.sequencer_state();
+        published != nullptr) {
+      const std::uint8_t index =
+          std::min(telemetry.transport_pattern, static_cast<std::uint8_t>(rt::kMaxPatterns - 1));
+      const rt::Pattern& source = published->patterns[index];
+
+      state.pattern.has_pattern = true;
+      state.pattern.pattern = index;
+      state.pattern.length = rt::pattern_length(source);
+      state.pattern.swing = source.swing;
+      state.pattern.bpm_x100 = published->bpm_x100;
+      state.pattern.song = rt::song_slots(published->song) > 0;
+      for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+        for (std::size_t step = 0; step < rt::kMaxSteps; ++step) {
+          state.pattern.rows[pad].on[step] = source.steps[step][pad].on;
+        }
+      }
+    }
 
     // Re-summarised every frame against the CURRENT width, so a resize is a
     // correct redraw rather than a stretched one. At any zoom this reads about

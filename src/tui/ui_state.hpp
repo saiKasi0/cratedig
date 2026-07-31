@@ -3,6 +3,7 @@
 
 #include "ingest/peak_pyramid.hpp"
 #include "rt/pad_event.hpp"
+#include "rt/sequencer.hpp"
 
 #include <array>
 #include <cstddef>
@@ -125,6 +126,39 @@ struct SliceMark {
   std::ptrdiff_t end_snap = 0;
 };
 
+// The pattern lane, as the interface needs it.
+//
+// A flat copy rather than a pointer to rt::SequencerState: render() is a pure
+// function of UiState and holds no engine (see the note at the top of this
+// file), so a snapshot test builds one of these as a literal. Copying ~16 rows
+// of bools once per frame is nothing next to drawing them.
+struct PatternRow {
+  std::array<bool, rt::kMaxSteps> on{};
+};
+
+struct PatternView {
+  // False until a sequencer state has been published, which is the state a
+  // session starts in and is drawn as an empty lane rather than a blank panel.
+  bool has_pattern = false;
+
+  std::uint8_t pattern = 0;
+  std::size_t length = 16;
+  std::uint8_t swing = 0;
+  std::uint32_t bpm_x100 = 12'000;
+
+  // Where the transport is, for the playhead marker. `step` is meaningless
+  // unless `playing`.
+  bool playing = false;
+  std::size_t step = 0;
+
+  // Which song slot is playing, and whether there is a song at all. An empty
+  // song is a pattern repeating, not slot zero of nothing.
+  bool song = false;
+  std::uint8_t slot = 0;
+
+  std::array<PatternRow, rt::kNumPads> rows{};
+};
+
 // Which screen is up.
 //
 // PERFORM and EDIT are two pure functions of this same struct, chosen here. The
@@ -209,6 +243,8 @@ struct UiState {
 
   // The chops, ascending and non-overlapping. Empty until something has been
   // chopped, which is the state the wave panel's ruler row falls back to.
+  PatternView pattern;
+
   std::vector<SliceMark> slices;
   std::string chop_algorithm;  // "transient" or "grid n", for the panel
 
