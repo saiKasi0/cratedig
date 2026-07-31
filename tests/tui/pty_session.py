@@ -364,6 +364,93 @@ def main() -> int:
         if "  perform " not in screen_now():
             command_failures.append("escape did not return to PERFORM from EDIT")
 
+    # The sequencer, driven through the same terminal.
+    #
+    # Everything checked here is CONTROL-SIDE state coming back through the
+    # engine's published sequencer, which is what makes it visible under
+    # --no-audio: nothing calls render(), so the transport never advances and no
+    # telemetry is ever published. That is also why `p` is checked by the
+    # message it prints rather than by the mode line changing to "play" -- with
+    # no device the transport genuinely does not run, and the program says so
+    # instead of pretending.
+    if alive:
+        # Off the lane first, whichever tab the session left up, so that the
+        # step key has to bring it back by itself.
+        if "pattern 01" in screen_now():
+            alive = send("\t")
+        if "pattern 01" in screen_now():
+            command_failures.append("tab did not leave the pattern lane")
+
+        # `t` BRINGS THE LANE UP as well as writing a step. A step key that
+        # edited a grid nobody could see would be a way to write a pattern you
+        # did not mean to.
+        alive = send("t")
+        if "pattern 01" not in screen_now():
+            command_failures.append("`t` did not bring the pattern lane up")
+
+        # `q` selected pad 1 earlier, so the step lands on its row. The toggle
+        # prints no message on purpose -- the lane is where the answer is, and
+        # this is the only test that can say the lane really redraws.
+        #
+        # Counted as DIFFERENCES rather than absolutes: a stray block character
+        # elsewhere on the screen shifts every count equally.
+        lit = screen_now().count("█")
+        alive = send("t")
+        empty = screen_now().count("█")
+        if lit != empty + 1:
+            command_failures.append(f"`t` did not turn one step on and off again ({lit} vs {empty})")
+
+        # `]` moves the cursor, so the second `t` writes a DIFFERENT step. Two
+        # toggles of one step land back where they started, which a single
+        # toggle cannot tell apart from a cursor that never moved.
+        alive = send("t]]]]t")
+        if screen_now().count("█") != empty + 2:
+            command_failures.append("`]` then `t` did not write a second, separate step")
+
+        # The tempo, round-tripped through the fixed-point parse. `92.5` must
+        # come back as `92.50` and not as `92.49`.
+        alive = send(":bpm 92.5\r")
+        if "92.50" not in screen_now():
+            command_failures.append("`:bpm 92.5` did not answer with 92.50")
+
+        # And it reaches the mode line once the message clears, which is the
+        # part that proves the edit was published rather than merely parsed.
+        alive = send("q")
+        if "92.50 bpm" not in screen_now():
+            command_failures.append("the tempo did not reach the mode line")
+
+        alive = send(":metro on\r")
+        if "metronome on" not in screen_now():
+            command_failures.append("`:metro on` was not acknowledged")
+
+        alive = send(":pattern 3\r")
+        after_select = screen_now()
+        if "pattern 3" not in after_select:
+            command_failures.append("`:pattern 3` was not acknowledged")
+        alive = send("q")
+        selected = screen_now()
+        if "pattern 03" not in selected:
+            command_failures.append("the lane did not follow `:pattern 3`")
+        # A different pattern is an EMPTY one, so the steps written above must
+        # not be showing on it. Chained onto the check above rather than run
+        # independently: with no caption to split on this would raise, and a
+        # harness that crashes on the failure path reports nothing useful --
+        # including whatever else was wrong.
+        elif "█" in selected.split("pattern 03", 1)[1]:
+            command_failures.append("the newly selected pattern shows the old pattern's steps")
+
+        # A refusal has to look like one, on the real binary.
+        alive = send(":bpm 900\r")
+        if "outside" not in screen_now():
+            command_failures.append("`:bpm 900` was not refused")
+
+        # The transport key. With no device nothing renders, so the honest
+        # answer is to say that rather than to light up a transport that cannot
+        # move.
+        alive = send("p")
+        if "no audio device" not in screen_now():
+            command_failures.append("`p` did not say why the transport cannot run")
+
     if alive:
         # ESCAPE, not "q" -- the QWERTY pad map claims q for pad 1 from M3, and
         # a session that sent "q" here would trigger a pad and then hang.

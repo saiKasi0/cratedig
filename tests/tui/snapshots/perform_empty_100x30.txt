@@ -27,4 +27,4 @@
 ╰──────────┴──────────┴──────────┴──────────╯ ╰────────────────────────────────────────────────────╯
                                                                                                     
                                                                                                     
-  perform   voices 0/16 · peak -inf dB         qwer.. pads · hl scroll · +- zoom · : cmd · esc quit 
+  perform   120.00 bpm · stop · voices 0/16    qwer.. pads · p play · t step · hl +- · : · esc quit 

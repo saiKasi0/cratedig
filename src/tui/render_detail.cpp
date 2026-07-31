@@ -91,6 +91,26 @@ std::string splice_at(std::string_view text, std::size_t column, std::string_vie
   return before + std::string{glyph} + after;
 }
 
+std::string paint_at(std::string_view row, std::size_t column, std::string_view text) {
+  const std::size_t cells = utf8_cells(row);
+  if (column >= cells) {
+    return std::string{row};
+  }
+  auto [before, rest] = utf8_split(row, column);
+
+  // Clipped to what is left of the row, so the result is exactly as wide as it
+  // arrived. A caller that writes past the end gets a short write rather than a
+  // wider row, because the width is the panel's and not this function's to
+  // change.
+  std::string glyph{text};
+  std::size_t glyph_cells = utf8_cells(glyph);
+  if (glyph_cells > cells - column) {
+    glyph = utf8_split(glyph, cells - column).first;
+    glyph_cells = utf8_cells(glyph);
+  }
+  return before + glyph + utf8_split(rest, glyph_cells).second;
+}
+
 ftxui::Element mode_line(const UiState& state, std::size_t columns, std::string_view prefix,
                          const std::vector<std::string>& facts,
                          std::span<const std::string_view> hint_tiers, std::size_t min_fact_cells) {

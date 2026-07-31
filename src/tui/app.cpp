@@ -335,15 +335,21 @@ int run_app(const AppOptions& options) {
     return 1;
   }
 
-  // An empty sequencer, published before anything renders.
+  // The sequencer, control-side.
   //
-  // So that what the lane draws and what the engine holds are the same object
-  // from the first frame. Without it the interface would show "pattern 01, 16
-  // steps" while the engine had no pattern at all -- true enough to look right
-  // and wrong in the way that matters, since the first edit would appear to
-  // change something that had not existed.
-  auto sequencer = std::make_shared<rt::SequencerState>();
-  if (!engine.publish_sequencer(sequencer)) {
+  // The MUTABLE ORIGINAL. What the audio thread reads is an immutable copy
+  // published through the handoff ring, exactly as pad configs are, so every
+  // edit is made here and then published whole. ~16 KB copied per keystroke,
+  // which is what rt::SequencerState's own comment weighs against a shared
+  // mutable structure and rejects.
+  rt::SequencerState sequencer;
+
+  // Published before anything renders, so that what the lane draws and what the
+  // engine holds are the same object from the first frame. Without it the
+  // interface would show "pattern 01, 16 steps" while the engine had no pattern
+  // at all -- true enough to look right and wrong in the way that matters, since
+  // the first edit would appear to change something that had not existed.
+  if (!engine.publish_sequencer(std::make_shared<const rt::SequencerState>(sequencer))) {
     std::cerr << "error: could not publish the initial sequencer state\n";
     return 1;
   }
@@ -449,6 +455,73 @@ int run_app(const AppOptions& options) {
   // The boundary edits that `u` can take back. Control-side, like the slice set
   // itself; nothing on the audio thread has any idea this exists.
   std::vector<SliceEdit> undo;
+
+  // Where the next step edit lands, and whether the transport has been told to
+  // run.
+  //
+  // The transport flag is what THIS thread asked for, and it is what decides
+  // which way `p` toggles. The mode line reads the telemetry instead, which is
+  // what the audio thread is actually doing -- the two differ for one block
+  // with a device, and permanently under --no-audio, where nothing renders and
+  // so nothing ever runs. Saying so is the honest reading of that mode.
+  std::size_t step_cursor = 0;
+  bool transport_asked = false;
+
+  // Applies an edit to the sequencer and publishes it, ATOMICALLY as far as
+  // this thread is concerned: the local copy only moves once the audio thread
+  // has accepted the new state. A refused publish therefore leaves the
+  // interface showing what is actually playing rather than an edit that never
+  // landed -- which is the same promise publish_pad_config() makes, and it is
+  // worth keeping because a half-applied pattern is not something you would
+  // diagnose quickly.
+  auto edit_sequencer = [&](const auto& mutate, std::string said) {
+    rt::SequencerState next = sequencer;
+    mutate(next);
+    if (!engine.publish_sequencer(std::make_shared<const rt::SequencerState>(next))) {
+      set_message("sequencer busy — the edit did not happen, try again", true);
+      return;
+    }
+    sequencer = next;
+    if (!said.empty()) {
+      set_message(std::move(said), false);
+    }
+  };
+
+  // The pattern the lane is showing, which is the one every edit lands in.
+  //
+  // ALWAYS THE SELECTED ONE, even while a song is playing something else. The
+  // alternative -- following the transport -- would mean `t` wrote into
+  // whichever pattern the song had reached, so holding the key through a
+  // pattern change would scatter hits across two of them. The playhead marker
+  // is suppressed instead when the transport is elsewhere, and the caption's
+  // `slot N` is what says the song is still running.
+  auto lane_pattern = [&]() -> std::size_t {
+    return std::min<std::size_t>(sequencer.selected_pattern, rt::kMaxPatterns - 1);
+  };
+
+  // Kept inside the pattern, which `pattern length` can shrink underneath it.
+  auto clamp_cursor = [&] {
+    const std::size_t length = rt::pattern_length(sequencer.patterns[lane_pattern()]);
+    step_cursor = std::min(step_cursor, length - 1);
+  };
+
+  // Start or stop, ALWAYS FROM THE TOP.
+  //
+  // One key toggles the transport, so `p` has to mean the same thing every time
+  // it is pressed. Resuming from wherever it stopped would start the pattern at
+  // a different step depending on what happened earlier -- and after a tempo
+  // change the frame it stopped at is not even the same step any more, so
+  // "resume" would not resume.
+  //
+  // Two commands rather than one with a flag: the seek and the state change are
+  // separate kinds precisely so that seeking cannot start playback by accident
+  // (rt::sequencer.hpp), and the ring drains in order.
+  auto set_transport = [&](bool play) {
+    static_cast<void>(engine.send_transport(
+        rt::TransportCommand{.kind = rt::TransportCommandKind::kSeek, .position_frames = 0}));
+    static_cast<void>(engine.send_transport(rt::TransportCommand{
+        .kind = play ? rt::TransportCommandKind::kPlay : rt::TransportCommandKind::kStop}));
+  };
 
   // The last width the interface was drawn at.
   //
@@ -772,6 +845,82 @@ int run_app(const AppOptions& options) {
         state.screen = Screen::kPerform;
         break;
 
+      case CommandKind::kBpm:
+        edit_sequencer([&](rt::SequencerState& next) { next.bpm_x100 = command.bpm_x100; },
+                       "bpm " + format_bpm(command.bpm_x100));
+        break;
+
+      case CommandKind::kSwing: {
+        const std::size_t pattern = lane_pattern();
+        edit_sequencer(
+            [&](rt::SequencerState& next) { next.patterns[pattern].swing = command.swing; },
+            "swing " + std::to_string(command.swing) + "% on pattern " +
+                std::to_string(pattern + 1));
+        break;
+      }
+
+      case CommandKind::kPatternSelect: {
+        const auto selected = static_cast<std::uint8_t>(command.pattern - 1);
+        edit_sequencer([&](rt::SequencerState& next) { next.selected_pattern = selected; },
+                       "pattern " + std::to_string(command.pattern));
+        // AFTER the edit, not before: if the publish was refused the selection
+        // did not move, and a cursor clamped to the pattern that was not
+        // selected would be clamped to the wrong length.
+        clamp_cursor();
+        break;
+      }
+
+      case CommandKind::kPatternLength: {
+        const std::size_t pattern = lane_pattern();
+        const auto length = static_cast<std::uint8_t>(command.count);
+        edit_sequencer([&](rt::SequencerState& next) { next.patterns[pattern].length = length; },
+                       "pattern " + std::to_string(pattern + 1) + ": " +
+                           std::to_string(command.count) + " steps");
+        clamp_cursor();
+        break;
+      }
+
+      case CommandKind::kPatternClear: {
+        const std::size_t pattern = lane_pattern();
+        // The STEPS only. Length and swing are how the pattern is set up rather
+        // than what is written in it, and clearing them too would make `pattern
+        // clear` undo work nobody asked it to touch.
+        edit_sequencer([&](rt::SequencerState& next) { next.patterns[pattern].steps = {}; },
+                       "pattern " + std::to_string(pattern + 1) + " cleared");
+        break;
+      }
+
+      case CommandKind::kSong: {
+        const std::size_t slots = std::min(command.song.size(), rt::kMaxSongSlots);
+        std::string order;
+        for (std::size_t slot = 0; slot < slots; ++slot) {
+          order += (slot > 0 ? " " : "") + std::to_string(command.song[slot]);
+        }
+        edit_sequencer(
+            [&](rt::SequencerState& next) {
+              next.song = rt::Song{};  // built whole, so a shorter song leaves no tail behind
+              for (std::size_t slot = 0; slot < slots; ++slot) {
+                next.song.order[slot] = static_cast<std::uint8_t>(command.song[slot] - 1);
+              }
+              next.song.length = static_cast<std::uint8_t>(slots);
+            },
+            "song: " + order);
+        break;
+      }
+
+      case CommandKind::kSongClear:
+        edit_sequencer([](rt::SequencerState& next) { next.song = rt::Song{}; },
+                       "song cleared — the selected pattern repeats");
+        break;
+
+      case CommandKind::kMetronome: {
+        const bool on = command.toggle == Switch::kToggle ? !sequencer.metronome
+                                                          : command.toggle == Switch::kOn;
+        edit_sequencer([on](rt::SequencerState& next) { next.metronome = on; },
+                       on ? "metronome on" : "metronome off");
+        break;
+      }
+
       case CommandKind::kQuit:
         quit();
         break;
@@ -808,13 +957,13 @@ int run_app(const AppOptions& options) {
     // position and the tempo those frames were actually rendered at, so a UI
     // that derived the step itself would disagree after every tempo change.
     // The grid comes from the published state, which is what this thread owns.
-    state.pattern.playing = telemetry.transport_playing;
+    state.pattern.transport_running = telemetry.transport_playing;
     state.pattern.step = telemetry.transport_step;
     state.pattern.slot = telemetry.transport_slot;
+    state.pattern.cursor_step = step_cursor;
     if (const std::shared_ptr<const rt::SequencerState> published = engine.sequencer_state();
         published != nullptr) {
-      const std::uint8_t index =
-          std::min(telemetry.transport_pattern, static_cast<std::uint8_t>(rt::kMaxPatterns - 1));
+      const auto index = static_cast<std::uint8_t>(lane_pattern());
       const rt::Pattern& source = published->patterns[index];
 
       state.pattern.has_pattern = true;
@@ -822,7 +971,15 @@ int run_app(const AppOptions& options) {
       state.pattern.length = rt::pattern_length(source);
       state.pattern.swing = source.swing;
       state.pattern.bpm_x100 = published->bpm_x100;
+      state.pattern.metronome = published->metronome;
       state.pattern.song = rt::song_slots(published->song) > 0;
+
+      // The marker is drawn only when the transport is on the pattern being
+      // shown. With a song running that is often some other pattern, and a
+      // marker moving across a grid the audio is not playing would be a
+      // confident wrong answer.
+      state.pattern.playhead = telemetry.transport_playing && telemetry.transport_pattern == index;
+
       for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
         for (std::size_t step = 0; step < rt::kMaxSteps; ++step) {
           state.pattern.rows[pad].on[step] = source.steps[step][pad].on;
@@ -1049,6 +1206,73 @@ int run_app(const AppOptions& options) {
     }
     if (code == kTab) {
       state.tab = state.tab == PanelTab::kSample ? PanelTab::kPattern : PanelTab::kSample;
+      return true;
+    }
+
+    // THE TRANSPORT. `p` rather than space, which is pad 1 and has been since
+    // M1 -- a sampler where the biggest key on the keyboard stops making a
+    // sound the moment a sequencer arrives would be a bad trade.
+    //
+    // PRESS ONLY, not repeat: holding it would start and stop the transport at
+    // the terminal's repeat rate, which is the same reason a held pad does not
+    // retrigger.
+    if (code == 'p' && press) {
+      transport_asked = !transport_asked;
+      set_transport(transport_asked);
+      // Said out loud rather than left to be discovered, exactly as `pad gate`
+      // says it on a terminal with no key release. With no device nothing calls
+      // render(), so the sequencer never advances and the transport genuinely
+      // does nothing -- a key that silently does nothing reads as broken.
+      if (!audio_running) {
+        set_message("transport: no audio device, so nothing renders and nothing runs", true);
+      }
+      return true;
+    }
+
+    // The step keys BRING THE LANE UP rather than acting invisibly. Toggling a
+    // step you cannot see is how you end up with a pattern you did not write,
+    // and the cursor only exists on the lane -- so pressing one of these is
+    // taken as asking to see it.
+    if (code == '[' || code == ']' || code == 't') {
+      state.tab = PanelTab::kPattern;
+      clamp_cursor();
+      const std::size_t length = rt::pattern_length(sequencer.patterns[lane_pattern()]);
+
+      if (code == '[') {
+        // Clamped, not wrapped, for the reason EDIT's slice keys are: a held
+        // key that jumps from step 1 to step 16 is a jump nobody asked for.
+        step_cursor = step_cursor > 0 ? step_cursor - 1 : 0;
+        return true;
+      }
+      if (code == ']') {
+        step_cursor = step_cursor + 1 < length ? step_cursor + 1 : length - 1;
+        return true;
+      }
+
+      // `[` and `]` repeat happily; `t` does NOT. A held toggle would flip the
+      // step at the terminal's repeat rate and leave it in whichever state the
+      // key happened to be released in, which is a coin toss rather than an
+      // edit.
+      if (!press) {
+        return true;
+      }
+
+      const std::size_t pattern = lane_pattern();
+      const std::size_t step = step_cursor;
+      const std::size_t pad = state.selected_pad;
+      const bool on = !sequencer.patterns[pattern].steps[step][pad].on;
+      // No message: the lane shows the result, and a line of text for every
+      // toggle would spend the mode line on something already on screen.
+      edit_sequencer(
+          [&](rt::SequencerState& next) {
+            rt::Step& cell = next.patterns[pattern].steps[step][pad];
+            cell.on = on;
+            // Velocity is left alone, so turning a step off and on again keeps
+            // whatever it was set to. Nothing writes it yet -- M4 records from
+            // MIDI, not into the grid -- but zeroing it here would be a silent
+            // loss the moment something does.
+          },
+          std::string{});
       return true;
     }
     // Enter opens EDIT on the selected pad's slice. `:edit N` reaches any slice

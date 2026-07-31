@@ -201,6 +201,189 @@ TEST_CASE("case matters", "[command]") {
   CHECK(parse_command("chop TRANSIENT").kind == CommandKind::kError);
 }
 
+// -- the sequencer verbs, M4 ---------------------------------------------------
+
+TEST_CASE("bpm is fixed point, so what was typed is what is stored", "[command]") {
+  // The whole reason tempo is carried as hundredths rather than a float: 92.5
+  // has to come back out as 92.5 and not 92.49999. Asserted on the integer,
+  // which is the only place that can be exact.
+  CHECK(tui::parse_command("bpm 120").bpm_x100 == 12'000);
+  CHECK(tui::parse_command("bpm 92.5").bpm_x100 == 9'250);
+  CHECK(tui::parse_command("bpm 89.53").bpm_x100 == 8'953);
+  CHECK(tui::parse_command("bpm 120.0").bpm_x100 == 12'000);
+
+  // `.5` is five TENTHS. Reading the digits as written would make 92.5 mean
+  // 92.05 -- a different tempo, arrived at silently.
+  CHECK(tui::parse_command("bpm 92.5").bpm_x100 != tui::parse_command("bpm 92.05").bpm_x100);
+  CHECK(tui::parse_command("bpm 92.05").bpm_x100 == 9'205);
+
+  CHECK(tui::parse_command("bpm 120").kind == CommandKind::kBpm);
+}
+
+TEST_CASE("bpm refuses what it cannot store exactly", "[command]") {
+  // Refused rather than rounded. A tempo quietly changed to a neighbouring one
+  // shows up as drift against another machine, minutes later, with nothing on
+  // screen to connect it to.
+  const Command precise = parse_command("bpm 92.505");
+  REQUIRE(precise.kind == CommandKind::kError);
+  CHECK(precise.message.find("92.505") != std::string::npos);
+
+  for (const std::string_view line :
+       {"bpm", "bpm x", "bpm 92.", "bpm .5", "bpm 92.5.5", "bpm -4"}) {
+    INFO("line: " << line);
+    CHECK(parse_command(line).kind == CommandKind::kError);
+  }
+}
+
+TEST_CASE("bpm names its bounds when it refuses one", "[command]") {
+  // The bounds are rt::kMinBpmX100 / kMaxBpmX100 and the message is built from
+  // them, so it cannot outlive them. 20 and 300 are what those are today.
+  const Command slow = parse_command("bpm 19.99");
+  REQUIRE(slow.kind == CommandKind::kError);
+  CHECK(slow.message.find("20.00") != std::string::npos);
+  CHECK(slow.message.find("300.00") != std::string::npos);
+
+  CHECK(parse_command("bpm 300.01").kind == CommandKind::kError);
+  CHECK(parse_command("bpm 99999999999999999999").kind == CommandKind::kError);
+
+  // And the edges themselves are accepted, not off by one.
+  CHECK(parse_command("bpm 20").kind == CommandKind::kBpm);
+  CHECK(parse_command("bpm 300").kind == CommandKind::kBpm);
+}
+
+TEST_CASE("a tempo formats back the way it was typed", "[command]") {
+  // The round trip, which is the reason format_bpm lives beside the parser.
+  CHECK(tui::format_bpm(9'250) == "92.50");
+  CHECK(tui::format_bpm(9'205) == "92.05");
+  CHECK(tui::format_bpm(12'000) == "120.00");
+  CHECK(tui::format_bpm(tui::parse_command("bpm 89.53").bpm_x100) == "89.53");
+}
+
+TEST_CASE("swing takes a percentage, and zero is one of them", "[command]") {
+  const Command command = parse_command("swing 58");
+  REQUIRE(command.kind == CommandKind::kSwing);
+  CHECK(command.swing == 58);
+
+  // ZERO IS VALID, unlike every count and index in this file. Straight is a
+  // setting rather than an absent one, and `swing 0` is how you take it off.
+  const Command straight = parse_command("swing 0");
+  REQUIRE(straight.kind == CommandKind::kSwing);
+  CHECK(straight.swing == 0);
+
+  CHECK(parse_command("swing 75").kind == CommandKind::kSwing);  // rt::kMaxSwingPercent
+}
+
+TEST_CASE("swing refuses a shift that would reorder the steps", "[command]") {
+  // Past 100% an odd step lands on top of its neighbour and step positions stop
+  // being monotonic, which the audio thread's block scan relies on. The cap is
+  // 75 and the message says so rather than clamping in silence.
+  const Command command = parse_command("swing 90");
+  REQUIRE(command.kind == CommandKind::kError);
+  CHECK(command.message.find("75") != std::string::npos);
+
+  CHECK(parse_command("swing").kind == CommandKind::kError);
+  CHECK(parse_command("swing x").kind == CommandKind::kError);
+  CHECK(parse_command("swing 58%").kind == CommandKind::kError);
+}
+
+TEST_CASE("pattern selects, resizes, or clears", "[command]") {
+  const Command select = parse_command("pattern 3");
+  REQUIRE(select.kind == CommandKind::kPatternSelect);
+  CHECK(select.pattern == 3);  // 1-based, exactly as typed
+
+  const Command length = parse_command("pattern length 32");
+  REQUIRE(length.kind == CommandKind::kPatternLength);
+  CHECK(length.count == 32);
+
+  CHECK(parse_command("pattern clear").kind == CommandKind::kPatternClear);
+  CHECK(parse_command("pattern 1").kind == CommandKind::kPatternSelect);
+  CHECK(parse_command("pattern 16").kind == CommandKind::kPatternSelect);
+}
+
+TEST_CASE("pattern is range-checked where slot assign is not", "[command]") {
+  // The difference is what the limit depends on. How many slices exist is
+  // program state the parser must not need; how many patterns there are is a
+  // compile-time constant, so checking it here keeps the function pure AND
+  // lets the message name the number.
+  const Command high = parse_command("pattern 17");
+  REQUIRE(high.kind == CommandKind::kError);
+  CHECK(high.message.find("16") != std::string::npos);
+
+  CHECK(parse_command("pattern 0").kind == CommandKind::kError);
+  CHECK(parse_command("pattern x").kind == CommandKind::kError);
+  CHECK(parse_command("pattern").message.find("clear") != std::string::npos);
+
+  const Command over = parse_command("pattern length 33");
+  REQUIRE(over.kind == CommandKind::kError);
+  CHECK(over.message.find("32") != std::string::npos);
+  CHECK(parse_command("pattern length 0").kind == CommandKind::kError);
+  CHECK(parse_command("pattern length").kind == CommandKind::kError);
+}
+
+TEST_CASE("song is a list of patterns, in play order", "[command]") {
+  const Command command = parse_command("song 1 2 3 1");
+  REQUIRE(command.kind == CommandKind::kSong);
+  REQUIRE(command.song.size() == 4);
+  CHECK(command.song[0] == 1);
+  CHECK(command.song[3] == 1);  // repeats are the point of a chain
+
+  const Command one = parse_command("song 2");
+  REQUIRE(one.kind == CommandKind::kSong);
+  CHECK(one.song.size() == 1);
+
+  // `song clear` is its own kind rather than an empty list, so "no song" cannot
+  // be confused with "a song nobody filled in".
+  const Command cleared = parse_command("song clear");
+  CHECK(cleared.kind == CommandKind::kSongClear);
+  CHECK(cleared.song.empty());
+}
+
+TEST_CASE("song is the one verb where a trailing word is fatal", "[command]") {
+  // Everywhere else an extra word is ignored, because the command was already
+  // complete. Here every word IS an argument, so `song 1 2 x` would silently
+  // become a two-slot song rather than the longer one being typed.
+  const Command command = parse_command("song 1 2 x");
+  REQUIRE(command.kind == CommandKind::kError);
+  CHECK(command.message.find("x") != std::string::npos);
+
+  CHECK(parse_command("song 1 0 2").kind == CommandKind::kError);
+  CHECK(parse_command("song 1 17").kind == CommandKind::kError);
+  CHECK(parse_command("song").message.find("clear") != std::string::npos);
+}
+
+TEST_CASE("a song longer than the song can hold is refused", "[command]") {
+  std::string line = "song";
+  for (int slot = 0; slot < 65; ++slot) {  // rt::kMaxSongSlots is 64
+    line += " 1";
+  }
+  const Command command = parse_command(line);
+  REQUIRE(command.kind == CommandKind::kError);
+  CHECK(command.message.find("64") != std::string::npos);
+
+  std::string full = "song";
+  for (int slot = 0; slot < 64; ++slot) {
+    full += " 1";
+  }
+  const Command exact = parse_command(full);
+  REQUIRE(exact.kind == CommandKind::kSong);
+  CHECK(exact.song.size() == 64);
+}
+
+TEST_CASE("metro flips, or is told which way", "[command]") {
+  // Bare `metro` cannot know what it is now, so it carries kToggle and app.cpp
+  // resolves it against the state the parser deliberately does not have.
+  const Command bare = parse_command("metro");
+  REQUIRE(bare.kind == CommandKind::kMetronome);
+  CHECK(bare.toggle == tui::Switch::kToggle);
+
+  CHECK(parse_command("metro on").toggle == tui::Switch::kOn);
+  CHECK(parse_command("metro off").toggle == tui::Switch::kOff);
+
+  const Command wrong = parse_command("metro loud");
+  REQUIRE(wrong.kind == CommandKind::kError);
+  CHECK(wrong.message.find("loud") != std::string::npos);
+}
+
 TEST_CASE("edit, with the slice number optional", "[command]") {
   // No number means "the slice already selected", which is what you want after
   // stepping to it; with one, it jumps.

@@ -146,15 +146,35 @@ struct PatternView {
   std::uint8_t swing = 0;
   std::uint32_t bpm_x100 = 12'000;
 
-  // Where the transport is, for the playhead marker. `step` is meaningless
-  // unless `playing`.
-  bool playing = false;
+  // Whether the transport is running at all. Distinct from `playhead` below,
+  // and the mode line's `play`/`stop` reads THIS one -- the transport can be
+  // running on a pattern the lane is not showing.
+  bool transport_running = false;
+
+  // Whether the transport is on the pattern the lane is drawing, and `step` is
+  // therefore a position in it. False while a song is playing some other
+  // pattern, where a marker would claim a position on a grid it does not belong
+  // to -- the caption's `slot N` is what says the song is running elsewhere.
+  bool playhead = false;
   std::size_t step = 0;
 
   // Which song slot is playing, and whether there is a song at all. An empty
   // song is a pattern repeating, not slot zero of nothing.
   bool song = false;
   std::uint8_t slot = 0;
+
+  // Where the next step edit will land, in steps. THE PAD comes from
+  // UiState::selected_pad rather than being copied here: it is the same
+  // selection the pad grid already highlights, and two fields meaning "the pad
+  // being worked on" is two fields to keep in step.
+  //
+  // The lane's sixteen-step window follows this, which is what makes the second
+  // half of a 32-step pattern reachable at all.
+  std::size_t cursor_step = 0;
+
+  // Drawn in the caption when it is on. A click nobody can see the state of is
+  // one that gets left running into a bounce.
+  bool metronome = false;
 
   std::array<PatternRow, rt::kNumPads> rows{};
 };

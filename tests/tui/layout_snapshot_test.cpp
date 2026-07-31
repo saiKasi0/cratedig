@@ -34,6 +34,7 @@
 #include <span>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -204,7 +205,8 @@ void fill_bins(tui::UiState& state, int columns) {
   pattern.pattern = 2;
   pattern.length = 16;
   pattern.bpm_x100 = 9'260;
-  pattern.playing = true;
+  pattern.transport_running = true;
+  pattern.playhead = true;
   pattern.step = 6;
   for (std::size_t step = 0; step < 16; step += 4) {
     pattern.rows[0].on[step] = true;
@@ -366,6 +368,28 @@ TEST_CASE("PERFORM renders at the 100x30 design grid", "[tui]") {
     state.pattern.song = true;
     state.pattern.slot = 2;
     check_snapshot("perform_pattern_long_100x30", state, 100, 30);
+  }
+
+  SECTION("pattern tab, cursor on the second page of a long pattern") {
+    // The other half of the same 32-step pattern. Steps 17-32 are only
+    // reachable because the window follows the cursor -- without that they are
+    // storable and not editable, which is worse than not having them.
+    //
+    // The caption has to say `showing 17-32` and the beat ruler has to read 5
+    // to 8: two pages that both said `1 2 3 4` would be indistinguishable.
+    //
+    // The playhead is at step 7, on the first page, so its marker row is BLANK
+    // here -- a marker drawn at the same column on the wrong page would be a
+    // confident wrong answer about where the music is.
+    tui::UiState state = playing_state(100);
+    state.tab = tui::PanelTab::kPattern;
+    state.pattern = live_pattern();
+    state.pattern.length = 32;
+    state.pattern.cursor_step = 20;
+    state.pattern.rows[0].on[20] = true;
+    state.pattern.rows[5].on[31] = true;
+    state.selected_pad = 0;
+    check_snapshot("perform_pattern_page2_100x30", state, 100, 30);
   }
 
   SECTION("chopped, with pads glowing") {
@@ -836,6 +860,164 @@ TEST_CASE("a sequenced hit is lit but never inverted", "[tui]") {
 
   CHECK(live > 0);        // a live hit at full velocity inverts
   CHECK(sequenced == 0);  // the same hit from the sequencer does not
+}
+
+TEST_CASE("the step cursor is drawn where the next edit will land", "[tui]") {
+  // ON THE CELLS, not on a snapshot: the cursor is an inverted cell, so the
+  // characters are identical with and without it and a text golden could not
+  // tell the two frames apart. Same argument as the sequenced-glow test below.
+  //
+  // The lane occupies the right-hand panel, so the search is bounded to it --
+  // otherwise a stray inversion in the pad grid would answer this question.
+  const auto cursor_columns = [](std::size_t pad, std::size_t step) {
+    tui::UiState state = loaded_state(100);
+    state.tab = tui::PanelTab::kPattern;
+    state.pattern = live_pattern();
+    state.pattern.transport_running = false;
+    state.pattern.playhead = false;
+    state.pattern.cursor_step = step;
+    state.selected_pad = static_cast<std::uint8_t>(pad);
+
+    const ftxui::Screen screen = render_screen(state, 100, 30);
+    std::vector<std::pair<int, int>> cells;
+    for (int y = 14; y < 27; ++y) {
+      for (int x = 46; x < 100; ++x) {
+        if (screen.CellAt(x, y).inverted) {
+          cells.emplace_back(x, y);
+        }
+      }
+    }
+    return cells;
+  };
+
+  // Exactly one cell, wherever it is. Two would mean the left and right columns
+  // of the lane were both drawing it.
+  const std::vector<std::pair<int, int>> origin = cursor_columns(0, 0);
+  REQUIRE(origin.size() == 1);
+
+  // Moving the cursor one step moves it one column right; the group gaps mean
+  // step 4 is five columns along rather than four.
+  const std::vector<std::pair<int, int>> next = cursor_columns(0, 1);
+  REQUIRE(next.size() == 1);
+  CHECK(next[0].second == origin[0].second);
+  CHECK(next[0].first == origin[0].first + 1);
+
+  const std::vector<std::pair<int, int>> beat = cursor_columns(0, 4);
+  REQUIRE(beat.size() == 1);
+  CHECK(beat[0].first == origin[0].first + 5);
+
+  // Moving the PAD moves it down a row -- and pad 9 crosses to the lane's right
+  // column, back onto the first row. That crossing is the part worth pinning:
+  // a cursor that stayed in the left column would point at pad 1's steps while
+  // claiming to be editing pad 9's.
+  const std::vector<std::pair<int, int>> second_row = cursor_columns(1, 0);
+  REQUIRE(second_row.size() == 1);
+  CHECK(second_row[0].second == origin[0].second + 1);
+  CHECK(second_row[0].first == origin[0].first);
+
+  const std::vector<std::pair<int, int>> right_column = cursor_columns(8, 0);
+  REQUIRE(right_column.size() == 1);
+  CHECK(right_column[0].second == origin[0].second);
+  CHECK(right_column[0].first > origin[0].first);
+}
+
+TEST_CASE("the lane's window follows the cursor onto the second page", "[tui]") {
+  // A 32-step pattern is two pages of sixteen. Without the window following,
+  // steps 17-32 could be stored and never edited.
+  const auto lane_text = [](std::size_t cursor) {
+    tui::UiState state = loaded_state(100);
+    state.tab = tui::PanelTab::kPattern;
+    state.pattern = live_pattern();
+    state.pattern.length = 32;
+    state.pattern.cursor_step = cursor;
+    state.pattern.rows[0] = tui::PatternRow{};
+    state.pattern.rows[0].on[17] = true;  // second page only
+    return strip_ansi(render_screen(state, 100, 30).ToString());
+  };
+
+  const std::string first_page = lane_text(0);
+  CHECK(first_page.find("showing 1-16") != std::string::npos);
+
+  const std::string second_page = lane_text(20);
+  CHECK(second_page.find("showing 17-32") != std::string::npos);
+
+  // The beat ruler is numbered from the start of the PATTERN, so the second
+  // page reads 5 to 8. Restarting at 1 would make the two pages identical in a
+  // screenshot.
+  CHECK(second_page.find("5    6    7    8") != std::string::npos);
+  CHECK(first_page.find("1    2    3    4") != std::string::npos);
+
+  // And the hit at step 18 is only drawn on the page that contains it.
+  CHECK(second_page.find("·█·· ···· ···· ····") != std::string::npos);
+}
+
+TEST_CASE("the lane says when the metronome is on", "[tui]") {
+  // A click nobody can see the state of is one that gets left running into a
+  // bounce -- and under --no-audio, where nothing is heard at all, the caption
+  // is the only place it exists.
+  tui::UiState state = loaded_state(100);
+  state.tab = tui::PanelTab::kPattern;
+  state.pattern = live_pattern();
+
+  CHECK(strip_ansi(render_screen(state, 100, 30).ToString()).find("metro") == std::string::npos);
+
+  state.pattern.metronome = true;
+  CHECK(strip_ansi(render_screen(state, 100, 30).ToString()).find("metro") != std::string::npos);
+
+  // It outranks swing in the caption, because the drop loop takes from the end
+  // and these two are not equally droppable: swing is audible as a feel, a
+  // click left running is audible as a click.
+  state.pattern.swing = 58;
+  const std::string both = strip_ansi(render_screen(state, 100, 30).ToString());
+  REQUIRE(both.find("metro") != std::string::npos);
+  CHECK(both.find("metro") < both.find("swing 58%"));
+}
+
+TEST_CASE("the playhead is not drawn on a pattern the transport is not on", "[tui]") {
+  // While a song plays, the lane shows the pattern being EDITED and the
+  // transport is often somewhere else. A marker moving across a grid the audio
+  // is not playing would be a confident wrong answer, so it is suppressed and
+  // the caption's `slot N` is what says the song is still running.
+  tui::UiState state = loaded_state(100);
+  state.tab = tui::PanelTab::kPattern;
+  state.pattern = live_pattern();
+  state.pattern.song = true;
+  state.pattern.slot = 2;
+
+  state.pattern.playhead = true;
+  const std::string on_it = strip_ansi(render_screen(state, 100, 30).ToString());
+
+  state.pattern.playhead = false;
+  const std::string elsewhere = strip_ansi(render_screen(state, 100, 30).ToString());
+
+  CHECK(on_it.find("┯") != std::string::npos);
+  CHECK(elsewhere.find("┯") == std::string::npos);
+
+  // The transport is still running either way, and the mode line says so --
+  // that is the field the marker does NOT share.
+  CHECK(elsewhere.find("slot 3") != std::string::npos);
+  CHECK(elsewhere.find("play") != std::string::npos);
+}
+
+TEST_CASE("the mode line reports the tempo and the transport", "[tui]") {
+  // Neither existed before M4, which is why docs/design/README.md recorded the
+  // mode line as showing "no BPM, bar or transport until M4 -- advertising a
+  // key that does nothing is worse than not mentioning it".
+  tui::UiState state = loaded_state(100);
+  state.pattern.bpm_x100 = 9'250;
+
+  state.pattern.transport_running = false;
+  const std::string stopped = strip_ansi(render_screen(state, 100, 30).ToString());
+  CHECK(stopped.find("92.50 bpm") != std::string::npos);
+  CHECK(stopped.find("stop") != std::string::npos);
+
+  state.pattern.transport_running = true;
+  const std::string running = strip_ansi(render_screen(state, 100, 30).ToString());
+  CHECK(running.find("play") != std::string::npos);
+
+  // And the keymap names the keys that reach them, at the design size.
+  CHECK(running.find("p play") != std::string::npos);
+  CHECK(running.find("t step") != std::string::npos);
 }
 
 TEST_CASE("a sequenced hit is still visible at every step below hot", "[tui]") {

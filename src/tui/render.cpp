@@ -1,5 +1,6 @@
 #include "tui/render.hpp"
 
+#include "tui/command.hpp"
 #include "tui/render_detail.hpp"
 #include "tui/theme.hpp"
 #include "tui/ui_state.hpp"
@@ -572,7 +573,7 @@ constexpr std::size_t kLaneRows = 8;  // pads per column
   return index < 9 ? "0" + std::to_string(index + 1) : std::to_string(index + 1);
 }
 
-[[nodiscard]] std::string lane_row(const PatternView& pattern, std::size_t pad,
+[[nodiscard]] std::string lane_row(const PatternView& pattern, std::size_t pad, std::size_t first,
                                    std::size_t visible) {
   std::string cells;
   cells.reserve(visible + (visible / kStepsPerGroup));
@@ -580,7 +581,7 @@ constexpr std::size_t kLaneRows = 8;  // pads per column
     if (step > 0 && step % kStepsPerGroup == 0) {
       cells += ' ';
     }
-    cells += pattern.rows[pad].on[step] ? "\u2588" : "\u00b7";
+    cells += pattern.rows[pad].on[first + step] ? "\u2588" : "\u00b7";
   }
   return cells;
 }
@@ -593,8 +594,16 @@ constexpr std::size_t kLaneRows = 8;  // pads per column
   // the padded rows, and visibly for the caption, which came out reading
   // "... slot" as though a value had failed to render.
   const std::size_t width = outer_width > 2 ? outer_width - 2 : 0;
-  const std::size_t visible =
-      std::min({pattern.length, kLaneSteps, static_cast<std::size_t>(rt::kMaxSteps)});
+  const std::size_t length = std::clamp<std::size_t>(pattern.length, 1, rt::kMaxSteps);
+
+  // THE WINDOW FOLLOWS THE CURSOR, in whole pages. A 32-step pattern is two
+  // pages of sixteen and moving the cursor past the sixteenth turns to the
+  // second -- which is what makes those steps reachable at all rather than
+  // merely storable. Whole pages rather than scrolling one step at a time,
+  // because a bar that slides under the beat ruler is a bar you cannot count.
+  const std::size_t cursor = std::min(pattern.cursor_step, length - 1);
+  const std::size_t first = (cursor / kLaneSteps) * kLaneSteps;
+  const std::size_t visible = std::min(length - first, kLaneSteps);
   const std::size_t bar_cells = visible + ((visible - 1) / kStepsPerGroup);
 
   // Left column at 1, right column past the left one's bar with a gap. Computed
@@ -620,14 +629,23 @@ constexpr std::size_t kLaneRows = 8;  // pads per column
   // pattern when it is showing half of it.
   std::vector<std::string> clauses;
   clauses.push_back("pattern " + lane_number(pattern.pattern));
-  const std::size_t truncation_clause = pattern.length > visible ? clauses.size() + 1 : 0;
-  clauses.push_back(std::to_string(pattern.length) + " steps");
-  if (pattern.length > visible) {
-    clauses.push_back("showing 1-" + std::to_string(visible));
+  const bool windowed = length > visible;
+  const std::size_t truncation_clause = windowed ? clauses.size() + 1 : 0;
+  clauses.push_back(std::to_string(length) + " steps");
+  if (windowed) {
+    clauses.push_back("showing " + std::to_string(first + 1) + "-" +
+                      std::to_string(first + visible));
   }
   clauses.push_back("1/16");
   if (pattern.song) {
     clauses.push_back("slot " + std::to_string(pattern.slot + 1));
+  }
+  // Ahead of swing, because the drop loop below takes from the end and these
+  // two are not equally droppable: swing is audible as a feel, while a click
+  // left running is audible as a click -- and the surprising one is the one
+  // worth the columns.
+  if (pattern.metronome) {
+    clauses.push_back("metro");
   }
   if (pattern.swing > 0) {
     clauses.push_back("swing " + std::to_string(pattern.swing) + "%");
@@ -656,37 +674,65 @@ constexpr std::size_t kLaneRows = 8;  // pads per column
   }
   lines.push_back(ftxui::text(" " + joined(clauses)) | ftxui::color(theme::label()));
 
-  // The playhead, above the grid exactly as the mockup has it. Only while
-  // playing: a marker on a stopped transport would claim a position that is not
-  // moving.
+  // The playhead, above the grid exactly as the mockup has it. Only when the
+  // transport is on THIS pattern and inside the visible page: a marker anywhere
+  // else claims a position on a grid it does not belong to, which is worse than
+  // no marker at all.
   {
     std::string row(width, ' ');
-    if (pattern.playing && pattern.step < visible) {
-      const std::size_t at = step_column(pattern.step);
+    if (pattern.playhead && pattern.step >= first && pattern.step < first + visible) {
+      const std::size_t at = step_column(pattern.step - first);
       if (left + kLabel + at < row.size()) {
-        row = detail::splice_at(row, left + kLabel + at, "\u252f");
+        row = detail::paint_at(row, left + kLabel + at, "\u252f");
       }
       if (two_columns && right + kLabel + at < row.size()) {
-        row = detail::splice_at(row, right + kLabel + at, "\u252f");
+        row = detail::paint_at(row, right + kLabel + at, "\u252f");
       }
     }
     lines.push_back(ftxui::text(row) | ftxui::color(theme::accent()));
   }
 
+  // Where the next step edit lands, drawn as a block cursor.
+  //
+  // INVERTED, which the pad grid reserves for a live hit -- but this is a
+  // different panel answering a different question, and a block cursor is the
+  // one idiom every terminal user already reads without being told. A lane you
+  // can type into and cannot see the caret of is a lane that writes to the
+  // wrong step.
+  //
+  // Only when its pad is actually on screen. In one-column mode the lane shows
+  // the first eight pads, so a cursor on pad 12 has nowhere to be drawn and
+  // drawing it anyway would put it on the wrong row.
+  const std::size_t cursor_pad = std::min<std::size_t>(state.selected_pad, rt::kNumPads - 1);
+  const std::size_t cursor_row = cursor_pad % kLaneRows;
+  const bool cursor_shown = two_columns || cursor_pad < kLaneRows;
+  const std::size_t cursor_base = cursor_pad < kLaneRows ? left : right;
+  const std::size_t cursor_column = cursor_base + kLabel + step_column(cursor - first);
+
   const std::size_t rows = two_columns ? kLaneRows : std::min<std::size_t>(kLaneRows, rt::kNumPads);
   for (std::size_t row_index = 0; row_index < rows; ++row_index) {
     std::string row(width, ' ');
 
-    const std::size_t first = row_index;
-    row = detail::splice_at(row, left, lane_number(first));
-    row = detail::splice_at(row, left + kLabel, lane_row(pattern, first, visible));
+    row = detail::paint_at(row, left, lane_number(row_index));
+    row = detail::paint_at(row, left + kLabel, lane_row(pattern, row_index, first, visible));
 
     if (two_columns) {
       const std::size_t second = row_index + kLaneRows;
       if (second < rt::kNumPads) {
-        row = detail::splice_at(row, right, lane_number(second));
-        row = detail::splice_at(row, right + kLabel, lane_row(pattern, second, visible));
+        row = detail::paint_at(row, right, lane_number(second));
+        row = detail::paint_at(row, right + kLabel, lane_row(pattern, second, first, visible));
       }
+    }
+
+    if (cursor_shown && row_index == cursor_row && cursor_column < utf8_cells(row)) {
+      auto [before, rest] = utf8_split(row, cursor_column);
+      auto [under, after] = detail::utf8_take_one(rest);
+      lines.push_back(ftxui::hbox({
+          ftxui::text(before) | ftxui::color(theme::label()),
+          ftxui::text(under) | ftxui::color(theme::accent()) | ftxui::inverted,
+          ftxui::text(after) | ftxui::color(theme::label()),
+      }));
+      continue;
     }
     lines.push_back(ftxui::text(row) | ftxui::color(theme::label()));
   }
@@ -694,11 +740,14 @@ constexpr std::size_t kLaneRows = 8;  // pads per column
   // The beat ruler, under each group of four.
   {
     std::string row(width, ' ');
+    // Numbered from the START OF THE PATTERN, not of the page: on the second
+    // page of a 32-step pattern these are beats 5 to 8, and restarting them at
+    // 1 would make the two pages indistinguishable in a screenshot.
     for (std::size_t beat = 0; beat * kStepsPerGroup < visible; ++beat) {
-      const std::string label = std::to_string(beat + 1);
-      row = detail::splice_at(row, left + kLabel + step_column(beat * kStepsPerGroup), label);
+      const std::string label = std::to_string((first / kStepsPerGroup) + beat + 1);
+      row = detail::paint_at(row, left + kLabel + step_column(beat * kStepsPerGroup), label);
       if (two_columns) {
-        row = detail::splice_at(row, right + kLabel + step_column(beat * kStepsPerGroup), label);
+        row = detail::paint_at(row, right + kLabel + step_column(beat * kStepsPerGroup), label);
       }
     }
     lines.push_back(ftxui::text(row) | ftxui::color(theme::muted()));
@@ -753,7 +802,14 @@ constexpr std::size_t kLaneRows = 8;  // pads per column
   // Live counters only, in priority order. The static engine and device facts
   // live in the sample panel, where they are not competing every frame with
   // numbers that actually change.
+  // The transport leads, which it could not before M4: the design README's note
+  // that the mode line shows no BPM or transport "until M4 -- advertising a key
+  // that does nothing is worse than not mentioning it" is now spent. Both are
+  // ahead of `voices` because they are what a sequencer is read for, and the
+  // one drops off the end are the ones the sample panel repeats anyway.
   std::vector<std::string> facts{
+      format_bpm(state.pattern.bpm_x100) + " bpm",
+      state.pattern.transport_running ? std::string{"play"} : std::string{"stop"},
       "voices " + std::to_string(state.active_voices) + "/" + std::to_string(state.max_voices),
   };
   // Faults outrank the level meter, and appear only when they have something to
@@ -773,24 +829,44 @@ constexpr std::size_t kLaneRows = 8;  // pads per column
   // the longest hint that still fits -- the same balance the mockups strike,
   // and the right one: the facts are what changed since the last frame.
   static constexpr std::string_view kHintTiers[] = {
-      "qwer/asdf/zxcv/1234 pads · hl scroll · +- zoom · 0 fit · : cmd · esc quit ",
+      "qwer/asdf/zxcv/1234 pads · p play · [] t step · hl scroll · +- zoom · : cmd · esc quit ",
       // `: cmd` displaces `0 fit` from here down. Chopping is what the machine
       // is FOR, and `:` is the only way to reach it; fit is one of several view
       // keys, and the neighbouring `+- zoom` already says the view moves.
-      "qwer.. pads · hl scroll · +- zoom · : cmd · esc quit ",
-      "pads qwer.. · hl · +- · : · esc ",
-      // The pad keys survive one tier further down than anything else. They are
-      // what makes the thing playable; scroll and zoom are discoverable by
-      // pressing something, and a pad map is not.
+      "qwer.. pads · p play · [] t step · hl scroll · +- zoom · : cmd · esc quit ",
+      // The view keys lose their WORDS before the step keys lose theirs: `hl`
+      // and `+-` are two keys you can try, while `t` without "step" says
+      // nothing about what it edits -- and writing a pattern is the thing M4
+      // added, with no other way at all to reach it.
+      "qwer.. pads · p play · [] t step · hl · +- · : · esc quit ",
+      // What the 100-column design grid gets. `[]` goes before `t step` does,
+      // because a cursor you cannot move is still a cursor you can see, while a
+      // toggle key nobody knows about leaves the lane unreachable.
+      "qwer.. pads · p play · t step · hl +- · : · esc quit ",
+      "qwer.. pads · p play · t step · : · esc ",
+      // The pad keys survive further down than anything else. They are what
+      // makes the thing playable; scroll, zoom and the transport are
+      // discoverable by pressing something, and a pad map is not.
       "pads qwer.. · esc ",
+      "qwer.. · esc ",
       "esc quit ",
   };
 
-  // Room for "voices n/nn · peak -x.x dB" -- the two facts worth the width at
+  // Room for "120.00 bpm · stop · voices 0/16" -- the facts worth the width at
   // any size. The hint is chosen to leave that much, rather than facts being
   // chosen to leave room for the hint, because a keymap nobody can read is the
   // same as no keymap.
-  constexpr std::size_t kMinFactCells = 26;
+  //
+  // It was 26, sized for "voices n/nn · peak -x.x dB", and left at 26 the two
+  // M4 facts pushed the voice count off the design grid entirely: the tempo and
+  // the transport fitted, and then there was no room for anything else. The
+  // peak is the one that gives way now, and it can -- the sample panel carries
+  // it too, which was already the argument for it being last in this list.
+  //
+  // Measured against a THREE-DIGIT tempo, which is the default: at 33 it fitted
+  // 92.60 bpm and not 120.00, so the voice count appeared and disappeared
+  // depending on how fast the pattern was.
+  constexpr std::size_t kMinFactCells = 34;
 
   return detail::mode_line(state, columns, "  perform   ", facts, kHintTiers, kMinFactCells);
 }

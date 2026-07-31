@@ -54,6 +54,22 @@ inline constexpr std::string_view kPadKeys[] = {"q", "w", "e", "r", "a", "s", "d
 [[nodiscard]] std::string splice_at(std::string_view text, std::size_t column,
                                     std::string_view glyph);
 
+// Writes `text` into `row` at `column`, in cells, OVERWRITING what is there and
+// clipping at the end of the row rather than lengthening it.
+//
+// splice_at() above is the one-character version and it *grows* the string when
+// handed something longer, because it removes one character and inserts several.
+// A row assembled left to right that way still LOOKS right -- each write pushes
+// only the spaces after it -- while being much wider than the panel it is drawn
+// in, which FTXUI silently truncates.
+//
+// It stops looking right the moment such a row is split into an hbox, as the
+// pattern lane's cursor does: FTXUI shrinks an over-wide hbox by taking cells
+// from every child in proportion rather than truncating the last one, so a cell
+// disappears from the LEFT of the row and everything after it slides. Rows that
+// have to stay exactly as wide as their panel use this instead.
+[[nodiscard]] std::string paint_at(std::string_view row, std::size_t column, std::string_view text);
+
 // The mode line, minus the parts that make it PERFORM's or EDIT's.
 //
 // The `:` prompt and the message belong to NEITHER screen: a command works

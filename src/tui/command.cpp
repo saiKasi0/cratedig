@@ -1,7 +1,10 @@
 #include "tui/command.hpp"
 
+#include "rt/sequencer.hpp"
+
 #include <charconv>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -141,7 +144,183 @@ namespace {
   return out;
 }
 
+// Tempo as a fixed-point hundredth, from `120`, `92.5` or `89.53`.
+//
+// REFUSED RATHER THAN ROUNDED when there is more precision than a hundredth.
+// A tempo silently rounded to something else is a tempo the player did not set,
+// and the difference shows up as drift against another machine four minutes
+// later rather than as anything visible at the moment of typing.
+[[nodiscard]] bool parse_bpm_x100(std::string_view text, std::uint32_t& out) {
+  const std::size_t dot = text.find('.');
+  const std::string_view whole = text.substr(0, dot);
+  std::size_t units = 0;
+  if (!parse_number(whole, units)) {
+    return false;
+  }
+  // Far above any tempo, and here only so the multiply below cannot overflow on
+  // a pasted twenty-digit number. Out-of-range tempos are refused by the caller,
+  // which can name the actual limits.
+  if (units > 100'000) {
+    return false;
+  }
+
+  std::size_t hundredths = 0;
+  if (dot != std::string_view::npos) {
+    const std::string_view fraction = text.substr(dot + 1);
+    if (fraction.empty() || fraction.size() > 2) {
+      return false;
+    }
+    std::size_t value = 0;
+    if (!parse_number(fraction, value)) {
+      return false;
+    }
+    // `.5` is five tenths, `.05` is five hundredths. Reading both as 5 would
+    // make `bpm 92.5` mean 92.05 -- a whole different tempo, quietly.
+    hundredths = fraction.size() == 1 ? value * 10 : value;
+  }
+
+  out = static_cast<std::uint32_t>((units * 100) + hundredths);
+  return true;
+}
+
+[[nodiscard]] Command parse_bpm(const std::vector<std::string_view>& words) {
+  if (words.size() < 2) {
+    return error("bpm needs a tempo, e.g. bpm 92.5");
+  }
+  std::uint32_t bpm = 0;
+  if (!parse_bpm_x100(words[1], bpm)) {
+    return error("bpm: " + std::string{words[1]} + " is not a tempo (try 92 or 92.5)");
+  }
+  // The bounds are named from the constants rather than spelled out, so the
+  // message cannot outlive them.
+  if (bpm < rt::kMinBpmX100 || bpm > rt::kMaxBpmX100) {
+    return error("bpm: " + std::string{words[1]} + " is outside " + format_bpm(rt::kMinBpmX100) +
+                 "-" + format_bpm(rt::kMaxBpmX100));
+  }
+  Command out = command_of(CommandKind::kBpm);
+  out.bpm_x100 = bpm;
+  return out;
+}
+
+[[nodiscard]] Command parse_swing(const std::vector<std::string_view>& words) {
+  if (words.size() < 2) {
+    return error("swing needs a percentage, e.g. swing 58");
+  }
+  std::size_t percent = 0;
+  if (!parse_number(words[1], percent)) {
+    return error("swing: " + std::string{words[1]} + " is not a percentage");
+  }
+  // ZERO IS VALID HERE, unlike every count and index in this file: straight is a
+  // setting, not an absent one, and `swing 0` is how you take swing back off.
+  if (percent > rt::kMaxSwingPercent) {
+    return error("swing: " + std::string{words[1]} + " is more than " +
+                 std::to_string(rt::kMaxSwingPercent) + "%");
+  }
+  Command out = command_of(CommandKind::kSwing);
+  out.swing = static_cast<std::uint8_t>(percent);
+  return out;
+}
+
+// `pattern N` / `pattern length N` / `pattern clear`.
+//
+// RANGE-CHECKED HERE, where `slot assign` deliberately is not. The difference is
+// what the limit depends on: how many slices exist is program state the parser
+// must not need, while how many patterns there are is a compile-time constant.
+// Checking against a constant keeps parsing a pure function and lets the message
+// name the number.
+[[nodiscard]] Command parse_pattern(const std::vector<std::string_view>& words) {
+  if (words.size() < 2) {
+    return error("pattern what? try: pattern 3, pattern length 16, pattern clear");
+  }
+  const std::string_view what = words[1];
+
+  if (what == "clear") {
+    return command_of(CommandKind::kPatternClear);
+  }
+  if (what == "length") {
+    if (words.size() < 3) {
+      return error("pattern length needs a step count, e.g. pattern length 16");
+    }
+    std::size_t count = 0;
+    if (!parse_number(words[2], count) || count == 0) {
+      return error("pattern length: " + std::string{words[2]} + " is not a step count");
+    }
+    if (count > rt::kMaxSteps) {
+      return error("pattern length: " + std::string{words[2]} + " is more than " +
+                   std::to_string(rt::kMaxSteps) + " steps");
+    }
+    Command out = command_of(CommandKind::kPatternLength);
+    out.count = count;
+    return out;
+  }
+
+  std::size_t number = 0;
+  if (!parse_number(what, number) || number == 0) {
+    return error("pattern: " + std::string{what} + " is not a pattern number");
+  }
+  if (number > rt::kMaxPatterns) {
+    return error("pattern: no pattern " + std::string{what} + " (have " +
+                 std::to_string(rt::kMaxPatterns) + ")");
+  }
+  Command out = command_of(CommandKind::kPatternSelect);
+  out.pattern = number;
+  return out;
+}
+
+// `song 1 2 3 1` / `song clear`.
+//
+// The only verb where TRAILING JUNK IS FATAL. Everywhere else an extra word is
+// ignored, because the command was already complete and throwing it away over a
+// stray keystroke is worse; here every word after the verb is an argument, so
+// `song 1 2 x` would silently become a two-slot song rather than the four-slot
+// one that was being typed.
+[[nodiscard]] Command parse_song(const std::vector<std::string_view>& words) {
+  if (words.size() < 2) {
+    return error("song what? try: song 1 2 3, song clear");
+  }
+  if (words[1] == "clear") {
+    return command_of(CommandKind::kSongClear);
+  }
+
+  Command out = command_of(CommandKind::kSong);
+  out.song.reserve(words.size() - 1);
+  for (std::size_t index = 1; index < words.size(); ++index) {
+    if (out.song.size() >= rt::kMaxSongSlots) {
+      return error("song: more than " + std::to_string(rt::kMaxSongSlots) + " slots");
+    }
+    std::size_t number = 0;
+    if (!parse_number(words[index], number) || number == 0 || number > rt::kMaxPatterns) {
+      return error("song: " + std::string{words[index]} + " is not a pattern number (1-" +
+                   std::to_string(rt::kMaxPatterns) + ")");
+    }
+    out.song.push_back(static_cast<std::uint8_t>(number));
+  }
+  return out;
+}
+
+[[nodiscard]] Command parse_metro(const std::vector<std::string_view>& words) {
+  Command out = command_of(CommandKind::kMetronome);
+  if (words.size() < 2) {
+    return out;  // bare `metro` flips it, which is what a click track is for
+  }
+  if (words[1] == "on") {
+    out.toggle = Switch::kOn;
+    return out;
+  }
+  if (words[1] == "off") {
+    out.toggle = Switch::kOff;
+    return out;
+  }
+  return error("metro: " + std::string{words[1]} + " is not on or off");
+}
+
 }  // namespace
+
+std::string format_bpm(std::uint32_t bpm_x100) {
+  const std::uint32_t hundredths = bpm_x100 % 100;
+  return std::to_string(bpm_x100 / 100) + "." + (hundredths < 10 ? "0" : "") +
+         std::to_string(hundredths);
+}
 
 Command parse_command(std::string_view line) {
   const std::vector<std::string_view> words = split_words(line);
@@ -160,6 +339,21 @@ Command parse_command(std::string_view line) {
   }
   if (verb == "pad") {
     return parse_pad(words);
+  }
+  if (verb == "bpm") {
+    return parse_bpm(words);
+  }
+  if (verb == "swing") {
+    return parse_swing(words);
+  }
+  if (verb == "pattern") {
+    return parse_pattern(words);
+  }
+  if (verb == "song") {
+    return parse_song(words);
+  }
+  if (verb == "metro") {
+    return parse_metro(words);
   }
   // `edit` with no number opens whichever slice is already selected, which is
   // what you want after `[`/`]` in PERFORM; with one, it jumps.
