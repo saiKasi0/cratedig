@@ -1,11 +1,11 @@
 #include "tui/keys.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+
+#include <catch2/catch_test_macros.hpp>
 
 // The Kitty keyboard decoder.
 //
@@ -163,9 +163,7 @@ TEST_CASE("a keystroke is not mistaken for the capability reply", "[unit][keys]"
 
 TEST_CASE("malformed input is refused rather than guessed at", "[unit][keys]") {
   for (const std::string_view sequence : {
-           "",
-           "\x1b",
-           "\x1b[",
+           "", "\x1b", "\x1b[",
            "\x1b[u",       // names no key
            "\x1b[;1:3u",   // ...even with everything else present
            "q",            // not a sequence at all
@@ -220,10 +218,10 @@ TEST_CASE("utf8_encode covers the four lengths and refuses what is not a charact
           "[unit][keys]") {
   CHECK(tui::utf8_encode('q') == "q");
   CHECK(tui::utf8_encode(':') == ":");
-  CHECK(tui::utf8_encode(0x00E9) == "\xc3\xa9");              // e-acute, two bytes
-  CHECK(tui::utf8_encode(0x00B7) == "\xc2\xb7");              // the separator the mode line uses
-  CHECK(tui::utf8_encode(0x2502) == "\xe2\x94\x82");          // a box-drawing bar, three bytes
-  CHECK(tui::utf8_encode(0x1F600) == "\xf0\x9f\x98\x80");     // four bytes
+  CHECK(tui::utf8_encode(0x00E9) == "\xc3\xa9");           // e-acute, two bytes
+  CHECK(tui::utf8_encode(0x00B7) == "\xc2\xb7");           // the separator the mode line uses
+  CHECK(tui::utf8_encode(0x2502) == "\xe2\x94\x82");       // a box-drawing bar, three bytes
+  CHECK(tui::utf8_encode(0x1F600) == "\xf0\x9f\x98\x80");  // four bytes
 
   // Surrogates and out-of-range values are not characters. Encoding them anyway
   // would put a byte sequence on the command line that Backspace cannot remove,
@@ -245,13 +243,13 @@ TEST_CASE("utf8_decode_first is the inverse, and refuses what encode would not e
 
   for (const std::string_view text : {
            "",
-           "\x80",          // a continuation byte with nothing in front of it
-           "\xc3",          // a two-byte lead with its second byte missing
-           "\xe2\x94",      // a three-byte lead one byte short
-           "\xc3\x28",      // a lead followed by something that is not a continuation
-           "\xc0\xaf",      // overlong: '/' encoded in two bytes
-           "\xe0\x80\xaf",  // overlong again, in three
-           "\xed\xa0\x80",  // a surrogate, which is not a character
+           "\x80",                  // a continuation byte with nothing in front of it
+           "\xc3",                  // a two-byte lead with its second byte missing
+           "\xe2\x94",              // a three-byte lead one byte short
+           "\xc3\x28",              // a lead followed by something that is not a continuation
+           "\xc0\xaf",              // overlong: '/' encoded in two bytes
+           "\xe0\x80\xaf",          // overlong again, in three
+           "\xed\xa0\x80",          // a surrogate, which is not a character
            "\xf8\x88\x80\x80\x80",  // five bytes, which UTF-8 has not had since 2003
        }) {
     INFO("bytes: " << text.size());

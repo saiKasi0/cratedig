@@ -1,0 +1,30 @@
+ cratedig  0.0.1  edit                                                         long_form_drums.flac 
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                        nothing chopped yet                                         
+                                          :chop transient                                           
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+ envelope                                                         slices  0                         
+                                                                  nn   start     end    len  pad    
+   ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇ a       0.00 ms    trig  one-shot                                   
+   ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇ d       0.00 ms    choke off                                        
+   ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇ s        0.0 dB    gain  0.0 dB                                     
+   ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇ r       0.00 ms    tune  0.00 st                                    
+   ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇                                                                     
+   d             s            r                                                                     
+                                                                                                    
+                                                                                                    
+  edit      slice 01/00                  [ ] slice · hl start · HL end · z zoom · u undo · esc back 

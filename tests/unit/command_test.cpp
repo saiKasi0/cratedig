@@ -200,3 +200,19 @@ TEST_CASE("case matters", "[command]") {
   CHECK(parse_command("CHOP transient").kind == CommandKind::kError);
   CHECK(parse_command("chop TRANSIENT").kind == CommandKind::kError);
 }
+
+TEST_CASE("edit, with the slice number optional", "[command]") {
+  // No number means "the slice already selected", which is what you want after
+  // stepping to it; with one, it jumps.
+  const Command current = parse_command("edit");
+  REQUIRE(current.kind == CommandKind::kEdit);
+  CHECK(current.slice == 0);
+
+  const Command jump = parse_command("edit 7");
+  REQUIRE(jump.kind == CommandKind::kEdit);
+  CHECK(jump.slice == 7);
+
+  CHECK(parse_command("edit 0").kind == CommandKind::kError);
+  CHECK(parse_command("edit x").kind == CommandKind::kError);
+  CHECK(parse_command("perform").kind == CommandKind::kPerform);
+}

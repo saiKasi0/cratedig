@@ -66,8 +66,8 @@ struct Field {
     start = semicolon + 1;
   }
   const std::size_t semicolon = body.find(';', start);
-  return body.substr(start, semicolon == std::string_view::npos ? std::string_view::npos
-                                                                : semicolon - start);
+  return body.substr(
+      start, semicolon == std::string_view::npos ? std::string_view::npos : semicolon - start);
 }
 
 [[nodiscard]] std::optional<std::uint32_t> arrow_for(char final_byte) {

@@ -98,4 +98,40 @@ std::vector<std::string> waveform_rows(std::span<const ingest::PeakBin> bins,
   return lines;
 }
 
+std::vector<std::string> envelope_rows(std::span<const float> levels, std::size_t rows) {
+  const std::size_t columns = levels.size() / kDotColumnsPerCell;
+  if (rows == 0 || columns == 0) {
+    return {};
+  }
+  const std::size_t dot_rows = rows * kDotRowsPerCell;
+
+  std::vector<std::string> lines;
+  lines.reserve(rows);
+  for (std::size_t row = 0; row < rows; ++row) {
+    std::string line;
+    line.reserve(columns * 3);
+    for (std::size_t column = 0; column < columns; ++column) {
+      std::uint8_t dots = 0;
+      for (std::size_t dot_column = 0; dot_column < kDotColumnsPerCell; ++dot_column) {
+        const float level =
+            std::clamp(levels[(column * kDotColumnsPerCell) + dot_column], 0.0F, 1.0F);
+        // How many dot rows up from the baseline are filled. Rounded rather
+        // than truncated, so a level of exactly one fills the top dot and a
+        // level just under it does not sit a whole dot low.
+        const auto filled =
+            static_cast<std::size_t>(std::lround(level * static_cast<float>(dot_rows)));
+        for (std::size_t dot_row = 0; dot_row < kDotRowsPerCell; ++dot_row) {
+          const std::size_t from_bottom = dot_rows - ((row * kDotRowsPerCell) + dot_row);
+          if (from_bottom <= filled) {
+            dots |= kBrailleDotBits[dot_row][dot_column];
+          }
+        }
+      }
+      line += braille_glyph(dots);
+    }
+    lines.push_back(std::move(line));
+  }
+  return lines;
+}
+
 }  // namespace tui

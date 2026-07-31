@@ -113,10 +113,79 @@ inline constexpr float kGlowSeconds = 0.35F;
 struct SliceMark {
   std::size_t start_frame = 0;
   std::size_t end_frame = 0;
+
+  // How far the zero-crossing snap moved each boundary, signed, in frames.
+  // Straight from ingest::Slice, and the reason EDIT can say "start snapped
+  // -3 smp" rather than only showing where the boundary ended up.
+  std::ptrdiff_t start_snap = 0;
+  std::ptrdiff_t end_snap = 0;
+};
+
+// Which screen is up.
+//
+// PERFORM and EDIT are two pure functions of this same struct, chosen here. The
+// alternative -- two UiStates -- would mean the pad levels, the message line and
+// the transport all existed twice and had to be kept in step.
+enum class Screen : std::uint8_t {
+  kPerform = 0,
+  kEdit,
+};
+
+// One pad's playback parameters, as EDIT displays them.
+//
+// Milliseconds and linear gains rather than rt::AdsrFrames, because converting
+// frames to time needs a sample rate: the control thread has one and the
+// renderer does not. Keeping the conversion on the control side is what lets the
+// snapshot tests write these as literals.
+struct EnvelopeView {
+  float attack_ms = 0.0F;
+  float decay_ms = 0.0F;
+  float sustain = 1.0F;  // linear, 0..1
+  float release_ms = 0.0F;
+
+  bool gate = false;
+  std::uint8_t choke_group = 0;
+  float gain = 1.0F;
+  float pitch_ratio = 1.0F;
+};
+
+// What EDIT is looking at.
+//
+// Its own WaveView, separate from PERFORM's: stepping to the next slice zooms
+// to it, and coming back to PERFORM must not have moved the overview. Two views
+// is the honest model of two screens that both scroll.
+struct EditState {
+  std::size_t slice = 0;  // 0-based index into UiState::slices
+  WaveView view;
+
+  // Where the signal crosses zero inside the current view, in source frames,
+  // ascending. Computed on the control thread because it needs the audio; the
+  // renderer only places ticks.
+  std::vector<std::size_t> zero_crossings;
+
+  EnvelopeView envelope;
+
+  // Which pad plays this slice, if any. Shown in the header and in the table's
+  // `pad` column, because "which key makes this sound" is the question EDIT is
+  // usually being asked in service of.
+  std::uint8_t pad = 0;
+  bool pad_known = false;
+
+  // How many boundary nudges are undoable. Shown rather than acted on -- `u`
+  // does the acting, and a count is what tells you whether it will.
+  std::size_t undo_depth = 0;
+
+  // Whether the boundaries were snapped to zero crossings when this chop was
+  // made. Reported rather than obeyed: the snap already happened, and saying so
+  // is what makes "start snapped -3 smp" and "start free" different statements.
+  bool snap_enabled = true;
 };
 
 struct UiState {
   std::string version;
+
+  Screen screen = Screen::kPerform;
+  EditState edit;
 
   // The loaded sample. `frames == 0` means nothing is loaded, which is a
   // legitimate state the interface has to be able to draw.

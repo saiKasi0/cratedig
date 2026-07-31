@@ -1,5 +1,6 @@
 #include "tui/render.hpp"
 
+#include "tui/render_detail.hpp"
 #include "tui/theme.hpp"
 #include "tui/ui_state.hpp"
 #include "tui/waveform.hpp"
@@ -23,6 +24,16 @@ namespace {
 
 using ftxui::Element;
 using ftxui::Elements;
+
+// The formatting and UTF-8 helpers both screens use, and the pad key map.
+using detail::format_dbfs;
+using detail::format_time;
+using detail::kPadKeys;
+using detail::splice_at;
+using detail::utf8_cells;
+using detail::utf8_split;
+using detail::utf8_take_one;
+using detail::with_precision;
 
 // -- layout constants, all traceable to the 100x30 design grid ----------------
 
@@ -52,11 +63,6 @@ constexpr std::size_t kFixedRows = 5;
 // Vertical block characters, the meter vocabulary from docs/design/DESIGN_BRIEF.
 constexpr std::string_view kMeterBlocks[] = {"▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"};
 
-// The QWERTY map the mockups print in the pad corners. Wiring all sixteen is
-// M3's job; showing them now is layout, and it is what the grid is for.
-constexpr std::string_view kPadKeys[] = {"q", "w", "e", "r", "a", "s", "d", "f",
-                                         "z", "x", "c", "v", "1", "2", "3", "4"};
-
 struct Layout {
   std::size_t wave_panel_height = kWavePanelMax;
   std::size_t wave_rows = kWaveRowsMax;
@@ -85,78 +91,6 @@ struct Layout {
   out.wave_ruler = inside >= kWaveRowsMin + 2;
   out.wave_rows = std::clamp(inside - (out.wave_ruler ? 2U : 0U), kWaveRowsMin, kWaveRowsMax);
   return out;
-}
-
-// -- small formatting helpers -------------------------------------------------
-
-[[nodiscard]] std::string with_precision(double value, int digits) {
-  std::ostringstream out;
-  out << std::fixed << std::setprecision(digits) << value;
-  return out.str();
-}
-
-// Precision follows the zoom: at four minutes on screen, milliseconds are noise;
-// at forty milliseconds, they are the only thing that varies.
-[[nodiscard]] std::string format_time(double seconds, double span_seconds) {
-  if (seconds < 0.0) {
-    seconds = 0.0;
-  }
-  if (span_seconds >= 120.0) {
-    const auto minutes = static_cast<int>(seconds / 60.0);
-    return std::to_string(minutes) + ":" + (seconds - (minutes * 60.0) < 10.0 ? "0" : "") +
-           with_precision(seconds - (minutes * 60.0), 0);
-  }
-  if (span_seconds >= 10.0) {
-    return with_precision(seconds, 1) + "s";
-  }
-  if (span_seconds >= 1.0) {
-    return with_precision(seconds, 2) + "s";
-  }
-  return with_precision(seconds * 1000.0, 1) + "ms";
-}
-
-[[nodiscard]] std::string format_dbfs(float linear) {
-  if (linear <= 0.0F) {
-    return "-inf";
-  }
-  return with_precision(20.0 * std::log10(static_cast<double>(linear)), 1);
-}
-
-// Cells, not bytes. Every waveform row is UTF-8 with a mix of one-byte spaces
-// and three-byte braille, so byte offsets are not column offsets.
-[[nodiscard]] std::size_t utf8_cells(std::string_view text) {
-  std::size_t cells = 0;
-  for (const char byte : text) {
-    if ((static_cast<unsigned char>(byte) & 0xC0U) != 0x80U) {
-      ++cells;
-    }
-  }
-  return cells;
-}
-
-[[nodiscard]] std::pair<std::string, std::string> utf8_split(std::string_view text,
-                                                             std::size_t cells) {
-  std::size_t seen = 0;
-  std::size_t offset = 0;
-  while (offset < text.size()) {
-    if ((static_cast<unsigned char>(text[offset]) & 0xC0U) != 0x80U) {
-      if (seen == cells) {
-        break;
-      }
-      ++seen;
-    }
-    ++offset;
-  }
-  // Walk to the end of the character we stopped on.
-  while (offset < text.size() && (static_cast<unsigned char>(text[offset]) & 0xC0U) == 0x80U) {
-    ++offset;
-  }
-  return {std::string{text.substr(0, offset)}, std::string{text.substr(offset)}};
-}
-
-// Advances one whole UTF-8 character from the front.
-[[nodiscard]] std::pair<std::string, std::string> utf8_take_one(std::string_view text) {
-  return utf8_split(text, 1);
 }
 
 [[nodiscard]] std::string meter_bar(float level, std::size_t cells) {
@@ -641,60 +575,10 @@ enum class GlowStep : std::uint8_t { kOff = 0, kDim, kLit, kHot };
 }
 
 [[nodiscard]] Element mode_line(const UiState& state, std::size_t columns) {
-  constexpr std::string_view kPrefix = "  perform   ";
-
-  // The prompt takes the WHOLE line when it is up. A `:` line sharing space
-  // with a keymap is a prompt you cannot read, and the facts it would be
-  // competing with are all still one keystroke away.
-  //
-  // The block is a cursor. FTXUI can place a real terminal cursor, but doing so
-  // would put a blinking, terminal-dependent artefact into the PTY snapshot --
-  // this draws the same information deterministically.
-  if (state.command_active) {
-    // The `:` is PINNED and the text scrolls under it, as in every other line
-    // editor that has ever had one. Letting the colon scroll off would take the
-    // one glyph that says which mode you are in.
-    //
-    // Three cells go elsewhere: the leading space, the colon, and the cursor.
-    std::string typed = state.command_text;
-    const std::size_t room = columns > 3 ? columns - 3 : 1;
-    if (utf8_cells(typed) > room) {
-      // Keep the END visible. What is being typed matters more than what was
-      // typed a moment ago, and truncating the tail instead looks exactly like
-      // a prompt that has stopped accepting input.
-      typed = utf8_split(typed, utf8_cells(typed) - room).second;
-    }
-    return ftxui::hbox({
-        ftxui::text(" "),
-        ftxui::text(":") | ftxui::color(theme::accent()),
-        ftxui::text(typed) | ftxui::color(theme::bright()),
-        ftxui::text("█") | ftxui::color(theme::accent()),
-        ftxui::filler(),
-    });
-  }
-
-  // What the last command said, in place of everything else. See UiState for
-  // why it wins over the counters and the keymap both.
-  if (!state.message.empty()) {
-    const std::size_t room =
-        columns > utf8_cells(kPrefix) + 1 ? columns - utf8_cells(kPrefix) - 1 : 1;
-    std::string text = state.message;
-    if (utf8_cells(text) > room) {
-      text = utf8_split(text, room).first;
-    }
-    return ftxui::hbox({
-        ftxui::text(std::string{kPrefix}) | ftxui::color(theme::label()) | ftxui::bold,
-        ftxui::text(text) |
-            ftxui::color(state.message_is_error ? theme::accent() : theme::bright()) |
-            (state.message_is_error ? ftxui::bold : ftxui::nothing),
-        ftxui::filler(),
-    });
-  }
-
   // Live counters only, in priority order. The static engine and device facts
   // live in the sample panel, where they are not competing every frame with
   // numbers that actually change.
-  std::vector<std::string> candidates{
+  std::vector<std::string> facts{
       "voices " + std::to_string(state.active_voices) + "/" + std::to_string(state.max_voices),
   };
   // Faults outrank the level meter, and appear only when they have something to
@@ -702,18 +586,18 @@ enum class GlowStep : std::uint8_t { kOff = 0, kDim, kLit, kHot };
   // columns; a counter reading three is news, and it earns its place by showing
   // up. The peak is also in the sample panel, so it is the one to lose here.
   if (state.xruns > 0) {
-    candidates.push_back("xruns " + std::to_string(state.xruns));
+    facts.push_back("xruns " + std::to_string(state.xruns));
   }
   if (state.dropped > 0) {
-    candidates.push_back("dropped " + std::to_string(state.dropped));
+    facts.push_back("dropped " + std::to_string(state.dropped));
   }
-  candidates.push_back("peak " + format_dbfs(state.master_peak) + " dB");
-  candidates.push_back(state.audio_api.empty() ? std::string{"no audio"} : state.audio_api);
+  facts.push_back("peak " + format_dbfs(state.master_peak) + " dB");
+  facts.push_back(state.audio_api.empty() ? std::string{"no audio"} : state.audio_api);
 
   // Hint tiers, longest first. The line is assembled facts-first and then given
   // the longest hint that still fits -- the same balance the mockups strike,
   // and the right one: the facts are what changed since the last frame.
-  constexpr std::string_view kHintTiers[] = {
+  static constexpr std::string_view kHintTiers[] = {
       "qwer/asdf/zxcv/1234 pads · hl scroll · +- zoom · 0 fit · : cmd · esc quit ",
       // `: cmd` displaces `0 fit` from here down. Chopping is what the machine
       // is FOR, and `:` is the only way to reach it; fit is one of several view
@@ -733,37 +617,7 @@ enum class GlowStep : std::uint8_t { kOff = 0, kDim, kLit, kHot };
   // same as no keymap.
   constexpr std::size_t kMinFactCells = 26;
 
-  // Cells, not bytes: the separator is a two-byte character one column wide, and
-  // budgeting in bytes silently loses a column per fact.
-  std::string_view hints = kHintTiers[std::size(kHintTiers) - 1];
-  for (const std::string_view tier : kHintTiers) {
-    if (utf8_cells(kPrefix) + utf8_cells(tier) + kMinFactCells <= columns) {
-      hints = tier;
-      break;
-    }
-  }
-
-  const std::size_t reserved = utf8_cells(kPrefix) + utf8_cells(hints);
-  std::size_t budget = columns > reserved ? columns - reserved : 0;
-
-  std::string facts;
-  for (const std::string& candidate : candidates) {
-    // The +1 keeps at least one space between the last fact and the hint. A
-    // mode line that exactly fills its width reads as two run-together words.
-    const std::size_t extra = utf8_cells(candidate) + (facts.empty() ? 0 : 3) + 1;
-    if (extra > budget) {
-      break;
-    }
-    budget -= extra;
-    facts += facts.empty() ? candidate : " · " + candidate;
-  }
-
-  return ftxui::hbox({
-      ftxui::text(std::string{kPrefix}) | ftxui::color(theme::label()) | ftxui::bold,
-      ftxui::text(facts) | ftxui::color(theme::muted()),
-      ftxui::filler(),
-      ftxui::text(std::string{hints}) | ftxui::color(theme::structure()),
-  });
+  return detail::mode_line(state, columns, "  perform   ", facts, kHintTiers, kMinFactCells);
 }
 
 [[nodiscard]] Element too_small(std::size_t columns, std::size_t rows) {
@@ -791,8 +645,13 @@ std::size_t wave_columns_for(std::size_t terminal_columns) noexcept {
 
 ftxui::Element render(const UiState& state, std::size_t terminal_columns,
                       std::size_t terminal_rows) {
+  // The size floor is checked here and only here, so both screens get the same
+  // legible message rather than one of them getting a mess.
   if (terminal_columns < kMinColumns || terminal_rows < kMinRows) {
     return too_small(terminal_columns, terminal_rows);
+  }
+  if (state.screen == Screen::kEdit) {
+    return render_edit(state, terminal_columns, terminal_rows);
   }
 
   const Layout layout = layout_for(terminal_rows);

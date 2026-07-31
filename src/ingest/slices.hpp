@@ -77,6 +77,21 @@ struct SnapParams {
 [[nodiscard]] std::size_t snap_to_zero_crossing(const rt::Sample& sample, std::size_t at,
                                                 std::size_t radius);
 
+// Every frame in [first_frame, first_frame + frames) where the mono sum changes
+// sign, ascending -- the EDIT screen's zero-cross ruler.
+//
+// EMPTY WHEN THERE ARE MORE THAN `limit` OF THEM, which is the useful answer
+// rather than a truncated list: a ruler with a tick in every column says
+// nothing, and one with ticks across only its left half says something false.
+// Callers pass the density above which the row stops being a ruler -- about
+// half the available columns -- and get a blank row instead of a solid one.
+//
+// Without the bound, a zoomed-out view of noisy material would return a
+// crossing every few frames: hundreds of thousands of them, none drawable.
+[[nodiscard]] std::vector<std::size_t> zero_crossings_in(const rt::Sample& sample,
+                                                         std::size_t first_frame,
+                                                         std::size_t frames, std::size_t limit);
+
 // Chop at detected transients.
 //
 // Slices run from one onset to the next, so material BEFORE the first onset is

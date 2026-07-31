@@ -12,6 +12,7 @@
 // happened to launch the test.
 
 #include "ingest/peak_pyramid.hpp"
+#include "ingest/slices.hpp"
 #include "rt/sample.hpp"
 #include "tui/render.hpp"
 #include "tui/theme.hpp"
@@ -239,6 +240,54 @@ void fill_bins(tui::UiState& state, int columns) {
   return state;
 }
 
+// EDIT on slice 6, framed the way the app frames it: the slice plus a third of
+// its length of context on each side, so both boundaries have something on the
+// far side of them to be judged against.
+[[nodiscard]] tui::UiState edit_state(int columns) {
+  tui::UiState state = chopped_state(columns);
+  state.screen = tui::Screen::kEdit;
+  state.edit.slice = 5;
+
+  // A snap that moved one boundary and not the other, so both readouts appear
+  // in the same frame. The signs are opposite on purpose: a formatter that
+  // dropped the minus would still look right on one of them.
+  state.slices[5].start_snap = -3;
+  state.slices[5].end_snap = 0;
+
+  const tui::SliceMark& slice = state.slices[5];
+  const std::size_t length = slice.end_frame - slice.start_frame;
+  const std::size_t margin = length / 3;
+  state.edit.view.first_frame = slice.start_frame - margin;
+  state.edit.view.frames_visible = length + (2 * margin);
+  state.edit.view.clamp(kFixtureFrames);
+
+  state.edit.envelope = tui::EnvelopeView{.attack_ms = 1.2F,
+                                          .decay_ms = 84.0F,
+                                          .sustain = 0.5F,
+                                          .release_ms = 120.0F,
+                                          .gate = true,
+                                          .choke_group = 1,
+                                          .gain = 1.0F,
+                                          .pitch_ratio = 1.0F};
+  state.edit.pad = 5;
+  state.edit.pad_known = true;
+  state.edit.undo_depth = 4;
+
+  // The real crossings of the real fixture, so the ruler is a picture of the
+  // audio above it rather than a decorative row of ticks.
+  // The same density rule the app uses: past one tick per two columns the row
+  // stops being a ruler and goes blank.
+  const std::size_t wave_columns = tui::edit_wave_columns_for(static_cast<std::size_t>(columns));
+  state.edit.zero_crossings = ingest::zero_crossings_in(
+      fixture_sample(), state.edit.view.first_frame, state.edit.view.frames_visible,
+      std::max<std::size_t>(wave_columns / 2, 1));
+
+  state.bins.assign(tui::bins_for_columns(wave_columns), ingest::PeakBin{});
+  fixture_pyramid().summarize(fixture_sample(), 0, state.edit.view.first_frame,
+                              state.edit.view.frames_visible, state.bins);
+  return state;
+}
+
 }  // namespace
 
 TEST_CASE("PERFORM renders at the 100x30 design grid", "[tui]") {
@@ -306,6 +355,164 @@ TEST_CASE("PERFORM renders at the 100x30 design grid", "[tui]") {
     state.message_is_error = true;
     check_snapshot("perform_error_100x30", state, 100, 30);
   }
+}
+
+TEST_CASE("EDIT renders at the 100x30 design grid", "[tui]") {
+  SECTION("a slice, framed") {
+    check_snapshot("edit_slice_100x30", edit_state(100), 100, 30);
+  }
+
+  SECTION("zoomed to where the zero-cross ruler means something") {
+    // The framed view is 460 samples per column, at which the material crosses
+    // zero several times in every one and the ruler is correctly BLANK. This is
+    // the other half of that rule: zoomed near sample resolution the crossings
+    // separate, the ticks appear, and the one under a boundary becomes `┃`.
+    tui::UiState state = edit_state(100);
+    const tui::SliceMark& slice = state.slices[state.edit.slice];
+    state.edit.view.first_frame = slice.start_frame > 300 ? slice.start_frame - 300 : 0;
+    state.edit.view.frames_visible = 900;
+    state.edit.view.clamp(kFixtureFrames);
+
+    const std::size_t wave_columns = tui::edit_wave_columns_for(100);
+    state.edit.zero_crossings = ingest::zero_crossings_in(
+        fixture_sample(), state.edit.view.first_frame, state.edit.view.frames_visible,
+        std::max<std::size_t>(wave_columns / 2, 1));
+
+    // Put the boundary ON a crossing, which is what the snap does to it. Without
+    // this the `┃` tick -- a crossing that is also a boundary, and the one thing
+    // this row is really answering -- never appears in any snapshot.
+    if (!state.edit.zero_crossings.empty()) {
+      state.slices[state.edit.slice].start_frame =
+          *std::min_element(state.edit.zero_crossings.begin(), state.edit.zero_crossings.end(),
+                            [&](std::size_t left, std::size_t right) {
+                              const std::size_t start = slice.start_frame;
+                              const auto distance = [start](std::size_t frame) {
+                                return frame > start ? frame - start : start - frame;
+                              };
+                              return distance(left) < distance(right);
+                            });
+    }
+
+    state.bins.assign(tui::bins_for_columns(wave_columns), ingest::PeakBin{});
+    fixture_pyramid().summarize(fixture_sample(), 0, state.edit.view.first_frame,
+                                state.edit.view.frames_visible, state.bins);
+
+    check_snapshot("edit_zoomed_100x30", state, 100, 30);
+  }
+
+  SECTION("nothing chopped") {
+    // Reachable: `:edit` before a chop, or `chop reset` with EDIT already open.
+    // It has to say so rather than draw an empty frame that reads as a bug.
+    tui::UiState state = playing_state(100);
+    state.screen = tui::Screen::kEdit;
+    check_snapshot("edit_empty_100x30", state, 100, 30);
+  }
+
+  SECTION("the command line, from EDIT") {
+    // The prompt and the message belong to neither screen. This is the snapshot
+    // that says so -- if they were built per-screen, this is where the second
+    // copy would first look different.
+    tui::UiState state = edit_state(100);
+    state.command_active = true;
+    state.command_text = "slot assign 6 3";
+    check_snapshot("edit_command_100x30", state, 100, 30);
+  }
+}
+
+TEST_CASE("EDIT degrades on smaller terminals", "[tui]") {
+  SECTION("80x24") {
+    check_snapshot("edit_slice_80x24", edit_state(80), 80, 24);
+  }
+  SECTION("60x20, where the slice table cannot stand beside the envelope") {
+    check_snapshot("edit_slice_60x20", edit_state(60), 60, 20);
+  }
+  SECTION("below the minimum, which is the same message on both screens") {
+    tui::UiState state = edit_state(40);
+    check_snapshot("edit_too_small_40x12", state, 40, 12);
+  }
+}
+
+TEST_CASE("EDIT is a different screen, not a decorated one", "[tui]") {
+  const std::string perform = strip_ansi(render_screen(chopped_state(100), 100, 30).ToString());
+  const std::string edit = strip_ansi(render_screen(edit_state(100), 100, 30).ToString());
+
+  CHECK(perform != edit);
+
+  // The mode name is the one thing that must never be wrong: everything else on
+  // screen is read in the light of which mode you are in.
+  CHECK(perform.find("perform") != std::string::npos);
+  CHECK(edit.find("edit") != std::string::npos);
+
+  // The 4x4 pad grid belongs to PERFORM and the boundary handles to EDIT.
+  CHECK(perform.find("bank a") != std::string::npos);
+  CHECK(edit.find("bank a") == std::string::npos);
+  CHECK(edit.find("h -1") != std::string::npos);
+  CHECK(edit.find("H -1") != std::string::npos);
+}
+
+TEST_CASE("EDIT says what the snap did to each boundary", "[tui]") {
+  tui::UiState state = edit_state(100);
+  const std::string moved = strip_ansi(render_screen(state, 100, 30).ToString());
+
+  // A boundary the snap moved and one it did not are different statements, and
+  // "free" is the honest word for the second: a boundary that needed no move and
+  // one that could not be moved are the same outcome.
+  CHECK(moved.find("start snapped -3 smp") != std::string::npos);
+  CHECK(moved.find("end free") != std::string::npos);
+
+  state.slices[5].end_snap = 11;
+  const std::string both = strip_ansi(render_screen(state, 100, 30).ToString());
+  CHECK(both.find("end snapped +11 smp") != std::string::npos);
+  CHECK(both.find("end free") == std::string::npos);
+
+  state.edit.snap_enabled = false;
+  const std::string off = strip_ansi(render_screen(state, 100, 30).ToString());
+  CHECK(off.find("snap off") != std::string::npos);
+  CHECK(off.find("snapped") == std::string::npos);
+}
+
+TEST_CASE("the envelope is drawn from the numbers beside it", "[tui]") {
+  tui::UiState fast = edit_state(100);
+  fast.edit.envelope.attack_ms = 0.5F;
+  fast.edit.envelope.decay_ms = 20.0F;
+  fast.edit.envelope.release_ms = 5.0F;
+
+  tui::UiState slow = edit_state(100);
+  slow.edit.envelope.attack_ms = 400.0F;
+  slow.edit.envelope.decay_ms = 20.0F;
+  slow.edit.envelope.release_ms = 5.0F;
+
+  // A long attack and a short one have to LOOK different, or the curve is
+  // decoration next to the numbers rather than a picture of them.
+  CHECK(strip_ansi(render_screen(fast, 100, 30).ToString()) !=
+        strip_ansi(render_screen(slow, 100, 30).ToString()));
+
+  // And the numbers themselves are on screen, in their own units.
+  const std::string painted = strip_ansi(render_screen(slow, 100, 30).ToString());
+  CHECK(painted.find("400 ms") != std::string::npos);
+  CHECK(painted.find("gate") != std::string::npos);
+
+  // The sustain is shown in dB, not as a fraction: it is a level, and every
+  // other level on this interface is in dB.
+  tui::UiState half = edit_state(100);
+  half.edit.envelope.sustain = 0.5F;
+  CHECK(strip_ansi(render_screen(half, 100, 30).ToString()).find("-6.0 dB") != std::string::npos);
+}
+
+TEST_CASE("the slice table follows the slice being edited", "[tui]") {
+  tui::UiState early = edit_state(100);
+  early.edit.slice = 1;
+  const std::string first = strip_ansi(render_screen(early, 100, 30).ToString());
+
+  tui::UiState late = edit_state(100);
+  late.edit.slice = 14;
+  const std::string last = strip_ansi(render_screen(late, 100, 30).ToString());
+
+  // The row you are editing has to be on screen. A table pinned to the first six
+  // slices would silently stop showing it, and nothing else would look wrong.
+  CHECK(first.find("slice 02") != std::string::npos);
+  CHECK(last.find("slice 15") != std::string::npos);
+  CHECK(first != last);
 }
 
 TEST_CASE("the prompt takes the mode line, and the answer takes it back", "[tui]") {
@@ -485,6 +692,37 @@ TEST_CASE("the accent colour is spent on exactly one thing", "[tui]") {
   // "the orange is everywhere", which is the failure this guards against.
   CHECK(accent_cells < 40);
   CHECK(accent_columns_in_wave > 0);
+}
+
+TEST_CASE("EDIT spends its accent on the boundaries and nothing else", "[tui]") {
+  // The same rule on the other screen, and the reason it needs its own test: a
+  // second screen is a second budget, and EDIT draws two full-height rules where
+  // PERFORM draws one playhead.
+  const ftxui::Screen screen = render_screen(edit_state(100), 100, 30);
+
+  std::size_t accent_cells = 0;
+  std::size_t accent_rows = 0;
+  for (int y = 0; y < screen.dimy(); ++y) {
+    bool row_has_accent = false;
+    for (int x = 0; x < screen.dimx(); ++x) {
+      if (screen.CellAt(x, y).foreground_color == tui::theme::accent()) {
+        ++accent_cells;
+        row_has_accent = true;
+      }
+    }
+    accent_rows += row_has_accent ? 1 : 0;
+  }
+  INFO("accent cells: " << accent_cells << " across " << accent_rows << " rows");
+
+  // Two rules through the panel and their two ticks: about two per row of the
+  // panel interior and nothing anywhere else. Twice that would mean something
+  // other than the boundaries had picked the colour up.
+  CHECK(accent_cells > 0);
+  CHECK(accent_cells < 40);
+
+  // And they are RULES: a vertical line means every waveform row is accented in
+  // the same two columns, which a marker drawn on one row would not be.
+  CHECK(accent_rows >= 9);
 }
 
 TEST_CASE("colour roles land where they are supposed to", "[tui]") {

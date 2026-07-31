@@ -29,6 +29,8 @@ enum class CommandKind : std::uint8_t {
   kSlotAssign,  // `slice` -> `pad`, both 1-based as typed
   kPadGate,     // `pad` 1-based, or 0 meaning every pad
   kPadOneShot,  // ditto
+  kEdit,        // open EDIT on `slice`, 1-based, or 0 meaning the current one
+  kPerform,     // back to PERFORM
   kQuit,
 };
 

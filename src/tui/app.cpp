@@ -225,12 +225,56 @@ void show_slices(const ingest::SliceSet& set, UiState& state) {
   state.slices.clear();
   state.slices.reserve(set.size());
   for (const ingest::Slice& slice : set.slices) {
-    state.slices.push_back(
-        SliceMark{.start_frame = slice.start_frame, .end_frame = slice.end_frame});
+    state.slices.push_back(SliceMark{.start_frame = slice.start_frame,
+                                     .end_frame = slice.end_frame,
+                                     .start_snap = slice.start_snap,
+                                     .end_snap = slice.end_snap});
   }
   state.chop_algorithm = set.algorithm == ingest::ChopAlgorithm::kTransient
                              ? std::string{"transient"}
                              : "grid " + std::to_string(set.size());
+  if (state.edit.slice >= state.slices.size()) {
+    state.edit.slice = 0;
+  }
+}
+
+// -- EDIT ---------------------------------------------------------------------
+
+// How much room the slice gets around it when EDIT opens on one, as a fraction
+// of the slice's own length on each side.
+//
+// A boundary with nothing on the far side of it cannot be judged: the whole
+// question EDIT answers is "did this cut land in the right place", and that is a
+// question about both sides.
+constexpr double kEditContext = 0.35;
+
+// How far a nudge moves a boundary. ONE FRAME, as the mockup's `h -1 ┻ +1 l`
+// says: this is the screen where sample-resolution work happens, and anything
+// coarser would need its own unit printed beside it. Holding the key repeats,
+// which is what puts a hundred frames within reach.
+constexpr std::size_t kNudgeFrames = 1;
+
+// Each `z` multiplies the visible span by this, wrapping back to the whole slice
+// once a single frame per column is reached. One key, one direction, no state to
+// remember -- which is what the mockup's bare `z zoom` has to mean.
+constexpr double kEditZoomStep = 0.25;
+
+// One undoable boundary edit: the whole slice rather than a delta, so undo does
+// not have to know which way it moved or replay anything to get back.
+struct SliceEdit {
+  std::size_t index = 0;
+  std::size_t start_frame = 0;
+  std::size_t end_frame = 0;
+};
+
+// The pad that plays a slice, or rt::kNumPads.
+[[nodiscard]] std::uint8_t pad_for_slice(const UiState& state, std::size_t slice) noexcept {
+  for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+    if (state.pads[pad].has_slice && state.pads[pad].slice_index == slice) {
+      return static_cast<std::uint8_t>(pad);
+    }
+  }
+  return rt::kNumPads;
 }
 
 }  // namespace
@@ -388,6 +432,154 @@ int run_app(const AppOptions& options) {
     screen.Exit();
   };
 
+  // The boundary edits that `u` can take back. Control-side, like the slice set
+  // itself; nothing on the audio thread has any idea this exists.
+  std::vector<SliceEdit> undo;
+
+  // The last width the interface was drawn at.
+  //
+  // Key handling needs it -- how many zero crossings are worth collecting is a
+  // question about columns -- and the event loop is not told the terminal size.
+  // Stale by at most one frame, and the only consequence of that is collecting
+  // slightly the wrong number of ticks for one redraw.
+  std::size_t last_columns = kMinColumns;
+
+  // Everything EDIT shows that is derived rather than stored: the zero crossings
+  // in view and the current pad's envelope.
+  //
+  // Called after anything that moves the view or changes the slice -- NOT once
+  // per frame. Scanning a view for sign changes is cheap but not free, and the
+  // answer only changes when one of those two does.
+  auto refresh_edit = [&](std::size_t columns) {
+    state.edit.zero_crossings.clear();
+    state.edit.pad_known = false;
+    state.edit.undo_depth = undo.size();
+    if (sample == nullptr || state.edit.slice >= state.slices.size()) {
+      return;
+    }
+
+    // One tick per two columns is about where a ruler stops being one. Past
+    // that, ingest::zero_crossings_in returns nothing and the row goes blank --
+    // which is the honest picture of "zoomed too far out to see crossings", and
+    // the row fills in again as you zoom toward sample resolution.
+    const std::size_t limit = std::max<std::size_t>(edit_wave_columns_for(columns) / 2, 1);
+    state.edit.zero_crossings = ingest::zero_crossings_in(*sample, state.edit.view.first_frame,
+                                                          state.edit.view.frames_visible, limit);
+    if (state.edit.zero_crossings.size() == limit) {
+      state.edit.zero_crossings.clear();
+    }
+
+    const std::uint8_t pad = pad_for_slice(state, state.edit.slice);
+    if (pad >= rt::kNumPads) {
+      return;
+    }
+    const std::shared_ptr<const rt::PadConfig> config = engine.pad_config(pad);
+    if (config == nullptr) {
+      return;
+    }
+    state.edit.pad = pad;
+    state.edit.pad_known = true;
+
+    // Frames to milliseconds happens HERE, on the thread that knows the rate.
+    // UiState carries times so the renderer -- and therefore every snapshot
+    // test -- needs no rate at all.
+    const auto rate = static_cast<float>(std::max(options.sample_rate, 1U));
+    const auto to_ms = [rate](std::size_t frames) {
+      return static_cast<float>(frames) * 1000.0F / rate;
+    };
+    state.edit.envelope = EnvelopeView{.attack_ms = to_ms(config->env.attack),
+                                       .decay_ms = to_ms(config->env.decay),
+                                       .sustain = config->env.sustain,
+                                       .release_ms = to_ms(config->env.release),
+                                       .gate = config->trigger == rt::TriggerMode::kGate,
+                                       .choke_group = config->choke_group,
+                                       .gain = config->gain,
+                                       .pitch_ratio = config->pitch_ratio};
+  };
+
+  // Frames the EDIT view, centred on the slice with context on both sides.
+  auto frame_slice = [&](std::size_t columns) {
+    if (state.edit.slice >= state.slices.size()) {
+      return;
+    }
+    const SliceMark& slice = state.slices[state.edit.slice];
+    const std::size_t length =
+        slice.end_frame > slice.start_frame ? slice.end_frame - slice.start_frame : 1;
+    const auto margin = static_cast<std::size_t>(static_cast<double>(length) * kEditContext);
+    state.edit.view.first_frame = slice.start_frame > margin ? slice.start_frame - margin : 0;
+    state.edit.view.frames_visible = length + (2 * margin);
+    state.edit.view.clamp(total_frames);
+    refresh_edit(columns);
+  };
+
+  // Republishes the pad that plays a slice, so an edited boundary is audible
+  // rather than merely drawn. Built from the current config, so a nudge does not
+  // reset the envelope somebody set a moment ago.
+  auto republish_slice = [&](std::size_t index) {
+    const std::uint8_t pad = pad_for_slice(state, index);
+    if (pad >= rt::kNumPads || sample == nullptr || index >= slices.size()) {
+      return;
+    }
+    const std::shared_ptr<const rt::PadConfig> current = engine.pad_config(pad);
+    rt::PadConfig next = current != nullptr ? *current : rt::PadConfig{};
+    next.pad = pad;
+    next.sample = sample;
+    next.start_frame = slices.slices[index].start_frame;
+    next.end_frame = slices.slices[index].end_frame;
+    static_cast<void>(engine.publish_pad_config(std::make_shared<const rt::PadConfig>(next)));
+  };
+
+  // Moves one boundary of the current slice by `delta` frames.
+  //
+  // The slice keeps at least one frame: a zero-length slice is a pad that makes
+  // no sound, which looks exactly like a broken one. Boundaries are allowed to
+  // pass their neighbours' -- overlapping slices are a legitimate thing to build
+  // deliberately, and refusing would make the last frame before a neighbour
+  // unreachable.
+  auto nudge = [&](bool end_boundary, std::ptrdiff_t delta, std::size_t columns) {
+    if (state.edit.slice >= slices.size() || sample == nullptr) {
+      return;
+    }
+    ingest::Slice& slice = slices.slices[state.edit.slice];
+    undo.push_back(SliceEdit{
+        .index = state.edit.slice, .start_frame = slice.start_frame, .end_frame = slice.end_frame});
+
+    const auto move = [&](std::size_t frame) {
+      const auto moved = static_cast<std::ptrdiff_t>(frame) + delta;
+      return static_cast<std::size_t>(
+          std::clamp<std::ptrdiff_t>(moved, 0, static_cast<std::ptrdiff_t>(total_frames)));
+    };
+    if (end_boundary) {
+      slice.end_frame = std::max(move(slice.end_frame), slice.start_frame + 1);
+      // Nudged by hand, so whatever the snap did to it is no longer the story.
+      slice.end_snap = 0;
+    } else {
+      slice.start_frame = std::min(move(slice.start_frame), slice.end_frame - 1);
+      slice.start_snap = 0;
+    }
+
+    show_slices(slices, state);
+    republish_slice(state.edit.slice);
+    refresh_edit(columns);
+  };
+
+  auto undo_edit = [&](std::size_t columns) {
+    if (undo.empty()) {
+      set_message("nothing to undo", true);
+      return;
+    }
+    const SliceEdit last = undo.back();
+    undo.pop_back();
+    if (last.index < slices.size()) {
+      slices.slices[last.index].start_frame = last.start_frame;
+      slices.slices[last.index].end_frame = last.end_frame;
+      show_slices(slices, state);
+      republish_slice(last.index);
+    }
+    state.edit.slice = last.index;
+    refresh_edit(columns);
+  };
+
   // Runs a parsed command. Everything it touches -- the engine's handoff ring,
   // the slice set, the UiState -- belongs to this thread, which is what makes a
   // command a plain function call rather than a message.
@@ -543,6 +735,29 @@ int run_app(const AppOptions& options) {
         break;
       }
 
+      case CommandKind::kEdit: {
+        if (state.slices.empty()) {
+          set_message("nothing chopped yet — try :chop transient", true);
+          break;
+        }
+        if (command.slice > state.slices.size()) {
+          set_message("no slice " + std::to_string(command.slice) + " (have " +
+                          std::to_string(state.slices.size()) + ")",
+                      true);
+          break;
+        }
+        if (command.slice > 0) {
+          state.edit.slice = command.slice - 1;
+        }
+        state.screen = Screen::kEdit;
+        frame_slice(last_columns);
+        break;
+      }
+
+      case CommandKind::kPerform:
+        state.screen = Screen::kPerform;
+        break;
+
       case CommandKind::kQuit:
         quit();
         break;
@@ -553,6 +768,7 @@ int run_app(const AppOptions& options) {
     const ftxui::Dimensions size = ftxui::Terminal::Size();
     const auto columns = static_cast<std::size_t>(std::max(size.dimx, 1));
     const auto rows = static_cast<std::size_t>(std::max(size.dimy, 1));
+    last_columns = columns;
 
     const engine::Telemetry telemetry = engine.telemetry();
     state.playing = telemetry.playing;
@@ -574,9 +790,16 @@ int run_app(const AppOptions& options) {
     // five pyramid bins per column, which is what makes it affordable at 30 Hz
     // on a five-minute file.
     if (sample != nullptr && !pyramid.empty()) {
-      const std::size_t wave_columns = wave_columns_for(columns);
+      // Each screen has its own view and its own panel width -- EDIT spends six
+      // columns on the amplitude gutter -- so which one is up decides both the
+      // span summarised and the number of bins to summarise it into. Using one
+      // pair for both would stretch whichever screen lost.
+      const bool editing = state.screen == Screen::kEdit;
+      const WaveView& view = editing ? state.edit.view : state.view;
+      const std::size_t wave_columns =
+          editing ? edit_wave_columns_for(columns) : wave_columns_for(columns);
       state.bins.assign(bins_for_columns(wave_columns), ingest::PeakBin{});
-      pyramid.summarize(*sample, 0, state.view.first_frame, state.view.frames_visible, state.bins);
+      pyramid.summarize(*sample, 0, view.first_frame, view.frames_visible, state.bins);
     }
 
     return render(state, columns, rows);
@@ -641,6 +864,99 @@ int run_app(const AppOptions& options) {
       return true;
     }
 
+    // EDIT HAS ITS OWN KEYMAP, and the QWERTY pad map is not part of it.
+    //
+    // It cannot be: `z` is pad 9 and the mockup binds `z` to zoom, `h` and `l`
+    // are pads-adjacent view keys in PERFORM and boundary nudges here. Rather
+    // than contort one map to fit both screens, the pads are off in EDIT and
+    // SPACE auditions the slice being edited -- which is the one thing the pads
+    // were wanted for here, since you nudge a boundary and then listen to it.
+    if (state.screen == Screen::kEdit) {
+      if (!typing) {
+        return true;
+      }
+      if (code == kSpace) {
+        const std::uint8_t pad = pad_for_slice(state, state.edit.slice);
+        if (pad < rt::kNumPads) {
+          static_cast<void>(
+              engine.trigger_pad(rt::PadEvent{.pad = pad, .velocity = 1.0F, .frame_offset = 0}));
+          state.selected_pad = pad;
+        }
+        return true;
+      }
+      if (code == kEscape) {
+        // Back to PERFORM, NOT out of the program. Escape means "leave the thing
+        // I am in", and in PERFORM the thing you are in is cratedig.
+        state.screen = Screen::kPerform;
+        return true;
+      }
+      if (code == ':') {
+        state.command_active = true;
+        state.command_text.clear();
+        return true;
+      }
+      if (state.slices.empty()) {
+        return true;  // nothing below means anything without a slice
+      }
+
+      switch (code) {
+        case '[':
+          // Clamped, not wrapped. Wrapping from slice 1 to slice 16 while
+          // holding the key down would be a jump you did not ask for, in the
+          // middle of an edit.
+          if (state.edit.slice > 0) {
+            --state.edit.slice;
+          }
+          frame_slice(last_columns);
+          break;
+        case ']':
+          if (state.edit.slice + 1 < state.slices.size()) {
+            ++state.edit.slice;
+          }
+          frame_slice(last_columns);
+          break;
+        case 'h':
+          nudge(false, -static_cast<std::ptrdiff_t>(kNudgeFrames), last_columns);
+          break;
+        case 'l':
+          nudge(false, static_cast<std::ptrdiff_t>(kNudgeFrames), last_columns);
+          break;
+        case 'H':
+          nudge(true, -static_cast<std::ptrdiff_t>(kNudgeFrames), last_columns);
+          break;
+        case 'L':
+          nudge(true, static_cast<std::ptrdiff_t>(kNudgeFrames), last_columns);
+          break;
+        case 'u':
+          undo_edit(last_columns);
+          break;
+        case 'z': {
+          // One key, one direction, wrapping back to the whole slice when there
+          // is no more to see -- which is what a bare `z zoom` in the mockup's
+          // mode line has to mean.
+          const std::size_t before = state.edit.view.frames_visible;
+          state.edit.view.zoom_by(kEditZoomStep, total_frames);
+          if (state.edit.view.frames_visible == before) {
+            frame_slice(last_columns);
+          } else {
+            refresh_edit(last_columns);
+          }
+          break;
+        }
+        case kKeyArrowLeft:
+        case kKeyArrowRight: {
+          const auto step = static_cast<std::ptrdiff_t>(
+              std::max<std::size_t>(state.edit.view.frames_visible / kScrollDivisor, 1));
+          state.edit.view.scroll_by(code == kKeyArrowLeft ? -step : step, total_frames);
+          refresh_edit(last_columns);
+          break;
+        }
+        default:
+          return false;
+      }
+      return true;
+    }
+
     // The pad map, before the view keys: `s` and `d` and `f` are pads, and a
     // player hitting them expects a sound rather than a scroll. The view keys
     // that survive are the ones the map does not claim -- except `f`, which the
@@ -688,6 +1004,20 @@ int run_app(const AppOptions& options) {
     }
     if (code == kTab) {
       state.tab = state.tab == PanelTab::kSample ? PanelTab::kPattern : PanelTab::kSample;
+      return true;
+    }
+    // Enter opens EDIT on the selected pad's slice. `:edit N` reaches any slice
+    // by number; this is the version that needs no number, because the pad you
+    // just hit is almost always the one you want to look at.
+    if (code == kReturn) {
+      if (!state.pads[state.selected_pad].has_slice) {
+        set_message("pad " + std::to_string(state.selected_pad + 1) + " has no slice to edit",
+                    true);
+        return true;
+      }
+      state.edit.slice = state.pads[state.selected_pad].slice_index;
+      state.screen = Screen::kEdit;
+      frame_slice(last_columns);
       return true;
     }
 

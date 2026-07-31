@@ -161,6 +161,23 @@ Command parse_command(std::string_view line) {
   if (verb == "pad") {
     return parse_pad(words);
   }
+  // `edit` with no number opens whichever slice is already selected, which is
+  // what you want after `[`/`]` in PERFORM; with one, it jumps.
+  if (verb == "edit") {
+    if (words.size() < 2) {
+      return command_of(CommandKind::kEdit);
+    }
+    std::size_t slice = 0;
+    if (!parse_number(words[1], slice) || slice == 0) {
+      return error("edit: " + std::string{words[1]} + " is not a slice number");
+    }
+    Command out = command_of(CommandKind::kEdit);
+    out.slice = slice;
+    return out;
+  }
+  if (verb == "perform") {
+    return command_of(CommandKind::kPerform);
+  }
   if (verb == "q" || verb == "quit") {
     return command_of(CommandKind::kQuit);
   }

@@ -1,0 +1,20 @@
+ cratedig  0.0.1  edit      long_form_drums.flac · slice 06 
+                                                            
+╭ slice 06 ───────────────── snap zero-cross · 812 smp/col ╮
+│                ┯                              ┯          │
+│ +1.0           │      ⣶⣦⣤⣄⣀⣀                  │  ⣷⣶⣤⣄⣀⣀  │
+│  0.0 ⠶⠶⠶⠶⠶⠶⠶⠶⠶⠶│⠶⠶⠶⠶⠶⢶⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡶⠶⠶⠶⠶⠶⠶⠶⠶⠶⠶⠶⠶⠶│⠶⠶⣿⣿⣿⣿⣿⣿⣿⣿│
+│ -1.0           │     ⠸⠿⠿⠛⠉⠉⠉                  │  ⠿⠿⠛⠋⠉⠉⠁ │
+│           h -1 ┻ +1 l                    H -1 ┻ +1 L     │
+│          start 2.875s                    end 3.450s      │
+│                                                          │
+│       zero-cross · start snapped -3 smp · end free       │
+╰──────────────────────────────────────────────────────────╯
+                                                            
+ envelope                                                   
+                                                            
+   a 1.20 ms · d 84.0 ms · s -6.0 dB · r 120 ms             
+   trig gate · choke 1 · gain 0.0 dB · tune 0.00 st         
+                                                            
+                                                            
+  edit      slice 06/16 · undo 4    hl/HL nudge · [ ] · esc 

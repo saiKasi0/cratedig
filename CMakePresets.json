@@ -69,7 +69,8 @@
       "configurePreset": "asan",
       "inherits": "test-base",
       "environment": {
-        "ASAN_OPTIONS": "abort_on_error=1"
+        "//": "detect_container_overflow is OFF because rtaudio is built without the sanitizer while everything that calls it is built with it. libc++ container annotations require both sides to agree, so RtApi::getDeviceNames() -- an uninstrumented std::vector<std::string> grown by instrumented operator new -- reports a container-overflow that is not one. It only fires when the machine actually has audio devices, which is why it appears and disappears with a bluetooth headset.",
+        "ASAN_OPTIONS": "abort_on_error=1:detect_container_overflow=0"
       }
     },
     {

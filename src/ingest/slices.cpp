@@ -94,6 +94,25 @@ void snap_boundary(const rt::Sample& sample, const SnapParams& params, std::size
 
 }  // namespace
 
+std::vector<std::size_t> zero_crossings_in(const rt::Sample& sample, std::size_t first_frame,
+                                           std::size_t frames, std::size_t limit) {
+  std::vector<std::size_t> found;
+  if (limit == 0) {
+    return found;
+  }
+  const std::size_t last = std::min(first_frame + frames, sample.num_frames());
+  for (std::size_t frame = first_frame; frame < last; ++frame) {
+    if (crosses_at(sample, frame)) {
+      found.push_back(frame);
+      if (found.size() > limit) {
+        found.clear();  // too dense to be a ruler -- see the header
+        return found;
+      }
+    }
+  }
+  return found;
+}
+
 std::size_t snap_to_zero_crossing(const rt::Sample& sample, std::size_t at, std::size_t radius) {
   const std::size_t frames = sample.num_frames();
   if (frames == 0 || radius == 0) {

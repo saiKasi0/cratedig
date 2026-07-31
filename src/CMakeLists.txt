@@ -83,7 +83,8 @@ target_link_libraries(cratedig_io PRIVATE rtaudio cratedig_warnings cratedig_san
 # applies to src/rt/ and src/engine/ (CLAUDE.md), and both FTXUI and std::string
 # are used freely on the control thread.
 add_library(cratedig_tui STATIC tui/app.cpp tui/cli.cpp tui/command.cpp tui/keys.cpp
-                                tui/render.cpp tui/ui_state.cpp tui/waveform.cpp)
+                                tui/render.cpp tui/render_detail.cpp tui/render_edit.cpp
+                                tui/ui_state.cpp tui/waveform.cpp)
 target_link_libraries(cratedig_tui PUBLIC cratedig_engine cratedig_ingest cratedig_io
                                           ftxui::ftxui)
 target_link_libraries(cratedig_tui PRIVATE cratedig_warnings cratedig_sanitizer)

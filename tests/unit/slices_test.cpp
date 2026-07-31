@@ -362,3 +362,44 @@ TEST_CASE("snapping does not move a hit far enough to matter", "[unit]") {
   INFO("largest snap: " << worst << " frames");
   CHECK(worst <= 64);
 }
+
+TEST_CASE("zero_crossings_in finds the crossings inside a window", "[unit]") {
+  // A square wave that flips every 100 frames: the crossings are at 100, 200,
+  // 300 ... and are known by construction rather than by measurement.
+  rt::Sample sample{48'000, 1, 1'000};
+  const std::span<float> data = sample.mutable_channel(0);
+  for (std::size_t frame = 0; frame < 1'000; ++frame) {
+    data[frame] = ((frame / 100) % 2 == 0) ? 0.5F : -0.5F;
+  }
+
+  const std::vector<std::size_t> all = ingest::zero_crossings_in(sample, 0, 1'000, 100);
+  REQUIRE(all.size() == 9);
+  CHECK(all.front() == 100);
+  CHECK(all.back() == 900);
+
+  // The WINDOW is honoured, not just the sample: EDIT asks about what is on
+  // screen, and a function that answered about the whole file would put ticks
+  // where there is no waveform.
+  const std::vector<std::size_t> middle = ingest::zero_crossings_in(sample, 250, 300, 100);
+  REQUIRE(middle.size() == 3);
+  CHECK(middle.front() == 300);
+  CHECK(middle.back() == 500);
+}
+
+TEST_CASE("zero_crossings_in gives up rather than truncating", "[unit]") {
+  // Alternating every frame: 999 crossings in a thousand frames.
+  rt::Sample sample{48'000, 1, 1'000};
+  const std::span<float> data = sample.mutable_channel(0);
+  for (std::size_t frame = 0; frame < 1'000; ++frame) {
+    data[frame] = (frame % 2 == 0) ? 0.5F : -0.5F;
+  }
+
+  // EMPTY, not the first N. A ruler with ticks across only its left half says
+  // something false about the right half; a blank one says "too dense to rule",
+  // which is true.
+  CHECK(ingest::zero_crossings_in(sample, 0, 1'000, 50).empty());
+  CHECK(ingest::zero_crossings_in(sample, 0, 1'000, 0).empty());
+
+  // And it still answers when the window is sparse enough for the same limit.
+  CHECK(ingest::zero_crossings_in(sample, 0, 40, 50).size() == 39);
+}

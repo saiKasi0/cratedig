@@ -67,6 +67,19 @@ struct WaveformGeometry {
 [[nodiscard]] std::vector<std::string> waveform_rows(std::span<const ingest::PeakBin> bins,
                                                      const WaveformGeometry& geometry);
 
+// A curve filled from the bottom up: one dot column per level, `levels[i]` in
+// 0..1, kDotColumnsPerCell levels to a character column.
+//
+// NOT waveform_rows with one side blanked. A waveform is symmetric about a
+// centre line because a signal has a negative half; an envelope is a gain over
+// time and has none, so drawing it mirrored would suggest a signal. That is the
+// whole difference, and it is why this is a separate function rather than a
+// geometry flag.
+//
+// Used for the ADSR curve on the EDIT screen. Levels outside 0..1 clamp.
+[[nodiscard]] std::vector<std::string> envelope_rows(std::span<const float> levels,
+                                                     std::size_t rows);
+
 }  // namespace tui
 
 #endif  // CRATEDIG_TUI_WAVEFORM_HPP

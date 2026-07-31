@@ -184,3 +184,45 @@ TEST_CASE("degenerate geometry produces nothing rather than misbehaving", "[unit
   REQUIRE(rows.size() == 1);
   CHECK(rows[0] == "⣿⣿");
 }
+
+TEST_CASE("envelope_rows fills from the baseline up", "[unit]") {
+  // Not waveform_rows with one half blanked: an envelope is a gain over time and
+  // has no negative half, so it is drawn as a bar chart rather than mirrored
+  // about a centre line.
+  const std::vector<float> full(4, 1.0F);
+  const std::vector<std::string> filled = tui::envelope_rows(full, 2);
+  REQUIRE(filled.size() == 2);
+  // Every dot set, in both rows: "⣿⣿".
+  CHECK(filled[0] == "⣿⣿");
+  CHECK(filled[1] == "⣿⣿");
+
+  const std::vector<float> silent(4, 0.0F);
+  const std::vector<std::string> empty = tui::envelope_rows(silent, 2);
+  REQUIRE(empty.size() == 2);
+  // Spaces, not blank braille -- the same choice braille_glyph makes.
+  CHECK(empty[0] == "  ");
+  CHECK(empty[1] == "  ");
+}
+
+TEST_CASE("envelope_rows puts a half level in the bottom half", "[unit]") {
+  // The direction is the whole point. Filling from the top would draw a decay as
+  // a rise, which is a picture of the opposite of what the numbers say.
+  const std::vector<float> half(2, 0.5F);
+  const std::vector<std::string> rows = tui::envelope_rows(half, 2);
+  REQUIRE(rows.size() == 2);
+  CHECK(rows[0] == " ");  // top row empty
+  CHECK(rows[1] == "⣿");  // bottom row full
+}
+
+TEST_CASE("envelope_rows clamps rather than wrapping", "[unit]") {
+  // A level above one is a bug upstream; drawing it as a low bar because the
+  // dot count wrapped would hide that bug behind a plausible picture.
+  const std::vector<float> over{4.0F, 4.0F};
+  const std::vector<float> under{-1.0F, -1.0F};
+  CHECK(tui::envelope_rows(over, 1)[0] == "⣿");
+  CHECK(tui::envelope_rows(under, 1)[0] == " ");
+
+  // Degenerate shapes are empty rather than a crash or a stripe.
+  CHECK(tui::envelope_rows(over, 0).empty());
+  CHECK(tui::envelope_rows(std::vector<float>{}, 3).empty());
+}

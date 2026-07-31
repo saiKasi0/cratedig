@@ -176,6 +176,17 @@ def write_fixture_wav(path: Path) -> None:
         out.writeframes(bytes(samples))
 
 
+def start_time_on(painted: str) -> str:
+    """The EDIT screen's `start N.NNNs` readout, or "" if it is not up.
+
+    Read off the painted grid rather than tracked alongside it: the point is
+    that a nudge reaches the screen, and a value this test computed itself would
+    prove only that this test can add.
+    """
+    match = re.search(r"start (\d+\.\d+)s", painted)
+    return match.group(1) if match else ""
+
+
 def drain(fd: int, seconds: float, sink: bytearray) -> bool:
     """Reads for `seconds`. Returns False once the child has closed the pty.
 
@@ -305,6 +316,53 @@ def main() -> int:
             command_failures.append("the message survived the next keystroke")
         if "esc quit" not in after:
             command_failures.append("the keymap did not come back after the message went")
+
+        # EDIT, on the real binary. Enter opens it on the selected pad's slice;
+        # the boundary nudges and the slice step are the reason the screen
+        # exists, and nothing but a running program can show that the keys reach
+        # them -- the offscreen snapshots are handed a UiState that has already
+        # been edited.
+        alive = send("\r")
+        opened = screen_now()
+        if "  edit " not in opened:
+            command_failures.append("Enter did not open EDIT")
+        # The `┻` is the handle marker itself; the `h -1` / `+1 l` labels beside
+        # it are trimmed when a boundary is near the edge of the panel, which is
+        # exactly where slice 1 puts it.
+        if "┻" not in opened:
+            command_failures.append("EDIT opened without its boundary handles")
+
+        # `]` steps to slice 2 and `l` nudges its start one frame later. The
+        # start time on screen has to move, and `u` has to put it back.
+        alive = send("]")
+        stepped = screen_now()
+        if "slice 02" not in stepped:
+            command_failures.append("`]` did not step to the next slice")
+
+        # 200 single-frame nudges is 4 ms at 48 kHz, which moves the third
+        # decimal of the readout by four. Forty would move it by one, and a
+        # rounding boundary could then hide the whole effect.
+        before_nudge = start_time_on(stepped)
+        alive = send("l" * 200)
+        nudged = screen_now()
+        if start_time_on(nudged) == before_nudge:
+            command_failures.append("nudging the start boundary changed nothing on screen")
+        if "undo" not in nudged:
+            command_failures.append("nudging left nothing to undo")
+
+        alive = send("u" * 200)
+        undone = screen_now()
+        if start_time_on(undone) != before_nudge:
+            command_failures.append(
+                f"undo did not restore the boundary: {start_time_on(undone)!r} "
+                f"!= {before_nudge!r}"
+            )
+
+        # Escape LEAVES EDIT rather than quitting. Everything after this line
+        # depends on the program still being there.
+        alive = send("\x1b")
+        if "  perform " not in screen_now():
+            command_failures.append("escape did not return to PERFORM from EDIT")
 
     if alive:
         # ESCAPE, not "q" -- the QWERTY pad map claims q for pad 1 from M3, and

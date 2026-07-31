@@ -28,6 +28,17 @@ inline constexpr std::size_t kMinRows = 20;
 // bins_for_columns() so that what was summarised is what gets drawn.
 [[nodiscard]] std::size_t wave_columns_for(std::size_t terminal_columns) noexcept;
 
+// The same, for EDIT, whose panel spends six columns on an amplitude gutter.
+// Two screens with two widths need two answers; one number used for both would
+// summarise the wrong span into the bins on whichever screen lost.
+[[nodiscard]] std::size_t edit_wave_columns_for(std::size_t terminal_columns) noexcept;
+
+// EDIT, as a pure function of the same UiState. Called by render() when
+// UiState::screen says so; declared here because the snapshot tests reach it
+// directly, the same way they reach render().
+[[nodiscard]] ftxui::Element render_edit(const UiState& state, std::size_t terminal_columns,
+                                         std::size_t terminal_rows);
+
 [[nodiscard]] ftxui::Element render(const UiState& state, std::size_t terminal_columns,
                                     std::size_t terminal_rows);
 
