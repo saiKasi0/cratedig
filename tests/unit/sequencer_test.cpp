@@ -7,9 +7,11 @@
 
 #include "rt/sequencer.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <utility>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -166,4 +168,128 @@ TEST_CASE("a default sequencer state is silent and valid", "[unit]") {
       }
     }
   }
+}
+
+TEST_CASE("an empty song repeats the selected pattern", "[unit]") {
+  // The normal state while writing a pattern, and the reason chaining is an
+  // addition rather than a mode: with no song, the selected pattern loops.
+  rt::SequencerState state;
+  state.selected_pattern = 2;
+  state.patterns[2].length = 4;
+
+  CHECK(rt::song_length_steps(state) == 0);  // no song at all
+
+  for (std::uint64_t step = 0; step < 12; ++step) {
+    const rt::SongPosition position = rt::song_position_at(state, step);
+    INFO("absolute step " << step);
+    REQUIRE(position.pattern == 2);
+    REQUIRE(position.step == step % 4);
+    REQUIRE(position.slot == 0);  // no song means no slot, not slot zero of one
+  }
+}
+
+TEST_CASE("a song chains patterns in order", "[unit]") {
+  rt::SequencerState state;
+  state.patterns[0].length = 4;
+  state.patterns[1].length = 2;
+  state.song.order[0] = 0;
+  state.song.order[1] = 1;
+  state.song.length = 2;
+
+  CHECK(rt::song_length_steps(state) == 6);  // 4 + 2
+
+  // Steps 0..3 are pattern 0, then 4..5 are pattern 1, then it wraps.
+  const std::array<std::pair<std::uint8_t, std::size_t>, 12> expected{{
+      {0, 0},
+      {0, 1},
+      {0, 2},
+      {0, 3},
+      {1, 0},
+      {1, 1},
+      {0, 0},
+      {0, 1},
+      {0, 2},
+      {0, 3},
+      {1, 0},
+      {1, 1},
+  }};
+  for (std::size_t step = 0; step < expected.size(); ++step) {
+    const rt::SongPosition position = rt::song_position_at(state, step);
+    INFO("absolute step " << step);
+    REQUIRE(position.pattern == expected[step].first);
+    REQUIRE(position.step == expected[step].second);
+  }
+}
+
+TEST_CASE("a song chains patterns of different lengths", "[unit]") {
+  // The case a fixed-length song model would silently truncate: chaining a
+  // 16-step verse to a 12-step fill is an ordinary thing to want, and the total
+  // has to be the SUM rather than a multiple of anything.
+  rt::SequencerState state;
+  state.patterns[3].length = 16;
+  state.patterns[7].length = 12;
+  state.song.order[0] = 3;
+  state.song.order[1] = 7;
+  state.song.length = 2;
+
+  CHECK(rt::song_length_steps(state) == 28);
+
+  CHECK(rt::song_position_at(state, 15).pattern == 3);
+  CHECK(rt::song_position_at(state, 15).step == 15);
+  CHECK(rt::song_position_at(state, 16).pattern == 7);
+  CHECK(rt::song_position_at(state, 16).step == 0);
+  CHECK(rt::song_position_at(state, 27).pattern == 7);
+  CHECK(rt::song_position_at(state, 27).step == 11);
+  CHECK(rt::song_position_at(state, 28).pattern == 3);  // wrapped
+  CHECK(rt::song_position_at(state, 28).step == 0);
+}
+
+TEST_CASE("a song reports which slot is playing", "[unit]") {
+  // Two slots can name the SAME pattern -- a chorus played twice -- so the slot
+  // is not derivable from the pattern and has to be carried.
+  rt::SequencerState state;
+  state.patterns[0].length = 2;
+  state.song.order[0] = 0;
+  state.song.order[1] = 0;
+  state.song.order[2] = 0;
+  state.song.length = 3;
+
+  CHECK(rt::song_position_at(state, 0).slot == 0);
+  CHECK(rt::song_position_at(state, 2).slot == 1);
+  CHECK(rt::song_position_at(state, 4).slot == 2);
+  CHECK(rt::song_position_at(state, 6).slot == 0);  // wrapped
+}
+
+TEST_CASE("a one-entry song is a pattern loop", "[unit]") {
+  rt::SequencerState state;
+  state.patterns[5].length = 3;
+  state.song.order[0] = 5;
+  state.song.length = 1;
+
+  for (std::uint64_t step = 0; step < 9; ++step) {
+    const rt::SongPosition position = rt::song_position_at(state, step);
+    INFO("absolute step " << step);
+    REQUIRE(position.pattern == 5);
+    REQUIRE(position.step == step % 3);
+    REQUIRE(position.slot == 0);
+  }
+}
+
+TEST_CASE("a song ignores out-of-range indices rather than reading past the array", "[unit]") {
+  // song.order crossed a thread boundary like everything else here. An index of
+  // 200 into a 16-entry array would be a read past the end ON THE AUDIO THREAD,
+  // which is the class of bug that shows up as a crash in someone else's code.
+  rt::SequencerState state;
+  state.song.order[0] = 200;
+  state.song.order[1] = 255;
+  state.song.length = 2;
+
+  CHECK(rt::song_pattern(state.song, 0) < rt::kMaxPatterns);
+  CHECK(rt::song_pattern(state.song, 1) < rt::kMaxPatterns);
+  CHECK(rt::song_position_at(state, 0).pattern < rt::kMaxPatterns);
+
+  // And a length past the slot array is clamped too.
+  state.song.length = 255;
+  CHECK(rt::song_slots(state.song) == rt::kMaxSongSlots);
+  CHECK(rt::song_position_at(state, 1'000).pattern < rt::kMaxPatterns);
 }

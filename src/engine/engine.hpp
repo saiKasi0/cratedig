@@ -76,6 +76,11 @@ struct Telemetry {
   std::uint64_t transport_frames = 0;
   std::uint32_t transport_step = 0;
   std::uint8_t transport_pattern = 0;
+
+  // Which song slot is playing. Always 0 when there is no song, which is the
+  // same thing the interface should show: an empty song is not slot zero of
+  // nothing, it is a pattern repeating.
+  std::uint8_t transport_slot = 0;
 };
 
 // The engine facade. Everything audible eventually happens behind render().
@@ -323,17 +328,21 @@ class Engine {
     // top bit, frames in the low 63 -- 6 million years at 48 kHz.
     std::atomic<std::uint64_t> transport{0};
 
-    // Step and pattern, packed together for the same reason again: they are read
-    // as a pair ("step 7 of pattern 2") and a torn read would name a step that
-    // pattern does not have. Pattern in the top 8 bits, step in the low 24.
+    // Step, song slot and pattern, packed together for the same reason again:
+    // they are read as one description -- "step 7 of pattern 2, slot 3 of the
+    // song" -- and a torn read would name a step that pattern does not have, or
+    // a pattern that slot does not play. Step in the low 8 bits, slot in the
+    // next 8, pattern above that; each field's maximum (32, 64, 16) fits with
+    // room to spare.
     std::atomic<std::uint32_t> transport_step{0};
   };
 
   static constexpr std::uint64_t kTransportPlayingBit = std::uint64_t{1} << 63U;
   static constexpr std::uint64_t kTransportFrameMask = kTransportPlayingBit - 1;
-  static constexpr std::uint32_t kTransportPatternShift = 24;
-  static constexpr std::uint32_t kTransportStepMask =
-      (std::uint32_t{1} << kTransportPatternShift) - 1;
+  static constexpr std::uint32_t kTransportStepShift = 0;
+  static constexpr std::uint32_t kTransportSlotShift = 8;
+  static constexpr std::uint32_t kTransportPatternShift = 16;
+  static constexpr std::uint32_t kTransportFieldMask = 0xFFU;
 
   // AUDIO THREAD, at the top of every block. Adopts whatever the control thread
   // has published and retires what it displaced.

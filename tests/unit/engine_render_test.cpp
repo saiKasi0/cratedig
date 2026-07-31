@@ -879,3 +879,133 @@ TEST_CASE("a seek moves the sequencer with the transport", "[unit]") {
   CHECK(std::any_of(samples.begin() + 1'000, samples.end(),
                     [](float value) { return value != 0.0F; }));
 }
+
+TEST_CASE("the sequencer plays a chained song", "[unit]") {
+  // Chaining reaching the audio, not just the arithmetic. Two 2-step patterns,
+  // each firing a different pad, so which pattern is playing is audible in WHICH
+  // pad sounds rather than only in the telemetry.
+  engine::Engine eng{test_config()};
+  load_pads(eng);
+
+  auto state = std::make_shared<rt::SequencerState>();
+  state->bpm_x100 = 12'000;  // 6000 frames per step
+  state->patterns[0].length = 2;
+  state->patterns[0].steps[0][1].on = true;  // pad 1 on the first step
+  state->patterns[1].length = 2;
+  state->patterns[1].steps[0][0].on = true;  // pad 0 on the first step
+  state->song.order[0] = 0;
+  state->song.order[1] = 1;
+  state->song.length = 2;
+  REQUIRE(eng.publish_sequencer(state));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  // Four steps = 24000 frames = one pass through the song.
+  RenderCapture capture{24'000, kChannels};
+  const std::array<std::size_t, 1> blocks{512};
+  capture.render_in_blocks(eng, blocks);
+
+  CHECK(std::any_of(capture.samples().begin(), capture.samples().end(),
+                    [](float value) { return value != 0.0F; }));
+
+  // THE assertion: pad 0 appears ONLY in pattern 1, so its glow is proof the
+  // song reached the second slot. Checking non-silence alone would pass just as
+  // happily with the song ignored entirely -- pattern 0 would loop, pad 1 would
+  // sound, and nothing would look wrong. Found by the negative control, which
+  // failed to fire on the first version of this test.
+  const engine::Telemetry telemetry = eng.telemetry();
+  CHECK(telemetry.pad_glow[0].triggered);
+  CHECK(telemetry.pad_glow[1].triggered);
+
+  // Having rendered a full pass, the transport is back at slot 0.
+  CHECK(telemetry.transport_slot == 0);
+  CHECK(telemetry.transport_pattern == 0);
+}
+
+TEST_CASE("the song advances the slot at a pattern boundary", "[unit]") {
+  engine::Engine eng{test_config()};
+  load_pads(eng);
+
+  auto state = std::make_shared<rt::SequencerState>();
+  state->bpm_x100 = 12'000;
+  state->patterns[0].length = 2;
+  state->patterns[4].length = 2;
+  state->song.order[0] = 0;
+  state->song.order[1] = 4;
+  state->song.length = 2;
+  REQUIRE(eng.publish_sequencer(state));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  // One step in: still slot 0, pattern 0.
+  RenderCapture first{6'500, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  first.render_in_blocks(eng, blocks);
+  CHECK(eng.telemetry().transport_slot == 0);
+  CHECK(eng.telemetry().transport_pattern == 0);
+
+  // Two more steps carries it past the end of pattern 0 into slot 1.
+  RenderCapture second{6'500, kChannels};
+  second.render_in_blocks(eng, blocks);
+  CHECK(eng.telemetry().transport_slot == 1);
+  CHECK(eng.telemetry().transport_pattern == 4);
+}
+
+TEST_CASE("a song of out-of-range patterns plays without reading past the array", "[unit]") {
+  // The audio-thread safety case: song.order arrives from the control thread, so
+  // a bad index must be clamped rather than dereferenced. Under ASan this is the
+  // test that would report the overrun.
+  engine::Engine eng{test_config()};
+  load_pads(eng);
+
+  auto state = std::make_shared<rt::SequencerState>();
+  state->song.order[0] = 250;
+  state->song.order[1] = 99;
+  state->song.length = 200;  // past kMaxSongSlots as well
+  REQUIRE(eng.publish_sequencer(state));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  RenderCapture capture{48'000, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  capture.render_in_blocks(eng, blocks);
+
+  // No steps are on, so it is silent -- the point is that it got here at all.
+  for (const float value : capture.samples()) {
+    REQUIRE(value == 0.0F);
+  }
+  CHECK(eng.telemetry().transport_pattern < rt::kMaxPatterns);
+}
+
+TEST_CASE("a chained song is invariant to block size", "[unit]") {
+  // Chaining is derived from the absolute step, which is derived from the
+  // position, so it inherits invariance -- but a song that resolved its slot
+  // once per BLOCK rather than per step would break exactly at the boundaries,
+  // and only at some block sizes.
+  const auto hash_at = [](std::size_t block) {
+    engine::Engine eng{test_config()};
+    load_pads(eng);
+    auto state = std::make_shared<rt::SequencerState>();
+    state->bpm_x100 = 13'700;  // non-integral frames per step
+    state->patterns[0].length = 3;
+    state->patterns[0].steps[0][1].on = true;
+    state->patterns[0].steps[2][1].on = true;
+    state->patterns[1].length = 5;
+    state->patterns[1].swing = 40;
+    state->patterns[1].steps[1][0].on = true;
+    state->patterns[1].steps[3][1].on = true;
+    state->song.order[0] = 0;
+    state->song.order[1] = 1;
+    state->song.order[2] = 0;
+    state->song.length = 3;
+    REQUIRE(eng.publish_sequencer(state));
+    REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+    RenderCapture capture{96'000, kChannels};
+    const std::array<std::size_t, 1> blocks{block};
+    capture.render_in_blocks(eng, blocks);
+    return capture.hash();
+  };
+
+  const std::uint64_t reference = hash_at(2'048);
+  CHECK(hash_at(64) == reference);
+  CHECK(hash_at(333) == reference);
+  CHECK(hash_at(1'024) == reference);
+}

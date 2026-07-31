@@ -103,18 +103,25 @@ std::uint32_t Engine::current_step_word() const noexcept {
     return 0;
   }
   const rt::SequencerState& state = *m_sequencer;
-  const std::uint8_t index =
-      std::min(state.selected_pattern, static_cast<std::uint8_t>(rt::kMaxPatterns - 1));
-  const std::size_t length = rt::pattern_length(state.patterns[index]);
 
-  // Wrapped here rather than in the UI, because this is where both the position
+  // Resolved here rather than in the UI, because this is where both the position
   // and the tempo it was rendered at are known. A UI recomputing it would use
   // whatever tempo it holds now, which after a tempo change is not the one those
   // frames were played at.
+  //
+  // The same song_position_at() the step scan uses, so the readout and the audio
+  // cannot disagree about which pattern is playing -- two implementations of
+  // "where are we in the song" would eventually differ, and the one on screen
+  // would be the one believed.
   const std::uint64_t absolute =
       rt::step_index_at(m_transport.position_frames, m_config.sample_rate, state.bpm_x100);
-  const auto step = static_cast<std::uint32_t>(absolute % length) & kTransportStepMask;
-  return (static_cast<std::uint32_t>(index) << kTransportPatternShift) | step;
+  const rt::SongPosition position = rt::song_position_at(state, absolute);
+
+  return ((static_cast<std::uint32_t>(position.pattern) & kTransportFieldMask)
+          << kTransportPatternShift) |
+         ((static_cast<std::uint32_t>(position.slot) & kTransportFieldMask)
+          << kTransportSlotShift) |
+         ((static_cast<std::uint32_t>(position.step) & kTransportFieldMask) << kTransportStepShift);
 }
 
 void Engine::drain_transport() noexcept {
@@ -181,10 +188,6 @@ void Engine::fire_sequencer_steps(std::size_t num_frames) noexcept {
     return;
   }
   const rt::SequencerState& state = *m_sequencer;
-  const std::uint8_t index =
-      std::min(state.selected_pattern, static_cast<std::uint8_t>(rt::kMaxPatterns - 1));
-  const rt::Pattern& pattern = state.patterns[index];
-  const std::size_t length = rt::pattern_length(pattern);
 
   // The block this call covers. position_frames is still the START of it --
   // the transport advances after rendering, so this arithmetic sees the block
@@ -203,6 +206,14 @@ void Engine::fire_sequencer_steps(std::size_t num_frames) noexcept {
   // maximum tempo, so it runs at most num_frames + 2 times.
   for (std::uint64_t step = rt::step_scan_start(block_start, m_config.sample_rate, state.bpm_x100);;
        ++step) {
+    // The position comes FIRST, because swing is a property of the pattern and a
+    // song can chain patterns that swing differently. Resolving it depends only
+    // on the step index, never on the frame, so there is no circularity -- but
+    // computing the frame first would have to guess a swing, and in a song it
+    // would guess wrong at every pattern boundary.
+    const rt::SongPosition position = rt::song_position_at(state, step);
+    const rt::Pattern& pattern = state.patterns[position.pattern];
+
     const std::uint64_t at =
         rt::step_frame(step, m_config.sample_rate, state.bpm_x100, pattern.swing);
     if (at >= block_end) {
@@ -217,12 +228,11 @@ void Engine::fire_sequencer_steps(std::size_t num_frames) noexcept {
     // depend on the device's buffer size, and swing would round away entirely at
     // large blocks.
     const auto offset = static_cast<std::size_t>(at - block_start);
-    const std::size_t wrapped = static_cast<std::size_t>(step % length);
 
     // Ascending pad order, so which pad wins a steal when the pool is full is a
     // property of the pattern rather than of iteration order.
     for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
-      const rt::Step& cell = pattern.steps[wrapped][pad];
+      const rt::Step& cell = pattern.steps[position.step][pad];
       if (!cell.on) {
         continue;
       }
@@ -451,8 +461,11 @@ Telemetry Engine::telemetry() const noexcept {
   snapshot.transport_frames = transport & kTransportFrameMask;
 
   const std::uint32_t step = m_published.transport_step.load(std::memory_order_relaxed);
-  snapshot.transport_step = step & kTransportStepMask;
-  snapshot.transport_pattern = static_cast<std::uint8_t>(step >> kTransportPatternShift);
+  snapshot.transport_step = (step >> kTransportStepShift) & kTransportFieldMask;
+  snapshot.transport_slot =
+      static_cast<std::uint8_t>((step >> kTransportSlotShift) & kTransportFieldMask);
+  snapshot.transport_pattern =
+      static_cast<std::uint8_t>((step >> kTransportPatternShift) & kTransportFieldMask);
 
   snapshot.master_peak = m_published.master_peak.load(std::memory_order_relaxed);
   const auto rate = static_cast<float>(m_config.sample_rate == 0 ? 1U : m_config.sample_rate);

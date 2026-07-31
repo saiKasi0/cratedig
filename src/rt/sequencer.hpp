@@ -235,6 +235,87 @@ static_assert(std::is_trivially_copyable_v<TransportCommand>,
   return std::min(length, kMaxSteps);
 }
 
+// How many song slots are actually in use, clamped. `song.length` crossed a
+// thread boundary like everything else here.
+[[nodiscard]] constexpr std::size_t song_slots(const Song& song) noexcept {
+  return std::min(static_cast<std::size_t>(song.length), kMaxSongSlots);
+}
+
+// Which pattern a song slot names, clamped into range rather than trusted -- an
+// out-of-range index would be a read past the end of the pattern array on the
+// audio thread.
+[[nodiscard]] constexpr std::uint8_t song_pattern(const Song& song, std::size_t slot) noexcept {
+  if (slot >= kMaxSongSlots) {
+    return 0;
+  }
+  return static_cast<std::uint8_t>(
+      std::min(static_cast<std::size_t>(song.order[slot]), kMaxPatterns - 1));
+}
+
+// Where an absolute step index lands: which song slot, which pattern, and which
+// step inside it.
+struct SongPosition {
+  std::uint8_t pattern = 0;
+  std::size_t step = 0;  // within `pattern`
+  std::size_t slot = 0;  // 0 when there is no song
+};
+
+// Total steps in one pass through the song. Zero when the song is empty.
+//
+// Summed rather than assumed uniform, because patterns may differ in length --
+// chaining a 16-step verse to a 12-step fill is an ordinary thing to want, and a
+// song model that assumed a fixed length would silently truncate the longer one.
+[[nodiscard]] constexpr std::size_t song_length_steps(const SequencerState& state) noexcept {
+  const std::size_t slots = song_slots(state.song);
+  std::size_t total = 0;
+  for (std::size_t slot = 0; slot < slots; ++slot) {
+    total += pattern_length(state.patterns[song_pattern(state.song, slot)]);
+  }
+  return total;
+}
+
+// Resolve an absolute step index against the song.
+//
+// AN EMPTY SONG IS NOT AN ERROR, it is the normal state while writing a pattern:
+// the selected pattern repeats forever. Chaining only takes over once there is a
+// song to chain, which is what lets `:song` be an addition rather than a mode
+// the interface has to be put into.
+//
+// The walk over slots is O(song length) and bounded at kMaxSongSlots, with no
+// allocation -- fine on the audio thread, where it runs at most a couple of
+// times per block rather than per frame.
+[[nodiscard]] constexpr SongPosition song_position_at(const SequencerState& state,
+                                                      std::uint64_t absolute_step) noexcept {
+  const std::size_t slots = song_slots(state.song);
+  if (slots == 0) {
+    const std::uint8_t pattern = static_cast<std::uint8_t>(
+        std::min(static_cast<std::size_t>(state.selected_pattern), kMaxPatterns - 1));
+    const std::size_t length = pattern_length(state.patterns[pattern]);
+    return SongPosition{
+        .pattern = pattern, .step = static_cast<std::size_t>(absolute_step % length), .slot = 0};
+  }
+
+  const std::size_t total = song_length_steps(state);
+  if (total == 0) {
+    return SongPosition{};  // unreachable: pattern_length() is never zero
+  }
+
+  std::size_t into = static_cast<std::size_t>(absolute_step % total);
+  for (std::size_t slot = 0; slot < slots; ++slot) {
+    const std::uint8_t pattern = song_pattern(state.song, slot);
+    const std::size_t length = pattern_length(state.patterns[pattern]);
+    if (into < length) {
+      return SongPosition{.pattern = pattern, .step = into, .slot = slot};
+    }
+    into -= length;
+  }
+
+  // Unreachable while `total` is the sum of the same lengths, but falling out of
+  // the loop must still produce a valid position rather than whatever was last
+  // in the locals.
+  return SongPosition{.pattern = song_pattern(state.song, 0), .step = 0, .slot = 0};
+}
+
 }  // namespace rt
 
 #endif  // CRATEDIG_RT_SEQUENCER_HPP
