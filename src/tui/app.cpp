@@ -780,6 +780,7 @@ int run_app(const AppOptions& options) {
       state.pads[pad].triggered = telemetry.pad_glow[pad].triggered;
       state.pads[pad].glow_seconds = telemetry.pad_glow[pad].seconds_since_trigger;
       state.pads[pad].glow_velocity = telemetry.pad_glow[pad].velocity;
+      state.pads[pad].glow_sequenced = telemetry.pad_glow[pad].sequenced;
     }
     state.active_voices = engine.active_voices();
     state.xruns = device.xrun_count();

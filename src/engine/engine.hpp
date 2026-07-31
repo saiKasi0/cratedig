@@ -30,8 +30,16 @@ namespace engine {
 // into near-silence does not light at all. What a player wants to see is that
 // the machine received the hit -- an acknowledgement, not a meter.
 struct PadGlow {
-  // Since the most recent trigger. Grows without bound; the interface decides
-  // how fast to fade, because that is a look rather than an engine fact.
+  // Since the most recent trigger, in LISTENER TIME -- how long ago the hit
+  // reached the ear rather than how long ago it was rendered.
+  //
+  // NEGATIVE means the sound has been rendered but has not arrived yet, which
+  // only happens for sequenced hits on a device with real output latency. The
+  // interface reads that as "not lit", and it is the honest value rather than a
+  // sentinel: the hit did happen, it is simply still in flight.
+  //
+  // Grows without bound; the interface decides how fast to fade, because that is
+  // a look rather than an engine fact.
   float seconds_since_trigger = 0.0F;
 
   // The velocity of that trigger, in [0, 1].
@@ -40,6 +48,13 @@ struct PadGlow {
   // False until the pad has been hit at least once. Distinguishes "hit a long
   // time ago" from "never hit", which otherwise look identical.
   bool triggered = false;
+
+  // Whether the sequencer played it rather than a person.
+  //
+  // Hardware samplers distinguish these and the distinction is genuinely useful
+  // when overdubbing: it is how you tell what you just added from what was
+  // already there.
+  bool sequenced = false;
 };
 
 // What the interface needs to know about what the audio thread is doing, as one
@@ -148,6 +163,21 @@ class Engine {
     // input, same bytes" is a promise the API always made, not one retrofitted
     // after something started varying.
     std::uint64_t seed = 0;
+
+    // How far behind the render the listener actually is, in frames.
+    //
+    // ZERO UNTIL M9 MEASURES IT, and exercised at zero on purpose so the path is
+    // built and tested rather than bolted on later. It delays SEQUENCED glow
+    // only: with 180 ms of output latency a pad that lights when its block
+    // renders lights 180 ms early, and on a Bluetooth sink that is plainly
+    // visible as the lights running ahead of the music.
+    //
+    // Live triggers get no such treatment, and cannot. Their reference is the
+    // player's own finger, and nothing can be done about that gap -- delaying
+    // the light would only add to it.
+    //
+    // NOT part of the determinism contract: it moves a light, never a sample.
+    std::uint32_t output_latency_frames = 0;
   };
 
   explicit Engine(const Config& config) noexcept;
@@ -290,16 +320,22 @@ class Engine {
   static constexpr std::uint64_t kPlayheadFrameMask = (std::uint64_t{1} << kPlayheadPadShift) - 1;
 
   // Glow is likewise ONE packed word per pad rather than two atomics: age in the
-  // low 24 bits, quantised velocity in the top 8. Same reasoning as the playhead
-  // -- two atomics would let the UI pair one hit's age with another's velocity,
-  // and a pad that flashes at the wrong brightness is a visible wrong answer
-  // rather than a rounding.
+  // low 23 bits, a source flag above it, quantised velocity in the top 8. Same
+  // reasoning as the playhead -- separate atomics would let the UI pair one hit's
+  // age with another's velocity, and a pad that flashes at the wrong brightness
+  // is a visible wrong answer rather than a rounding.
   //
-  // 24 bits of frames is 349 seconds at 48 kHz, far past any glow. The count
-  // saturates one short of the mask so that the all-ones sentinel below stays
-  // unreachable however long the program runs.
+  // M4 took a bit off the age rather than off the velocity. 23 bits of frames is
+  // still 174 seconds at 48 kHz, which is five hundred times the longest glow;
+  // velocity's 8 bits are what the ramp is actually drawn from, and narrowing
+  // them would have changed the M3 pad-lighting behaviour to make room for an M4
+  // feature. Shrink the field with headroom to spare, not the one in use.
+  //
+  // The count saturates one short of the mask so the all-ones sentinel below
+  // stays unreachable however long the program runs.
   static constexpr std::uint32_t kGlowVelocityShift = 24;
-  static constexpr std::uint32_t kGlowFrameMask = (std::uint32_t{1} << kGlowVelocityShift) - 1;
+  static constexpr std::uint32_t kGlowSequencedBit = std::uint32_t{1} << 23U;
+  static constexpr std::uint32_t kGlowFrameMask = kGlowSequencedBit - 1;
   static constexpr std::uint32_t kGlowFrameMax = kGlowFrameMask - 1;
   static constexpr std::uint32_t kNeverTriggered = 0xFFFF'FFFFU;
 
@@ -358,7 +394,12 @@ class Engine {
   // The single path every producer goes through -- the keyboard and MIDI via the
   // event ring, and the sequencer directly. Shared so that a pad lights the same
   // way whatever triggered it.
-  void start_voice(std::uint8_t pad, float velocity, std::size_t frame_offset) noexcept;
+  //
+  // `sequenced` decides which glow the pad shows and whether the listener-time
+  // delay applies -- it is the one thing that differs between the three
+  // producers, so it is a parameter rather than three copies of this function.
+  void start_voice(std::uint8_t pad, float velocity, std::size_t frame_offset,
+                   bool sequenced) noexcept;
 
   // AUDIO THREAD, once per block. Fires every step that falls inside it, at its
   // exact frame.

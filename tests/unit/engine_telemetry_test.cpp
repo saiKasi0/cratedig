@@ -8,6 +8,7 @@
 #include "engine/engine.hpp"
 #include "rt/pad_event.hpp"
 #include "rt/sample.hpp"
+#include "rt/sequencer.hpp"
 
 #include <array>
 #include <cstddef>
@@ -370,4 +371,124 @@ TEST_CASE("glow saturates rather than wrapping", "[unit]") {
     previous = age;
   }
   CHECK(previous > 3.9F);
+}
+
+// --- live against sequenced, and listener time ------------------------------
+
+namespace {
+
+// A sequencer that fires `pad` on step 0 of a 4-step pattern.
+std::shared_ptr<const rt::SequencerState> one_step_pattern(std::uint8_t pad) {
+  auto state = std::make_shared<rt::SequencerState>();
+  state->bpm_x100 = 12'000;  // 6000 frames per step
+  state->patterns[0].length = 4;
+  state->patterns[0].steps[0][pad].on = true;
+  return state;
+}
+
+}  // namespace
+
+TEST_CASE("a live hit and a sequenced hit are distinguishable", "[unit]") {
+  // The M4 addition. Hardware samplers draw these differently and the difference
+  // is genuinely useful when overdubbing -- it is how you tell what you just
+  // played from what was already there.
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.set_pad_sample(1, make_flat_sample(0.5F)));
+  REQUIRE(eng.set_pad_sample(2, make_flat_sample(0.5F)));
+  REQUIRE(eng.publish_sequencer(one_step_pattern(2)));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  trigger(eng, 1, 1.0F);  // pad 1 by hand, pad 2 by the sequencer
+  render_frames(eng, 256);
+
+  const engine::Telemetry state = eng.telemetry();
+  REQUIRE(state.pad_glow[1].triggered);
+  REQUIRE(state.pad_glow[2].triggered);
+  CHECK_FALSE(state.pad_glow[1].sequenced);
+  CHECK(state.pad_glow[2].sequenced);
+}
+
+TEST_CASE("the source flag survives ageing", "[unit]") {
+  // The flag shares one word with the age, and the age is rewritten every block.
+  // A mask that clobbered the flag would show a sequenced hit as live after the
+  // first block -- which is to say almost always, since a glow lasts hundreds of
+  // blocks.
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.set_pad_sample(3, make_flat_sample(0.5F)));
+  REQUIRE(eng.publish_sequencer(one_step_pattern(3)));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  render_frames(eng, 128);
+  REQUIRE(eng.telemetry().pad_glow[3].sequenced);
+
+  // Many blocks later, and long after the step that fired it.
+  render_frames(eng, 4'096);
+  CHECK(eng.telemetry().pad_glow[3].sequenced);
+  CHECK(eng.telemetry().pad_glow[3].triggered);
+}
+
+TEST_CASE("the velocity survives the narrowed age field", "[unit]") {
+  // M4 took a bit off the age to make room for the source flag. Velocity is what
+  // the ramp is drawn from, so it had to keep all eight bits -- this is the test
+  // that says the bit came off the right field.
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.set_pad_sample(4, make_flat_sample(0.5F)));
+
+  trigger(eng, 4, 1.0F);
+  render_frames(eng, 128);
+  CHECK(eng.telemetry().pad_glow[4].velocity > 0.99F);
+
+  trigger(eng, 4, 0.25F);
+  render_frames(eng, 128);
+  const float quarter = eng.telemetry().pad_glow[4].velocity;
+  INFO("velocity at 0.25 reported as " << quarter);
+  CHECK(quarter > 0.24F);
+  CHECK(quarter < 0.26F);
+}
+
+TEST_CASE("listener time delays a sequenced glow and not a live one", "[unit]") {
+  // The M9 hook, exercised at a non-zero value so the path is tested rather than
+  // merely present. A pad that lights when its block renders lights EARLY by the
+  // output latency -- on a Bluetooth sink that is plainly visible as the lights
+  // running ahead of the music.
+  constexpr std::uint32_t kLatency = 9'600;  // 200 ms at 48 kHz, a realistic sink
+  engine::Engine::Config config = test_config();
+  config.output_latency_frames = kLatency;
+  engine::Engine eng{config};
+
+  REQUIRE(eng.set_pad_sample(1, make_flat_sample(0.5F)));
+  REQUIRE(eng.set_pad_sample(2, make_flat_sample(0.5F)));
+  REQUIRE(eng.publish_sequencer(one_step_pattern(2)));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  trigger(eng, 1, 1.0F);
+  render_frames(eng, 256);
+
+  const engine::Telemetry fresh = eng.telemetry();
+  // The live hit is visible at once: its reference is the finger that caused it.
+  CHECK(fresh.pad_glow[1].seconds_since_trigger >= 0.0F);
+  CHECK(fresh.pad_glow[1].seconds_since_trigger < 0.01F);
+
+  // The sequenced one has not been heard yet, and says so with a negative age.
+  CHECK(fresh.pad_glow[2].seconds_since_trigger < 0.0F);
+
+  // Once the latency has elapsed it becomes visible.
+  render_frames(eng, kLatency);
+  CHECK(eng.telemetry().pad_glow[2].seconds_since_trigger >= 0.0F);
+}
+
+TEST_CASE("the default latency changes nothing", "[unit]") {
+  // Zero until M9 measures a real figure, and this is what makes that safe: with
+  // the default config a sequenced glow behaves exactly as an M3 glow did.
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.set_pad_sample(5, make_flat_sample(0.5F)));
+  REQUIRE(eng.publish_sequencer(one_step_pattern(5)));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  render_frames(eng, 256);
+  const engine::PadGlow glow = eng.telemetry().pad_glow[5];
+  CHECK(glow.triggered);
+  CHECK(glow.sequenced);
+  CHECK(glow.seconds_since_trigger >= 0.0F);
+  CHECK(glow.seconds_since_trigger < 0.01F);
 }

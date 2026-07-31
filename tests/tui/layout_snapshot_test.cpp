@@ -754,3 +754,93 @@ TEST_CASE("an empty interface is distinguishable from a silent one", "[tui]") {
   CHECK(quiet.find("no sample loaded") == std::string::npos);
   CHECK(quiet.find("⠤") != std::string::npos);  // the centre line
 }
+
+TEST_CASE("a sequenced hit is lit but never inverted", "[tui]") {
+  // Inversion is the loudest thing this interface can do to a cell, and it reads
+  // as a strike -- something you hit, just now. The machine playing a pattern is
+  // a different event and should look like one.
+  //
+  // Asserted on the CELLS rather than on a snapshot, because the two frames
+  // differ only in an attribute: the characters are identical, so a text golden
+  // could not tell them apart at all.
+  const auto inverted_cells = [](bool sequenced) {
+    tui::UiState state = loaded_state(100);
+    state.pads[0].triggered = true;
+    state.pads[0].glow_seconds = 0.01F;  // hot
+    state.pads[0].glow_velocity = 1.0F;
+    state.pads[0].glow_sequenced = sequenced;
+
+    const ftxui::Screen screen = render_screen(state, 100, 30);
+    std::size_t inverted = 0;
+    for (int y = 14; y < 27; ++y) {
+      for (int x = 0; x < 46; ++x) {
+        if (screen.CellAt(x, y).inverted) {
+          ++inverted;
+        }
+      }
+    }
+    return inverted;
+  };
+
+  const std::size_t live = inverted_cells(false);
+  const std::size_t sequenced = inverted_cells(true);
+  INFO("inverted cells: " << live << " live, " << sequenced << " sequenced");
+
+  CHECK(live > 0);        // a live hit at full velocity inverts
+  CHECK(sequenced == 0);  // the same hit from the sequencer does not
+}
+
+TEST_CASE("a sequenced hit is still visible at every step below hot", "[tui]") {
+  // The distinction is only at the top step, where the two are actually
+  // confusable. Dimming sequenced hits by a whole step instead would make a
+  // quiet one invisible, which trades one wrong answer for another.
+  const auto accent_cells = [](float age, bool sequenced) {
+    tui::UiState state = loaded_state(100);
+    state.pads[0].triggered = true;
+    state.pads[0].glow_seconds = age;
+    state.pads[0].glow_velocity = 1.0F;
+    state.pads[0].glow_sequenced = sequenced;
+
+    const ftxui::Screen screen = render_screen(state, 100, 30);
+    std::size_t accent = 0;
+    for (int y = 14; y < 27; ++y) {
+      for (int x = 0; x < 46; ++x) {
+        if (screen.CellAt(x, y).foreground_color == tui::theme::accent()) {
+          ++accent;
+        }
+      }
+    }
+    return accent;
+  };
+
+  // At the "lit" and "dim" steps the two are identical -- same colour, same
+  // count of accented cells.
+  CHECK(accent_cells(0.15F, true) == accent_cells(0.15F, false));
+  CHECK(accent_cells(0.30F, true) == accent_cells(0.30F, false));
+  CHECK(accent_cells(0.30F, true) > 0);
+}
+
+TEST_CASE("a hit that has not been heard yet does not light its pad", "[tui]") {
+  // A negative age is a sequenced hit still in flight to the listener (see
+  // engine::PadGlow). Without the guard in glow_intensity() the clamp reads
+  // "more than full brightness" as full brightness, and the pad lights EARLY --
+  // exactly what the listener-time delay exists to prevent.
+  tui::UiState state = loaded_state(100);
+  state.pads[0].triggered = true;
+  state.pads[0].glow_seconds = -0.15F;  // rendered, not yet heard
+  state.pads[0].glow_velocity = 1.0F;
+  state.pads[0].glow_sequenced = true;
+
+  CHECK(tui::glow_intensity(state.pads[0]) == 0.0F);
+
+  const ftxui::Screen screen = render_screen(state, 100, 30);
+  std::size_t lit = 0;
+  for (int y = 14; y < 27; ++y) {
+    for (int x = 0; x < 46; ++x) {
+      if (screen.CellAt(x, y).inverted) {
+        ++lit;
+      }
+    }
+  }
+  CHECK(lit == 0);
+}

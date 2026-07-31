@@ -16,7 +16,11 @@ namespace {
 }  // namespace
 
 float glow_intensity(const PadState& pad) noexcept {
-  if (!pad.triggered || pad.glow_seconds >= kGlowSeconds) {
+  // A NEGATIVE age is a sequenced hit whose sound has not arrived yet -- see
+  // engine::PadGlow. Without this branch the clamp below would read "more than
+  // full brightness" as full brightness, and the pad would light EARLY, which is
+  // precisely the thing the listener-time delay exists to prevent.
+  if (!pad.triggered || pad.glow_seconds < 0.0F || pad.glow_seconds >= kGlowSeconds) {
     return 0.0F;
   }
   // Linear decay, scaled by how hard the pad was hit. Linear rather than

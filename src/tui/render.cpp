@@ -368,9 +368,22 @@ enum class GlowStep : std::uint8_t { kOff = 0, kDim, kLit, kHot };
   return GlowStep::kHot;
 }
 
-[[nodiscard]] Element with_glow(Element element, GlowStep step) {
+// A SEQUENCED HIT NEVER INVERTS, however hard it was.
+//
+// Inversion is the loudest thing this interface can do to a cell, and it reads
+// as a strike -- something hit just now, by you. The machine playing a pattern
+// is a different event and should look like one: lit rather than struck. Same
+// ramp otherwise, so a quiet sequenced hit is still visible; only the top step
+// differs, which is where the two are actually confusable.
+//
+// Weight rather than colour, for the reason the ramp exists at all: in sixteen
+// colours there is no glow.
+[[nodiscard]] Element with_glow(Element element, GlowStep step, bool sequenced) {
   switch (step) {
     case GlowStep::kHot:
+      if (sequenced) {
+        return std::move(element) | ftxui::color(theme::accent()) | ftxui::bold;
+      }
       return std::move(element) | ftxui::color(theme::accent()) | ftxui::bold | ftxui::inverted;
     case GlowStep::kLit:
       return std::move(element) | ftxui::color(theme::accent()) | ftxui::bold;
@@ -404,7 +417,7 @@ enum class GlowStep : std::uint8_t { kOff = 0, kDim, kLit, kHot };
   // name instead would make each pad flash a different width.
   auto number_element = ftxui::text(number + " ");
   if (glow != GlowStep::kOff) {
-    number_element = with_glow(std::move(number_element), glow);
+    number_element = with_glow(std::move(number_element), glow, pad.glow_sequenced);
   } else if (pad.loaded) {
     number_element = std::move(number_element) | ftxui::color(theme::label());
   } else {

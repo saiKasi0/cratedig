@@ -145,7 +145,8 @@ void Engine::drain_transport() noexcept {
   }
 }
 
-void Engine::start_voice(std::uint8_t pad, float velocity, std::size_t frame_offset) noexcept {
+void Engine::start_voice(std::uint8_t pad, float velocity, std::size_t frame_offset,
+                         bool sequenced) noexcept {
   // One path for every producer -- the keyboard, MIDI, and the sequencer. Shared
   // rather than duplicated because the glow bookkeeping below is easy to get
   // subtly different in three places, and three pads that light differently
@@ -180,7 +181,9 @@ void Engine::start_voice(std::uint8_t pad, float velocity, std::size_t frame_off
   // trigger, not per frame, and it allocates nothing and cannot throw.
   const auto quantised =
       static_cast<std::uint32_t>(std::lround(std::clamp(velocity, 0.0F, 1.0F) * 255.0F));
-  m_published.pad_glow[pad].store(quantised << kGlowVelocityShift, std::memory_order_relaxed);
+  const std::uint32_t word =
+      (quantised << kGlowVelocityShift) | (sequenced ? kGlowSequencedBit : 0U);
+  m_published.pad_glow[pad].store(word, std::memory_order_relaxed);
 }
 
 void Engine::fire_sequencer_steps(std::size_t num_frames) noexcept {
@@ -239,7 +242,7 @@ void Engine::fire_sequencer_steps(std::size_t num_frames) noexcept {
       // 0..127 to linear 0..1, converted once here rather than stored as a
       // float: the pattern holds what MIDI and the UI both speak.
       const float velocity = static_cast<float>(cell.velocity) / 127.0F;
-      start_voice(static_cast<std::uint8_t>(pad), velocity, offset);
+      start_voice(static_cast<std::uint8_t>(pad), velocity, offset, /*sequenced=*/true);
     }
   }
 }
@@ -392,7 +395,7 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
     // is the worse answer for a bad number that is probably off by one.
     const std::size_t offset =
         num_frames == 0 ? 0 : std::min<std::size_t>(event.frame_offset, num_frames - 1);
-    start_voice(event.pad, event.velocity, offset);
+    start_voice(event.pad, event.velocity, offset, /*sequenced=*/false);
   }
 
   // The sequencer, AFTER the live events. Both start voices, so the order
@@ -537,8 +540,18 @@ Telemetry Engine::telemetry() const noexcept {
       continue;  // leaves the default-constructed PadGlow, which reads as untriggered
     }
     snapshot.pad_glow[pad].triggered = true;
-    snapshot.pad_glow[pad].seconds_since_trigger = static_cast<float>(glow & kGlowFrameMask) / rate;
+    const bool sequenced = (glow & kGlowSequencedBit) != 0;
+    snapshot.pad_glow[pad].sequenced = sequenced;
     snapshot.pad_glow[pad].velocity = static_cast<float>(glow >> kGlowVelocityShift) / 255.0F;
+
+    // LISTENER TIME. A sequenced hit is not shown until the sound it made has
+    // had time to reach the ear; a live one is shown at once, because its
+    // reference is the finger that caused it. With the default latency of zero
+    // this is exactly the age, which is why nothing about M3's glow behaviour
+    // changes until M9 measures a real figure.
+    const auto age_frames = static_cast<float>(glow & kGlowFrameMask);
+    const float delay = sequenced ? static_cast<float>(m_config.output_latency_frames) : 0.0F;
+    snapshot.pad_glow[pad].seconds_since_trigger = (age_frames - delay) / rate;
   }
   return snapshot;
 }

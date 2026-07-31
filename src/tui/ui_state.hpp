@@ -92,6 +92,10 @@ struct PadState {
   bool triggered = false;
   float glow_seconds = 0.0F;
   float glow_velocity = 0.0F;
+
+  // Whether the sequencer played it rather than a person. Straight from
+  // engine::PadGlow; the interface draws the two differently.
+  bool glow_sequenced = false;
 };
 
 // How long a pad stays visibly lit after a hit.
