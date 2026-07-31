@@ -9,6 +9,7 @@ target_compile_options(cratedig_rt_nofx_check PRIVATE -fno-exceptions -fno-rtti)
 
 add_executable(
   cratedig_unit_tests
+  unit/slices_test.cpp
   unit/smoke_test.cpp
   unit/audio_device_test.cpp
   unit/decode_test.cpp
