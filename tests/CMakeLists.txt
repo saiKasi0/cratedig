@@ -25,6 +25,7 @@ add_executable(
   unit/handoff_ring_test.cpp
   unit/interpolator_test.cpp
   unit/keys_test.cpp
+  unit/midi_device_test.cpp
   unit/onset_accuracy_test.cpp
   unit/onset_test.cpp
   unit/peak_pyramid_test.cpp

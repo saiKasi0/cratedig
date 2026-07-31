@@ -71,9 +71,9 @@ target_link_libraries(cratedig_ingest PRIVATE cratedig_ffmpeg SampleRate::sample
 # at all (CLAUDE.md). scripts/check_layering.sh enforces that mechanically,
 # because it is the kind of rule that decays the first time someone needs a
 # device enum "just here".
-add_library(cratedig_io STATIC io/audio_device.cpp)
+add_library(cratedig_io STATIC io/audio_device.cpp io/midi_device.cpp)
 target_link_libraries(cratedig_io PUBLIC cratedig_engine)
-target_link_libraries(cratedig_io PRIVATE rtaudio cratedig_warnings cratedig_sanitizer)
+target_link_libraries(cratedig_io PRIVATE rtaudio rtmidi cratedig_warnings cratedig_sanitizer)
 
 # The TUI lane. FTXUI is linked PUBLIC because the render layer's return type is
 # an ftxui::Element — the snapshot tests build the same elements and render them

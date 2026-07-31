@@ -128,11 +128,6 @@ unset(BUILD_TESTING)
 # every dependency rather than only rtaudio — checking one of them is what let
 # libsamplerate build shared unnoticed for a whole milestone.
 
-# RtMidi (MIT-style) — MIDI input, linked ONLY from src/io/. Activates at M4.
-# FetchContent_Declare(rtmidi
-#   URL https://github.com/thestk/rtmidi/archive/refs/tags/6.0.0.tar.gz
-#   URL_HASH SHA256=<pin at activation> SYSTEM EXCLUDE_FROM_ALL)
-
 # -- M2: TUI -----------------------------------------------------------------------
 #
 # FTXUI (MIT) — the terminal interface, linked ONLY from src/tui/.
@@ -168,20 +163,6 @@ FetchContent_MakeAvailable(ftxui)
 
 unset(CMAKE_POLICY_DEFAULT_CMP0077)
 
-# -- Static-linkage post-condition -------------------------------------------------
-#
-# Asserted rather than assumed. None of these libraries declares STATIC
-# explicitly; they all follow BUILD_SHARED_LIBS, and the failure is silent — the
-# build succeeds, the tests pass, and the binary only breaks once build/ is gone.
-# Checking every target is the point: the M1 version of this check covered
-# rtaudio alone, and libsamplerate went shared behind it.
-foreach(_cratedig_dep IN ITEMS rtaudio samplerate screen dom component)
-  get_target_property(_cratedig_dep_type ${_cratedig_dep} TYPE)
-  if(NOT _cratedig_dep_type STREQUAL "STATIC_LIBRARY")
-    message(FATAL_ERROR "cratedig: expected a static ${_cratedig_dep}, got ${_cratedig_dep_type}")
-  endif()
-endforeach()
-
 # -- M3: onset detection -----------------------------------------------------------
 #
 # PFFFT (FFTPACK license — BSD-style, see docs/LICENSING.md and NOTICE).
@@ -212,8 +193,71 @@ target_include_directories(pffft SYSTEM PUBLIC ${pffft_SOURCE_DIR})
 target_compile_options(pffft PRIVATE -w)
 set_target_properties(pffft PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# -- M4: MIDI ----------------------------------------------------------------------
+#
+# RtMidi (MIT-style) — MIDI input, linked ONLY from src/io/.
+#
+# No CMP0077 shim, unlike RtAudio: RtMidi requires CMake 3.24, which is well past
+# the 3.13 that introduced the policy, so option() already leaves a
+# previously-set normal variable alone. Checked rather than assumed -- the whole
+# reason RtAudio needs the shim is that its minimum is older.
+#
+# Licence checked before linking, per docs/LICENSING.md: the LICENSE in the
+# tarball is MIT with one extra clause asking that modifications be sent
+# upstream, explicitly "not a binding provision". Permissive, static linkage is
+# fine, and the table in LICENSING.md already anticipated it.
+#
+# The URL hash was verified by downloading twice and comparing -- same
+# convention the PFFFT pin follows, and the reason a pin is worth anything.
+#
+# The same three traps as RtAudio above, for the same reasons: build static so
+# the licence table's assumption holds, turn its own test programs off (they
+# default to ON and would register interactive MIDI tests into our ctest run),
+# and PIN the API list rather than letting it auto-detect, so a machine that
+# happens to have JACK headers does not silently produce a different binary from
+# CI's.
+# RtAudio and RtMidi are by the same author and share their install boilerplate,
+# including an `uninstall` custom target with a fixed name -- so pulling both into
+# one build tree is a hard configure error ("another target with the same name
+# already exists"). Both expose the name as a variable for exactly this case;
+# renaming RtMidi's is the intended escape hatch rather than a workaround.
+set(RTMIDI_TARGETNAME_UNINSTALL "rtmidi-uninstall")
+set(RTMIDI_BUILD_STATIC_LIBS ON)
+set(RTMIDI_BUILD_TESTING OFF)
+set(RTMIDI_API_JACK OFF)
+set(RTMIDI_API_WINMM OFF)
+set(RTMIDI_API_AMIDI OFF)
+set(RTMIDI_API_ALSA ${LINUX})
+set(RTMIDI_API_CORE ${APPLE})
+FetchContent_Declare(
+  rtmidi
+  URL https://github.com/thestk/rtmidi/archive/refs/tags/6.0.0.tar.gz
+  URL_HASH SHA256=ef7bcda27fee6936b651c29ebe9544c74959d0b1583b716ce80a1c6fea7617f0
+  SYSTEM EXCLUDE_FROM_ALL)
+
+FetchContent_MakeAvailable(rtmidi)
+
 # -- M7: scripting -----------------------------------------------------------------
 # Lua 5.4 (MIT) + sol2 (MIT, header-only)
 
 # -- M8: plugin hosting ------------------------------------------------------------
 # CLAP (MIT, header-only); lilv (ISC) as a system package (Linux/macOS)
+
+# -- Static-linkage post-condition -------------------------------------------------
+#
+# Asserted rather than assumed. None of these libraries declares STATIC
+# explicitly; they all follow BUILD_SHARED_LIBS, and the failure is silent — the
+# build succeeds, the tests pass, and the binary only breaks once build/ is gone.
+# Checking every target is the point: the M1 version of this check covered
+# rtaudio alone, and libsamplerate went shared behind it.
+#
+# It lives at the END of the file so that every dependency declared above is
+# in scope. It used to sit mid-file and therefore covered only M1 and M2,
+# which the comment above already claimed it did not -- found when RtMidi was
+# added below it in M4 and silently escaped the check.
+foreach(_cratedig_dep IN ITEMS rtaudio rtmidi samplerate screen dom component)
+  get_target_property(_cratedig_dep_type ${_cratedig_dep} TYPE)
+  if(NOT _cratedig_dep_type STREQUAL "STATIC_LIBRARY")
+    message(FATAL_ERROR "cratedig: expected a static ${_cratedig_dep}, got ${_cratedig_dep_type}")
+  endif()
+endforeach()

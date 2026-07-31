@@ -20,6 +20,11 @@ RtAudio — https://github.com/thestk/rtaudio
     MIT-style license (with the additional request that changes be sent
     to the author). Statically linked.
 
+RtMidi — https://github.com/thestk/rtmidi
+    Copyright (c) 2003-2023 Gary P. Scavone
+    MIT-style license (with the additional request that changes be sent
+    to the author, explicitly not a binding provision). Statically linked.
+
 libsamplerate — https://github.com/libsndfile/libsamplerate
     Copyright (c) 2012-2016 Erik de Castro Lopo
     BSD-2-Clause. Statically linked.
