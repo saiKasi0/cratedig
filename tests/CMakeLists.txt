@@ -21,6 +21,7 @@ add_executable(
   unit/garbage_ring_test.cpp
   unit/handoff_ring_test.cpp
   unit/interpolator_test.cpp
+  unit/onset_test.cpp
   unit/peak_pyramid_test.cpp
   unit/result_test.cpp
   unit/rt_scope_test.cpp
