@@ -119,6 +119,16 @@ struct SequencerState {
 
   // Which pattern plays when the song is empty.
   std::uint8_t selected_pattern = 0;
+
+  // OFF by default, which is the only defensible default: a metronome that
+  // starts on would put a click in the first render of every session, including
+  // an offline bounce, where it would be baked into the file.
+  //
+  // Here rather than in Engine::Config because it is changed while running and
+  // must reach the audio thread the same way everything else does -- and because
+  // M6 serialises this struct, so "was the metronome on" is saved with the
+  // project rather than being a setting that resets every launch.
+  bool metronome = false;
 };
 
 static_assert(std::is_trivially_copyable_v<SequencerState>,

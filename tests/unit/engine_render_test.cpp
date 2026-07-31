@@ -1,4 +1,5 @@
 #include "engine/engine.hpp"
+#include "rt/click.hpp"
 #include "rt/pad_config.hpp"
 #include "rt/pad_event.hpp"
 #include "rt/sample.hpp"
@@ -1008,4 +1009,128 @@ TEST_CASE("a chained song is invariant to block size", "[unit]") {
   CHECK(hash_at(64) == reference);
   CHECK(hash_at(333) == reference);
   CHECK(hash_at(1'024) == reference);
+}
+
+TEST_CASE("the metronome is off unless it is asked for", "[unit]") {
+  // The only defensible default. A metronome that started on would put a click
+  // in the first render of every session -- including an offline bounce, where
+  // it would be baked into the file.
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.publish_sequencer(std::make_shared<rt::SequencerState>()));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  RenderCapture capture{48'000, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  capture.render_in_blocks(eng, blocks);
+
+  for (const float value : capture.samples()) {
+    REQUIRE(value == 0.0F);
+  }
+}
+
+TEST_CASE("the metronome clicks on the beat", "[unit]") {
+  engine::Engine eng{test_config()};  // no pads loaded: the click is all there is
+
+  auto state = std::make_shared<rt::SequencerState>();
+  state->bpm_x100 = 12'000;  // a beat is 24000 frames
+  state->metronome = true;
+  REQUIRE(eng.publish_sequencer(state));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  RenderCapture capture{96'000, kChannels};  // four beats
+  const std::array<std::size_t, 1> blocks{512};
+  capture.render_in_blocks(eng, blocks);
+
+  const std::span<const float> samples = capture.samples();
+  const auto loudest_in = [samples](std::size_t from, std::size_t to) {
+    float peak = 0.0F;
+    for (std::size_t frame = from; frame < to; ++frame) {
+      peak = std::max(peak, std::abs(samples[frame]));
+    }
+    return peak;
+  };
+
+  // A click at each beat...
+  for (const std::size_t beat :
+       {std::size_t{0}, std::size_t{24'000}, std::size_t{48'000}, std::size_t{72'000}}) {
+    INFO("beat at frame " << beat);
+    REQUIRE(loudest_in(beat, beat + rt::kClickFrames) > 0.1F);
+  }
+
+  // ...and silence between them. The click is 1200 frames of a 24000-frame beat,
+  // so the gap is real rather than a matter of degree.
+  CHECK(loudest_in(2'000, 23'000) == 0.0F);
+  CHECK(loudest_in(26'000, 47'000) == 0.0F);
+}
+
+TEST_CASE("the metronome accents the downbeat", "[unit]") {
+  // The accent is the only thing telling you where the bar is, so it has to be
+  // distinguishable rather than merely present.
+  engine::Engine eng{test_config()};
+
+  auto state = std::make_shared<rt::SequencerState>();
+  state->bpm_x100 = 12'000;
+  state->metronome = true;
+  REQUIRE(eng.publish_sequencer(state));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  RenderCapture capture{48'000, kChannels};
+  const std::array<std::size_t, 1> blocks{512};
+  capture.render_in_blocks(eng, blocks);
+
+  const std::span<const float> samples = capture.samples();
+  const auto loudest_in = [samples](std::size_t from, std::size_t to) {
+    float peak = 0.0F;
+    for (std::size_t frame = from; frame < to; ++frame) {
+      peak = std::max(peak, std::abs(samples[frame]));
+    }
+    return peak;
+  };
+
+  const float downbeat = loudest_in(0, rt::kClickFrames);
+  const float offbeat = loudest_in(24'000, 24'000 + rt::kClickFrames);
+  INFO("downbeat " << downbeat << " vs beat 2 " << offbeat);
+  CHECK(downbeat > offbeat);
+}
+
+TEST_CASE("the metronome is invariant to block size", "[unit]") {
+  // A click can straddle a block boundary, so this is the case a stateful
+  // implementation gets wrong: restarting the table at each block would make the
+  // click sound different at 64 frames than at 2048. The table index comes from
+  // the absolute frame, so there is no state to get wrong.
+  //
+  // A tempo whose beat is NOT a multiple of any block size here, so a click
+  // straddles a boundary at every one of them.
+  const auto hash_at = [](std::size_t block) {
+    engine::Engine eng{test_config()};
+    auto state = std::make_shared<rt::SequencerState>();
+    state->bpm_x100 = 13'700;
+    state->metronome = true;
+    REQUIRE(eng.publish_sequencer(state));
+    REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+    RenderCapture capture{96'000, kChannels};
+    const std::array<std::size_t, 1> blocks{block};
+    capture.render_in_blocks(eng, blocks);
+    return capture.hash();
+  };
+
+  const std::uint64_t reference = hash_at(2'048);
+  CHECK(hash_at(64) == reference);
+  CHECK(hash_at(333) == reference);
+  CHECK(hash_at(1'000) == reference);
+}
+
+TEST_CASE("the metronome is silent while the transport is stopped", "[unit]") {
+  engine::Engine eng{test_config()};
+  auto state = std::make_shared<rt::SequencerState>();
+  state->metronome = true;
+  REQUIRE(eng.publish_sequencer(state));
+
+  RenderCapture capture{48'000, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  capture.render_in_blocks(eng, blocks);
+
+  for (const float value : capture.samples()) {
+    REQUIRE(value == 0.0F);
+  }
 }

@@ -2,6 +2,7 @@
 #define CRATEDIG_ENGINE_ENGINE_HPP
 
 #include "rt/arch.hpp"
+#include "rt/click.hpp"
 #include "rt/garbage_ring.hpp"
 #include "rt/handoff_ring.hpp"
 #include "rt/pad_config.hpp"
@@ -362,6 +363,12 @@ class Engine {
   // AUDIO THREAD, once per block. Fires every step that falls inside it, at its
   // exact frame.
   void fire_sequencer_steps(std::size_t num_frames) noexcept;
+
+  // AUDIO THREAD, after the voices. Adds the metronome click, if it is on.
+  //
+  // Additive into the same buffers, so it is part of the output and therefore
+  // part of the master peak -- it is audio a listener hears, not an overlay.
+  void mix_metronome(std::span<float* const> channels, std::size_t num_frames) noexcept;
 
   // AUDIO THREAD. Pattern and step packed for publication. Zero when no
   // sequencer state has been published, which reads as step 0 of pattern 0 and

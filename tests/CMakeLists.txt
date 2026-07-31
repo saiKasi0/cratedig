@@ -12,6 +12,7 @@ add_executable(
   unit/slices_test.cpp
   unit/smoke_test.cpp
   unit/audio_device_test.cpp
+  unit/click_test.cpp
   unit/command_test.cpp
   unit/decode_test.cpp
   unit/engine_render_test.cpp

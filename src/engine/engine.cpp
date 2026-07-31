@@ -244,6 +244,62 @@ void Engine::fire_sequencer_steps(std::size_t num_frames) noexcept {
   }
 }
 
+void Engine::mix_metronome(std::span<float* const> channels, std::size_t num_frames) noexcept {
+  if (!m_transport.playing || m_sequencer == nullptr || num_frames == 0) {
+    return;
+  }
+  const rt::SequencerState& state = *m_sequencer;
+  if (!state.metronome) {
+    return;
+  }
+
+  const std::uint64_t block_start = m_transport.position_frames;
+  const std::uint64_t block_end = block_start + num_frames;
+
+  // The earliest beat whose click could still be sounding, derived rather than
+  // assumed: backing up "one beat" would be correct at every tempo this engine
+  // allows, but it would be correct by arithmetic nobody re-checks when the
+  // click length changes. Subtracting the click length says what it means.
+  const std::uint64_t earliest =
+      block_start > rt::kClickFrames ? block_start - rt::kClickFrames : 0;
+  std::uint64_t beat =
+      rt::step_index_at(earliest, m_config.sample_rate, state.bpm_x100) / rt::kStepsPerBeat;
+
+  for (;; ++beat) {
+    // UNSWUNG, deliberately: a beat is a multiple of kStepsPerBeat and therefore
+    // an even step, which step_frame() never shifts anyway -- but the zero here
+    // is the statement that a metronome marks the grid rather than the groove.
+    // A swinging metronome is useless for the thing a metronome is for.
+    const std::uint64_t at =
+        rt::step_frame(beat * rt::kStepsPerBeat, m_config.sample_rate, state.bpm_x100, 0);
+    if (at >= block_end) {
+      break;
+    }
+    const std::uint64_t click_end = at + rt::kClickFrames;
+    if (click_end <= block_start) {
+      continue;  // finished before this block began
+    }
+
+    const bool accent = (beat % rt::kBeatsPerBar) == 0;
+    const rt::ClickTable& table = accent ? rt::kClickAccent : rt::kClickBeat;
+    const float gain = accent ? rt::kAccentGain : rt::kBeatGain;
+
+    // Clipped to the block at both ends, so a click that straddles a boundary is
+    // continued rather than restarted. That is what keeps the metronome
+    // block-size invariant with no state carried between blocks: the table index
+    // comes from the absolute frame, not from a counter.
+    const std::uint64_t from = std::max(at, block_start);
+    const std::uint64_t to = std::min(click_end, block_end);
+    for (std::uint64_t frame = from; frame < to; ++frame) {
+      const float value = table.samples[static_cast<std::size_t>(frame - at)] * gain;
+      const auto into = static_cast<std::size_t>(frame - block_start);
+      for (float* channel : channels) {
+        channel[into] += value;
+      }
+    }
+  }
+}
+
 void Engine::adopt_pad_configs() noexcept {
   // A handle held over from a previous block, because the garbage ring was full
   // when we tried to retire it. Nothing else can proceed until it is gone: the
@@ -346,6 +402,10 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
   fire_sequencer_steps(num_frames);
 
   m_voices.render_add(channels, num_frames);
+
+  // After the voices and before the position advances: the click is placed by
+  // the same block_start the steps were, so it lands on the beat it marks.
+  mix_metronome(channels, num_frames);
 
   // The transport advances by exactly the block it just rendered, whatever that
   // block was. Nothing else tracks time: every step boundary is derived from
