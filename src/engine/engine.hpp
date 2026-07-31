@@ -94,11 +94,18 @@ class Engine {
   // the janitor may be a whole UI frame behind.
   static constexpr std::size_t kGarbageRingCapacity = 64;
 
-  // Pad reconfigurations in flight, control -> audio. Sixteen is one full grid
-  // reassigned between two blocks, which is what `:chop transient` does; a
-  // human editing pads cannot outrun a 5 ms block, so this is a burst allowance
-  // rather than a throughput budget.
-  static constexpr std::size_t kPadHandoffCapacity = 16;
+  // Pad reconfigurations in flight, control -> audio. `:chop transient`
+  // publishes one config per pad in a single burst, so a full grid of sixteen
+  // is the unit to size for -- and twice that, because the burst can land on
+  // top of pads assigned earlier in the same block. A burst allowance, not a
+  // throughput budget: render() drains the ring completely every block, and a
+  // human editing pads cannot outrun 5 ms.
+  //
+  // With --no-audio nothing renders, so nothing ever drains and enough chops in
+  // one session will fill it. That is not a leak to size around; it is what
+  // that mode is. publish_pad_config() reports the refusal, the control-side
+  // view stays truthful, and the interface says so on the mode line.
+  static constexpr std::size_t kPadHandoffCapacity = 32;
 
   struct Config {
     std::uint32_t sample_rate = 48'000;

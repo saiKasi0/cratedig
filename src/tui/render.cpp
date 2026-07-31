@@ -643,6 +643,54 @@ enum class GlowStep : std::uint8_t { kOff = 0, kDim, kLit, kHot };
 [[nodiscard]] Element mode_line(const UiState& state, std::size_t columns) {
   constexpr std::string_view kPrefix = "  perform   ";
 
+  // The prompt takes the WHOLE line when it is up. A `:` line sharing space
+  // with a keymap is a prompt you cannot read, and the facts it would be
+  // competing with are all still one keystroke away.
+  //
+  // The block is a cursor. FTXUI can place a real terminal cursor, but doing so
+  // would put a blinking, terminal-dependent artefact into the PTY snapshot --
+  // this draws the same information deterministically.
+  if (state.command_active) {
+    // The `:` is PINNED and the text scrolls under it, as in every other line
+    // editor that has ever had one. Letting the colon scroll off would take the
+    // one glyph that says which mode you are in.
+    //
+    // Three cells go elsewhere: the leading space, the colon, and the cursor.
+    std::string typed = state.command_text;
+    const std::size_t room = columns > 3 ? columns - 3 : 1;
+    if (utf8_cells(typed) > room) {
+      // Keep the END visible. What is being typed matters more than what was
+      // typed a moment ago, and truncating the tail instead looks exactly like
+      // a prompt that has stopped accepting input.
+      typed = utf8_split(typed, utf8_cells(typed) - room).second;
+    }
+    return ftxui::hbox({
+        ftxui::text(" "),
+        ftxui::text(":") | ftxui::color(theme::accent()),
+        ftxui::text(typed) | ftxui::color(theme::bright()),
+        ftxui::text("█") | ftxui::color(theme::accent()),
+        ftxui::filler(),
+    });
+  }
+
+  // What the last command said, in place of everything else. See UiState for
+  // why it wins over the counters and the keymap both.
+  if (!state.message.empty()) {
+    const std::size_t room =
+        columns > utf8_cells(kPrefix) + 1 ? columns - utf8_cells(kPrefix) - 1 : 1;
+    std::string text = state.message;
+    if (utf8_cells(text) > room) {
+      text = utf8_split(text, room).first;
+    }
+    return ftxui::hbox({
+        ftxui::text(std::string{kPrefix}) | ftxui::color(theme::label()) | ftxui::bold,
+        ftxui::text(text) |
+            ftxui::color(state.message_is_error ? theme::accent() : theme::bright()) |
+            (state.message_is_error ? ftxui::bold : ftxui::nothing),
+        ftxui::filler(),
+    });
+  }
+
   // Live counters only, in priority order. The static engine and device facts
   // live in the sample panel, where they are not competing every frame with
   // numbers that actually change.
@@ -666,9 +714,12 @@ enum class GlowStep : std::uint8_t { kOff = 0, kDim, kLit, kHot };
   // the longest hint that still fits -- the same balance the mockups strike,
   // and the right one: the facts are what changed since the last frame.
   constexpr std::string_view kHintTiers[] = {
-      "qwer/asdf/zxcv/1234 pads · hl scroll · +- zoom · 0 fit · esc quit ",
-      "qwer.. pads · hl scroll · +- zoom · 0 fit · esc quit ",
-      "pads qwer.. · hl · +- · esc ",
+      "qwer/asdf/zxcv/1234 pads · hl scroll · +- zoom · 0 fit · : cmd · esc quit ",
+      // `: cmd` displaces `0 fit` from here down. Chopping is what the machine
+      // is FOR, and `:` is the only way to reach it; fit is one of several view
+      // keys, and the neighbouring `+- zoom` already says the view moves.
+      "qwer.. pads · hl scroll · +- zoom · : cmd · esc quit ",
+      "pads qwer.. · hl · +- · : · esc ",
       // The pad keys survive one tier further down than anything else. They are
       // what makes the thing playable; scroll and zoom are discoverable by
       // pressing something, and a pad map is not.

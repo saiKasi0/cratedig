@@ -256,6 +256,56 @@ def main() -> int:
     frame.feed(output.decode("utf-8", "replace"))
     painted = frame.render()
 
+    def send(text: str) -> bool:
+        os.write(fd, text.encode())
+        return drain(fd, KEY_SECONDS, output)
+
+    def screen_now() -> str:
+        grid = Grid(COLUMNS, ROWS)
+        grid.feed(output.decode("utf-8", "replace"))
+        return grid.render()
+
+    # The command line, driven through a real terminal.
+    #
+    # The offscreen snapshots prove the prompt DRAWS; only this can prove the
+    # keystrokes reach it. Two things here are invisible to any test that builds
+    # a UiState by hand: Enter arrives as CR rather than LF once raw mode clears
+    # ICRNL, and Backspace arrives as DEL. FTXUI normalises both -- this is
+    # where that keeps being true. Bytes are what a pty has.
+    command_failures: list[str] = []
+    if alive:
+        alive = send(":chop grid 4x")
+        prompt = screen_now()
+        if ":chop grid 4x" not in prompt:
+            command_failures.append("the prompt did not show what was typed")
+        if "esc quit" in prompt:
+            command_failures.append("the keymap is still on the mode line under the prompt")
+
+        # DEL removes the typo; escape then cancels the whole line. Cancelling
+        # must NOT quit -- everything after this depends on the program still
+        # being there.
+        alive = send("\x7f\x1b")
+        if ":chop" in screen_now():
+            command_failures.append("escape did not cancel the prompt")
+
+        # \r, not \n: CR is the byte an actual Enter key produces here.
+        alive = send(":chop grid 4\r")
+        chopped = screen_now()
+        for expect in ("4 slices", "s01", "s04"):
+            if expect not in chopped:
+                command_failures.append(f"after :chop grid 4 the screen has no {expect!r}")
+        if not alive:
+            command_failures.append("the program exited during the chop")
+
+        # The answer is cleared by the next keystroke, so it can never be read
+        # as a reply to something else. "q" is pad 1, which now holds slice 1.
+        alive = send("q")
+        after = screen_now()
+        if "4 slices" in after:
+            command_failures.append("the message survived the next keystroke")
+        if "esc quit" not in after:
+            command_failures.append("the keymap did not come back after the message went")
+
     if alive:
         # ESCAPE, not "q" -- the QWERTY pad map claims q for pad 1 from M3, and
         # a session that sent "q" here would trigger a pad and then hang.
@@ -277,7 +327,7 @@ def main() -> int:
         attributes_after = None
     os.close(fd)
 
-    failures: list[str] = []
+    failures: list[str] = list(command_failures)
 
     if exit_code != 0:
         failures.append(f"exit code {exit_code}, expected 0")

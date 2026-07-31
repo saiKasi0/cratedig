@@ -147,6 +147,21 @@ struct UiState {
   std::uint8_t playhead_pad = 0;
   float master_peak = 0.0F;
 
+  // The `:` line. When active it takes over the mode line entirely, because a
+  // prompt competing for space with a keymap is a prompt you cannot read.
+  bool command_active = false;
+  std::string command_text;
+
+  // What the last command said. It takes the mode line's whole right-hand side,
+  // displacing both the counters and the keymap: an answer to something the
+  // player just did outranks a reminder of keys they already pressed, and the
+  // counters are back on the next keystroke because that is what clears it.
+  //
+  // The flag exists because a refusal that looks exactly like a confirmation is
+  // a refusal nobody notices.
+  std::string message;
+  bool message_is_error = false;
+
   // Engine and device facts for the mode line. An empty audio_api means the
   // interface is running with no device (--no-audio), and says so.
   std::uint32_t engine_rate = 48'000;

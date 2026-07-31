@@ -3,8 +3,12 @@
 #include "engine/engine.hpp"
 #include "ingest/decoder.hpp"
 #include "ingest/peak_pyramid.hpp"
+#include "ingest/slices.hpp"
 #include "io/audio_device.hpp"
+#include "rt/pad_config.hpp"
 #include "rt/pad_event.hpp"
+#include "rt/sample.hpp"
+#include "tui/command.hpp"
 #include "tui/render.hpp"
 #include "tui/ui_state.hpp"
 #include "tui/waveform.hpp"
@@ -18,6 +22,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -68,6 +73,87 @@ constexpr std::array<char, rt::kNumPads> kPadKeys{'q', 'w', 'e', 'r', 'a', 's', 
 // or a jump-cut when zoomed in.
 constexpr std::size_t kScrollDivisor = 8;
 constexpr double kZoomStep = 0.5;
+
+// What a pad chopped from slice N is called.
+//
+// Zero-padded and short on purpose: a pad cell is ten columns wide and the
+// borders take two, so "chop10" arrives on screen as "chop1" -- a name that
+// lies about which slice it plays. "s01".."s16" fits whole at every number.
+[[nodiscard]] std::string slice_pad_name(std::size_t slice_number) {
+  const std::string digits = std::to_string(slice_number);
+  return "s" + (digits.size() < 2 ? "0" + digits : digits);
+}
+
+// Slices onto pads, one for one, and every pad past the last slice cleared.
+//
+// Returns how many pads were actually reconfigured. A short count means the
+// handoff ring refused a publish, which the caller reports rather than hides:
+// half a chop that looks like a whole one is the kind of thing you discover
+// mid-performance.
+//
+// Sixteen at a time; banks are M5. Slices past the sixteenth still exist in the
+// SliceSet and the wave panel draws them, so nothing is lost -- there is just
+// nothing to play them with yet.
+[[nodiscard]] std::size_t apply_slices(engine::Engine& engine,
+                                       const std::shared_ptr<const rt::Sample>& sample,
+                                       const ingest::SliceSet& set, UiState& state) {
+  std::size_t published = 0;
+  for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+    const bool has_slice = pad < set.size() && sample != nullptr;
+
+    // Built fresh and published whole. A PadConfig is immutable once the audio
+    // thread can see it, so "clear this pad" is a new config with no sample --
+    // which the engine treats as silent rather than as an error.
+    rt::PadConfig config{};
+    config.pad = static_cast<std::uint8_t>(pad);
+    if (has_slice) {
+      config.sample = sample;
+      config.start_frame = set.slices[pad].start_frame;
+      config.end_frame = set.slices[pad].end_frame;
+    }
+
+    if (!engine.publish_pad_config(std::make_shared<const rt::PadConfig>(std::move(config)))) {
+      return published;
+    }
+    ++published;
+
+    state.pads[pad].loaded = has_slice;
+    state.pads[pad].has_slice = has_slice;
+    state.pads[pad].slice_index = pad;
+    state.pads[pad].name = has_slice ? slice_pad_name(pad + 1) : std::string{};
+  }
+  return published;
+}
+
+// Deletes one CHARACTER, not one byte.
+//
+// Backspacing a multi-byte character a byte at a time leaves a truncated
+// sequence on the line, which draws as a replacement glyph -- and then the next
+// Backspace removes another byte of it rather than the glyph, so the prompt
+// appears to have stopped responding.
+void pop_codepoint(std::string& text) {
+  while (!text.empty()) {
+    const auto byte = static_cast<unsigned char>(text.back());
+    text.pop_back();
+    if ((byte & 0xC0U) != 0x80U) {
+      break;  // ASCII, or the lead byte: that was the whole character
+    }
+  }
+}
+
+// What the wave panel draws. Kept in step with the engine by being written in
+// the same place the configs are published.
+void show_slices(const ingest::SliceSet& set, UiState& state) {
+  state.slices.clear();
+  state.slices.reserve(set.size());
+  for (const ingest::Slice& slice : set.slices) {
+    state.slices.push_back(
+        SliceMark{.start_frame = slice.start_frame, .end_frame = slice.end_frame});
+  }
+  state.chop_algorithm = set.algorithm == ingest::ChopAlgorithm::kTransient
+                             ? std::string{"transient"}
+                             : "grid " + std::to_string(set.size());
+}
 
 }  // namespace
 
@@ -191,6 +277,127 @@ int run_app(const AppOptions& options) {
     state.block_frames = device.actual_block_frames();
   }
 
+  // The chops, control-side. UiState carries a display copy in frames; this is
+  // the one `slot assign` reads, because it is the only place a slice NUMBER
+  // still means something.
+  ingest::SliceSet slices;
+
+  auto set_message = [&state](std::string text, bool is_error) {
+    state.message = std::move(text);
+    state.message_is_error = is_error;
+  };
+
+  // Runs a parsed command. Everything it touches -- the engine's handoff ring,
+  // the slice set, the UiState -- belongs to this thread, which is what makes a
+  // command a plain function call rather than a message.
+  auto execute = [&](const Command& command) {
+    switch (command.kind) {
+      case CommandKind::kNone:
+        break;
+
+      case CommandKind::kError:
+        set_message(command.message, true);
+        break;
+
+      case CommandKind::kChopTransient:
+      case CommandKind::kChopGrid: {
+        if (sample == nullptr) {
+          set_message("nothing loaded to chop", true);
+          break;
+        }
+        const bool transient = command.kind == CommandKind::kChopTransient;
+        // Analysis runs HERE, on the control thread, so the interface stops
+        // redrawing until it finishes -- a few tens of milliseconds per minute
+        // of audio. Putting it on the worker lane is M6's ingest job; doing it
+        // now would mean building most of that lane to earn a progress bar
+        // nobody can see yet.
+        slices =
+            transient ? ingest::chop_transient(*sample) : ingest::chop_grid(*sample, command.count);
+        show_slices(slices, state);
+
+        const std::string what = transient ? "chop transient" : "chop grid";
+        if (slices.empty()) {
+          set_message(what + ": no transients found", true);
+          break;
+        }
+        const std::size_t published = apply_slices(engine, sample, slices, state);
+        const std::size_t on_pads = std::min(slices.size(), static_cast<std::size_t>(rt::kNumPads));
+        if (published < rt::kNumPads) {
+          set_message(what + ": " + std::to_string(slices.size()) + " slices, but only " +
+                          std::to_string(published) + " pads took it",
+                      true);
+          break;
+        }
+        set_message(what + ": " + std::to_string(slices.size()) + " slices on " +
+                        std::to_string(on_pads) + " pads",
+                    false);
+        break;
+      }
+
+      case CommandKind::kChopReset: {
+        slices = ingest::SliceSet{};
+        show_slices(slices, state);
+        if (sample == nullptr) {
+          set_message("nothing loaded", true);
+          break;
+        }
+        // Back to how the file arrived: the whole thing on pad 1, every other
+        // pad empty. Expressed as a one-slice chop so there is a single code
+        // path that publishes pads, then the NAME is put back -- pad 1 is the
+        // file again, not slice one of it.
+        ingest::SliceSet whole;
+        whole.slices.push_back(ingest::Slice{.start_frame = 0, .end_frame = sample->num_frames()});
+        static_cast<void>(apply_slices(engine, sample, whole, state));
+        state.pads[kPad].has_slice = false;
+        state.pads[kPad].name = options.sample_path.stem().string();
+        set_message("chop reset", false);
+        break;
+      }
+
+      case CommandKind::kSlotAssign: {
+        if (slices.empty()) {
+          set_message("nothing chopped yet — try :chop transient", true);
+          break;
+        }
+        if (command.slice > slices.size()) {
+          set_message("no slice " + std::to_string(command.slice) + " (have " +
+                          std::to_string(slices.size()) + ")",
+                      true);
+          break;
+        }
+        if (command.pad > rt::kNumPads) {
+          set_message("no pad " + std::to_string(command.pad) + " (have " +
+                          std::to_string(rt::kNumPads) + ")",
+                      true);
+          break;
+        }
+        const ingest::Slice& slice = slices.slices[command.slice - 1];
+        const auto pad = static_cast<std::uint8_t>(command.pad - 1);
+        rt::PadConfig config{};
+        config.sample = sample;
+        config.pad = pad;
+        config.start_frame = slice.start_frame;
+        config.end_frame = slice.end_frame;
+        if (!engine.publish_pad_config(std::make_shared<const rt::PadConfig>(std::move(config)))) {
+          set_message("pad " + std::to_string(command.pad) + " is busy, try again", true);
+          break;
+        }
+        state.pads[pad].loaded = true;
+        state.pads[pad].has_slice = true;
+        state.pads[pad].slice_index = command.slice - 1;
+        state.pads[pad].name = slice_pad_name(command.slice);
+        set_message(
+            "slice " + std::to_string(command.slice) + " → pad " + std::to_string(command.pad),
+            false);
+        break;
+      }
+
+      case CommandKind::kQuit:
+        screen.Exit();
+        break;
+    }
+  };
+
   auto frame = ftxui::Renderer([&] {
     const ftxui::Dimensions size = ftxui::Terminal::Size();
     const auto columns = static_cast<std::size_t>(std::max(size.dimx, 1));
@@ -232,6 +439,59 @@ int run_app(const AppOptions& options) {
       static_cast<void>(engine.collect_garbage());
       return false;  // let the loop redraw
     }
+
+    // Any real keystroke clears the last message. Done BEFORE the command line
+    // sees the event, so a command with something to say overwrites this and a
+    // command with nothing to say leaves the line clean. The frame tick above
+    // returns first, which is what lets a message survive being looked at.
+    state.message.clear();
+    state.message_is_error = false;
+
+    // The prompt swallows EVERYTHING while it is up, pad keys included. There
+    // is a `c` in `:chop`, and a prompt that plays a drum as you type it is not
+    // a prompt.
+    if (state.command_active) {
+      if (event == ftxui::Event::Escape) {
+        state.command_active = false;
+        state.command_text.clear();
+        return true;
+      }
+      // Event::Return is LF, and a real terminal in raw mode sends CR -- FTXUI
+      // clears ICRNL, so the kernel does not translate it. Matching only Return
+      // is nonetheless correct: its own parser normalises "\r" to "\n" before
+      // the event is built (g_uniformize in terminal_input_parser.cpp), along
+      // with ^H to DEL for Backspace below. Checked, because it is exactly the
+      // kind of assumption an offscreen snapshot cannot fail on -- the PTY
+      // session sends a literal CR for this reason.
+      if (event == ftxui::Event::Return) {
+        const Command command = parse_command(state.command_text);
+        // Closed before running, not after: `:q` exits from inside execute(),
+        // and leaving the prompt up until it returns would draw one last frame
+        // with a stale `:` line in it.
+        state.command_active = false;
+        state.command_text.clear();
+        execute(command);
+        return true;
+      }
+      if (event == ftxui::Event::Backspace) {
+        pop_codepoint(state.command_text);
+        return true;
+      }
+      if (event.is_character()) {
+        state.command_text += event.character();
+        return true;
+      }
+      // Arrows, function keys, anything else: eaten rather than passed through.
+      // Nothing below this point should act on a keystroke aimed at the prompt.
+      return true;
+    }
+
+    if (event == ftxui::Event::Character(':')) {
+      state.command_active = true;
+      state.command_text.clear();
+      return true;
+    }
+
     // The pad map, before the view keys: `s` and `d` and `f` are pads, and a
     // player hitting them expects a sound rather than a scroll. The view keys
     // that survive (`h l + - f g G`) are the ones the map does not claim --
@@ -256,8 +516,7 @@ int run_app(const AppOptions& options) {
     }
     // ESCAPE, not `q`. The QWERTY pad map claims `q` for pad 1, and a sampler
     // where the top-left pad quits instead of making a sound would be a strange
-    // thing to ship. `:q` arrives with the command line and will be the one to
-    // reach for; escape is what there is until then.
+    // thing to ship. `:q` works too, for the muscle memory that expects it.
     if (event == ftxui::Event::Escape) {
       screen.Exit();
       return true;

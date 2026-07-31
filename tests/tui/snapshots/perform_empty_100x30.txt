@@ -27,4 +27,4 @@
 ╰──────────┴──────────┴──────────┴──────────╯ ╰────────────────────────────────────────────────────╯
                                                                                                     
                                                                                                     
-  perform   voices 0/16 · peak -inf dB         qwer.. pads · hl scroll · +- zoom · 0 fit · esc quit 
+  perform   voices 0/16 · peak -inf dB         qwer.. pads · hl scroll · +- zoom · : cmd · esc quit 

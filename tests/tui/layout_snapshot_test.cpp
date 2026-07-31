@@ -286,6 +286,86 @@ TEST_CASE("PERFORM renders at the 100x30 design grid", "[tui]") {
     fill_bins(state, 100);
     check_snapshot("perform_chopped_zoom_100x30", state, 100, 30);
   }
+
+  SECTION("the command line is up") {
+    tui::UiState state = playing_state(100);
+    state.command_active = true;
+    state.command_text = "chop transient";
+    check_snapshot("perform_command_100x30", state, 100, 30);
+  }
+
+  SECTION("a command answered") {
+    tui::UiState state = chopped_state(100);
+    state.message = "chop transient: 14 slices on 14 pads";
+    check_snapshot("perform_message_100x30", state, 100, 30);
+  }
+
+  SECTION("a command refused") {
+    tui::UiState state = playing_state(100);
+    state.message = "unknown command: frobnicate";
+    state.message_is_error = true;
+    check_snapshot("perform_error_100x30", state, 100, 30);
+  }
+}
+
+TEST_CASE("the prompt takes the mode line, and the answer takes it back", "[tui]") {
+  const std::string idle = strip_ansi(render_screen(playing_state(100), 100, 30).ToString());
+
+  tui::UiState prompting = playing_state(100);
+  prompting.command_active = true;
+  prompting.command_text = "chop gr";
+  const std::string prompt = strip_ansi(render_screen(prompting, 100, 30).ToString());
+
+  // What is being typed is on screen, and the keymap it displaced is not. A
+  // prompt sharing the line with a keymap is a prompt you cannot read.
+  CHECK(prompt.find(":chop gr") != std::string::npos);
+  CHECK(idle.find("esc quit") != std::string::npos);
+  CHECK(prompt.find("esc quit") == std::string::npos);
+  CHECK(prompt.find("voices") == std::string::npos);
+
+  tui::UiState answered = playing_state(100);
+  answered.message = "chop grid: 16 slices on 16 pads";
+  const std::string answer = strip_ansi(render_screen(answered, 100, 30).ToString());
+
+  CHECK(answer.find("16 slices on 16 pads") != std::string::npos);
+  CHECK(answer.find("esc quit") == std::string::npos);
+
+  // And the mode indicator survives both, so the line never stops saying where
+  // you are.
+  CHECK(prompt.find("perform") != std::string::npos);
+  CHECK(answer.find("perform") != std::string::npos);
+}
+
+TEST_CASE("a long command line keeps its end on screen", "[tui]") {
+  // Typing past the width has to keep showing the CURSOR END. Truncating the
+  // tail instead would look exactly like a prompt that had stopped accepting
+  // input, which is the one impression it must never give.
+  tui::UiState state = playing_state(60);
+  state.command_active = true;
+  state.command_text = std::string(60, 'a') + "slot assign 12 7";
+
+  const std::string painted = strip_ansi(render_screen(state, 60, 20).ToString());
+  CHECK(painted.find("slot assign 12 7") != std::string::npos);
+
+  // The head is gone -- 76 characters do not fit in 60 columns...
+  CHECK(painted.find(std::string(60, 'a')) == std::string::npos);
+  // ...but the colon is not, because it is pinned rather than scrolled.
+  CHECK(painted.find(":a") != std::string::npos);
+}
+
+TEST_CASE("a refusal does not look like a confirmation", "[tui]") {
+  // Same message, different flag. If these rendered identically then every
+  // refusal would read as a success, which is worse than saying nothing.
+  tui::UiState ok = playing_state(100);
+  ok.message = "chop transient: 14 slices on 14 pads";
+
+  tui::UiState bad = ok;
+  bad.message_is_error = true;
+
+  // Compared WITH the escape sequences: the difference is entirely colour and
+  // weight, so stripping them first would compare two identical strings and
+  // pass no matter what.
+  CHECK(render_screen(ok, 100, 30).ToString() != render_screen(bad, 100, 30).ToString());
 }
 
 TEST_CASE("slice markers replace the time ruler only when there are slices", "[tui]") {
