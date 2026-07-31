@@ -60,6 +60,84 @@ std::shared_ptr<const rt::Sample> Engine::pad_sample(std::uint8_t pad) const noe
   return config == nullptr ? nullptr : config->sample;
 }
 
+bool Engine::publish_sequencer(std::shared_ptr<const rt::SequencerState> state) noexcept {
+  if (state == nullptr) {
+    return false;
+  }
+  // Kept before the publish, so a refusal leaves the control-side view matching
+  // what the audio thread actually has -- same ordering as publish_pad_config.
+  std::shared_ptr<const rt::SequencerState> keep = state;
+  if (!m_sequencer_handoff.try_publish(std::move(state))) {
+    return false;
+  }
+  m_published_sequencer = std::move(keep);
+  return true;
+}
+
+std::shared_ptr<const rt::SequencerState> Engine::sequencer_state() const noexcept {
+  return m_published_sequencer;
+}
+
+bool Engine::send_transport(const rt::TransportCommand& command) noexcept {
+  return m_transport_commands.try_push(command);
+}
+
+void Engine::adopt_sequencer() noexcept {
+  // The same shape as adopt_pad_configs(), and a member rather than a local for
+  // the same reason: a displaced state the garbage ring refuses must survive to
+  // the next block instead of dying on this thread's stack.
+  if (m_retiring_sequencer != nullptr && !m_garbage.retire(std::move(m_retiring_sequencer))) {
+    return;
+  }
+
+  while (m_sequencer_handoff.try_take(m_retiring_sequencer)) {
+    m_retiring_sequencer.swap(m_sequencer);
+    if (!m_garbage.retire(std::move(m_retiring_sequencer))) {
+      return;  // hold it and try again next block
+    }
+  }
+}
+
+std::uint32_t Engine::current_step_word() const noexcept {
+  if (m_sequencer == nullptr) {
+    return 0;
+  }
+  const rt::SequencerState& state = *m_sequencer;
+  const std::uint8_t index =
+      std::min(state.selected_pattern, static_cast<std::uint8_t>(rt::kMaxPatterns - 1));
+  const std::size_t length = rt::pattern_length(state.patterns[index]);
+
+  // Wrapped here rather than in the UI, because this is where both the position
+  // and the tempo it was rendered at are known. A UI recomputing it would use
+  // whatever tempo it holds now, which after a tempo change is not the one those
+  // frames were played at.
+  const std::uint64_t absolute =
+      rt::step_index_at(m_transport.position_frames, m_config.sample_rate, state.bpm_x100);
+  const auto step = static_cast<std::uint32_t>(absolute % length) & kTransportStepMask;
+  return (static_cast<std::uint32_t>(index) << kTransportPatternShift) | step;
+}
+
+void Engine::drain_transport() noexcept {
+  rt::TransportCommand command{};
+  while (m_transport_commands.try_pop(command)) {
+    switch (command.kind) {
+      case rt::TransportCommandKind::kStop:
+        m_transport.playing = false;
+        break;
+      case rt::TransportCommandKind::kPlay:
+        m_transport.playing = true;
+        break;
+      case rt::TransportCommandKind::kSeek:
+        // Position only. Seeking while stopped must not start playback, and
+        // seeking while playing must not stop it -- "play from the top" is a
+        // seek followed by a play, which is why these are separate kinds rather
+        // than one command with a flag nobody remembers the meaning of.
+        m_transport.position_frames = command.position_frames;
+        break;
+    }
+  }
+}
+
 void Engine::adopt_pad_configs() noexcept {
   // A handle held over from a previous block, because the garbage ring was full
   // when we tried to retire it. Nothing else can proceed until it is gone: the
@@ -120,6 +198,12 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
   // Reconfigurations before triggers, so a pad assigned and played in the same
   // UI frame sounds the new material rather than one block of the old.
   adopt_pad_configs();
+  adopt_sequencer();
+
+  // Before the position advances, so a seek lands on this block rather than one
+  // block late -- which for "play from the top" is the difference between the
+  // first step sounding and being skipped.
+  drain_transport();
 
   // Drain first, so a hit that arrived during the previous block sounds in this
   // one, placed inside it by PadEvent::frame_offset.
@@ -178,6 +262,13 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
 
   m_voices.render_add(channels, num_frames);
 
+  // The transport advances by exactly the block it just rendered, whatever that
+  // block was. Nothing else tracks time: every step boundary is derived from
+  // this number, so there is no second clock to disagree with it.
+  if (m_transport.playing) {
+    m_transport.position_frames += num_frames;
+  }
+
   // Before reclaim(), which clears finished voices: a voice that ended inside
   // this block still has a position and a level worth showing for one frame.
   publish_telemetry(channels, num_frames);
@@ -202,6 +293,14 @@ void Engine::publish_telemetry(std::span<float* const> channels, std::size_t num
   // device negotiated.
   const auto elapsed = static_cast<float>(num_frames) / static_cast<float>(m_config.sample_rate);
   const float fall = elapsed / kPeakFallSeconds;
+
+  // Transport, packed. The position is masked rather than asserted: 63 bits is
+  // six million years at 48 kHz, so the mask is a guarantee about the encoding
+  // rather than a limit anyone reaches.
+  const std::uint64_t position = m_transport.position_frames & kTransportFrameMask;
+  m_published.transport.store(m_transport.playing ? (position | kTransportPlayingBit) : position,
+                              std::memory_order_relaxed);
+  m_published.transport_step.store(current_step_word(), std::memory_order_relaxed);
 
   std::array<float, rt::kNumPads> pad_peak{};
   std::uint64_t newest_sequence = 0;
@@ -271,6 +370,14 @@ Telemetry Engine::telemetry() const noexcept {
     snapshot.playhead_frame = playhead & kPlayheadFrameMask;
     snapshot.playhead_pad = static_cast<std::uint8_t>(playhead >> kPlayheadPadShift);
   }
+
+  const std::uint64_t transport = m_published.transport.load(std::memory_order_relaxed);
+  snapshot.transport_playing = (transport & kTransportPlayingBit) != 0;
+  snapshot.transport_frames = transport & kTransportFrameMask;
+
+  const std::uint32_t step = m_published.transport_step.load(std::memory_order_relaxed);
+  snapshot.transport_step = step & kTransportStepMask;
+  snapshot.transport_pattern = static_cast<std::uint8_t>(step >> kTransportPatternShift);
 
   snapshot.master_peak = m_published.master_peak.load(std::memory_order_relaxed);
   const auto rate = static_cast<float>(m_config.sample_rate == 0 ? 1U : m_config.sample_rate);

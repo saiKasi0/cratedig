@@ -11,6 +11,7 @@
 #include "rt/pad_event.hpp"
 #include "rt/rt_scope.hpp"
 #include "rt/sample.hpp"
+#include "rt/sequencer.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -267,6 +268,88 @@ TEST_CASE("Engine::render allocates nothing while pads are being reassigned", "[
   CHECK(collected >= kConfigCount - rt::kNumPads);
   CHECK(eng.garbage_overflows() == 0);
   CHECK(eng.rejected_pad_configs() == 0);
+}
+
+TEST_CASE("Engine::render allocates nothing while the sequencer is republished", "[integration]") {
+  // The sequencer is new audio-thread state, published through the same handoff
+  // protocol as pad configs, so it inherits both halves of the same obligation:
+  // nothing allocated in the callback, and nothing destroyed there either.
+  //
+  // Worth its own case rather than folding into the pad one above, because the
+  // failure modes differ. A SequencerState is ~8 KB where a PadConfig is a
+  // handful of words, so a copy that slipped onto the audio thread would be an
+  // 8 KB memcpy AND an allocation -- loud here, and easy to miss in a test whose
+  // objects are small enough to fit anywhere.
+  if constexpr (!rt::kAllocationDetectionEnabled) {
+    SKIP("allocation detection is compiled out (TSan build) -- see rt_scope.hpp");
+  }
+
+  // Before the engine, for the reason spelled out in the pad case: the engine is
+  // destroyed first and runs the deleters, so these must outlive it.
+  constexpr std::size_t kStateCount = 32;
+  std::size_t destroyed_total = 0;
+  std::size_t destroyed_in_rt_scope = 0;
+
+  const engine::Engine::Config config{
+      .sample_rate = 48'000, .num_channels = kChannels, .max_block_frames = kMaxBlock, .seed = 0};
+  engine::Engine eng{config};
+
+  std::vector<std::vector<float>> storage(kChannels, std::vector<float>(kMaxBlock, 0.0F));
+  std::vector<float*> channels(kChannels);
+  for (std::uint16_t i = 0; i < kChannels; ++i) {
+    channels[i] = storage[i].data();
+  }
+
+  const HandlerSwap swap;
+  std::size_t collected = 0;
+  std::size_t adopted = 0;
+  for (std::size_t index = 0; index < kStateCount; ++index) {
+    // Built on the control thread, where allocating 8 KB is exactly what is
+    // supposed to happen.
+    auto* built = new rt::SequencerState{};  // NOLINT(cppcoreguidelines-owning-memory)
+    built->bpm_x100 = static_cast<std::uint32_t>(9'000 + (index * 137));
+    built->selected_pattern = static_cast<std::uint8_t>(index % rt::kMaxPatterns);
+    built->patterns[built->selected_pattern].steps[index % rt::kMaxSteps][0].on = true;
+
+    std::shared_ptr<const rt::SequencerState> state{
+        built, [&destroyed_total, &destroyed_in_rt_scope](const rt::SequencerState* victim) {
+          ++destroyed_total;
+          if (rt::in_rt_scope()) {
+            ++destroyed_in_rt_scope;
+          }
+          delete victim;  // NOLINT(cppcoreguidelines-owning-memory)
+        }};
+
+    if (eng.publish_sequencer(std::move(state))) {
+      ++adopted;
+    }
+    static_cast<void>(eng.send_transport(rt::TransportCommand{
+        .kind = index % 4 == 0 ? rt::TransportCommandKind::kPlay : rt::TransportCommandKind::kSeek,
+        .position_frames = index * 1'000}));
+
+    eng.render(std::span<float* const>{channels}, 128);
+    eng.render(std::span<float* const>{channels}, 128);
+    collected += eng.collect_garbage();
+  }
+
+  // The engine still holds the newest state, so drop the control-side reference
+  // and collect once more -- otherwise the last one is destroyed at scope exit
+  // and destroyed_total is short by one for no interesting reason.
+  collected += eng.collect_garbage();
+
+  CHECK(HandlerSwap::count() == 0);
+  CHECK(adopted == kStateCount);
+  CHECK(destroyed_in_rt_scope == 0);
+
+  // The anti-vacuity guard: only the first publish displaces a null, so every
+  // other one must have died somewhere by now.
+  CHECK(destroyed_total >= kStateCount - 2);
+
+  // And they went through the janitor rather than being freed somewhere else --
+  // which is the only route that keeps the deleter off the audio thread.
+  CHECK(collected >= kStateCount - 2);
+  CHECK(eng.garbage_overflows() == 0);
+  CHECK(eng.rejected_sequencer_states() == 0);
 }
 
 TEST_CASE("the RT guard is armed during the render test", "[integration]") {

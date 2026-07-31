@@ -568,3 +568,132 @@ TEST_CASE("Engine output with offset triggers is invariant to block size", "[uni
   CHECK(render_with(small) == reference);
   CHECK(render_with(mixed) == reference);
 }
+
+// --- transport and sequencer publication ------------------------------------
+
+namespace {
+
+// Renders `frames` and throws the audio away. Several transport cases care only
+// about how far the position moved.
+void spin(engine::Engine& eng, std::size_t frames, std::size_t block = 256) {
+  RenderCapture capture{frames, kChannels};
+  const std::array<std::size_t, 1> blocks{block};
+  capture.render_in_blocks(eng, blocks);
+}
+
+}  // namespace
+
+TEST_CASE("Engine advances the transport only while playing", "[unit]") {
+  engine::Engine eng{test_config()};
+
+  // Stopped is the starting state, and rendering must not move the position --
+  // otherwise every session would begin mid-pattern.
+  spin(eng, 4'096);
+  CHECK(eng.telemetry().transport_frames == 0);
+  CHECK_FALSE(eng.telemetry().transport_playing);
+
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+  spin(eng, 4'096);
+  CHECK(eng.telemetry().transport_playing);
+  CHECK(eng.telemetry().transport_frames == 4'096);
+
+  // Exactly the frames rendered, not approximately: the position IS the clock,
+  // and every step boundary is derived from it.
+  spin(eng, 1'000);
+  CHECK(eng.telemetry().transport_frames == 5'096);
+
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kStop}));
+  spin(eng, 4'096);
+  CHECK_FALSE(eng.telemetry().transport_playing);
+  CHECK(eng.telemetry().transport_frames == 5'096);  // frozen where it stopped
+}
+
+TEST_CASE("Engine transport position is invariant to block size", "[unit]") {
+  // The position must be a property of how many frames were rendered, not of how
+  // they were divided up -- the same rule the audio itself obeys, and the reason
+  // the sequencer can be reproduced offline.
+  const auto position_after = [](std::size_t block) {
+    engine::Engine eng{test_config()};
+    REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+    spin(eng, 12'288, block);
+    return eng.telemetry().transport_frames;
+  };
+
+  CHECK(position_after(2'048) == 12'288);
+  CHECK(position_after(64) == 12'288);
+  CHECK(position_after(333) == 12'288);
+}
+
+TEST_CASE("Engine seeks without starting or stopping", "[unit]") {
+  // Seek is position only. "Play from the top" is a seek then a play, which is
+  // why they are separate commands rather than one with a flag whose meaning
+  // nobody remembers.
+  engine::Engine eng{test_config()};
+
+  REQUIRE(eng.send_transport(
+      rt::TransportCommand{.kind = rt::TransportCommandKind::kSeek, .position_frames = 96'000}));
+  spin(eng, 512);
+  CHECK(eng.telemetry().transport_frames == 96'000);  // seeking did not start it
+  CHECK_FALSE(eng.telemetry().transport_playing);
+
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+  spin(eng, 512);
+  CHECK(eng.telemetry().transport_frames == 96'512);
+
+  // And seeking while playing keeps it playing.
+  REQUIRE(eng.send_transport(
+      rt::TransportCommand{.kind = rt::TransportCommandKind::kSeek, .position_frames = 0}));
+  spin(eng, 256);
+  CHECK(eng.telemetry().transport_playing);
+  CHECK(eng.telemetry().transport_frames == 256);
+}
+
+TEST_CASE("Engine adopts a published sequencer state", "[unit]") {
+  engine::Engine eng{test_config()};
+
+  auto state = std::make_shared<rt::SequencerState>();
+  state->bpm_x100 = 12'000;  // 120 bpm, 6000 frames per step
+  state->selected_pattern = 3;
+  state->patterns[3].length = 8;
+  REQUIRE(eng.publish_sequencer(state));
+
+  // The control-side view is available immediately, deliberately one block ahead
+  // of what the audio thread has -- the same distinction pad_config() draws.
+  REQUIRE(eng.sequencer_state() != nullptr);
+  CHECK(eng.sequencer_state()->selected_pattern == 3);
+
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  // Six steps in: 6 * 6000 = 36000 frames. With a length of 8 that wraps to 6.
+  spin(eng, 36'000 + 10);
+  const engine::Telemetry telemetry = eng.telemetry();
+  CHECK(telemetry.transport_pattern == 3);
+  CHECK(telemetry.transport_step == 6);
+
+  // Ten steps in wraps: 10 % 8 == 2.
+  spin(eng, 24'000);
+  CHECK(eng.telemetry().transport_step == 2);
+  CHECK(eng.rejected_sequencer_states() == 0);
+}
+
+TEST_CASE("Engine reports a refused sequencer publish", "[unit]") {
+  // Nothing renders here, so nothing drains the ring -- the same situation
+  // --no-audio puts the program in. The refusal has to be visible, because the
+  // control-side view must not claim an edit the audio thread never received.
+  engine::Engine eng{test_config()};
+
+  std::size_t accepted = 0;
+  for (std::size_t attempt = 0; attempt < engine::Engine::kSequencerHandoffCapacity + 4;
+       ++attempt) {
+    if (eng.publish_sequencer(std::make_shared<rt::SequencerState>())) {
+      ++accepted;
+    }
+  }
+  CHECK(accepted == engine::Engine::kSequencerHandoffCapacity);
+  CHECK(eng.rejected_sequencer_states() == 4);
+
+  // And a null state is refused without being counted as an overload: it carries
+  // nothing to act on, so it is a caller error rather than back-pressure.
+  CHECK_FALSE(eng.publish_sequencer(nullptr));
+  CHECK(eng.rejected_sequencer_states() == 4);
+}

@@ -30,6 +30,7 @@ add_executable(
   unit/result_test.cpp
   unit/rt_scope_test.cpp
   unit/sample_test.cpp
+  unit/sequencer_test.cpp
   unit/spsc_ring_test.cpp
   unit/voice_pool_test.cpp
   unit/wave_view_test.cpp

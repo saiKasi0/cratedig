@@ -7,6 +7,7 @@
 #include "rt/pad_config.hpp"
 #include "rt/pad_event.hpp"
 #include "rt/sample.hpp"
+#include "rt/sequencer.hpp"
 #include "rt/spsc_ring.hpp"
 #include "rt/voice_pool.hpp"
 
@@ -63,6 +64,18 @@ struct Telemetry {
   // Per-pad trigger acknowledgement. Indexed by pad. See PadGlow above for why
   // this is not the same thing as pad_peak.
   std::array<PadGlow, rt::kNumPads> pad_glow{};
+
+  // Where the transport is, as the audio thread last left it.
+  //
+  // `step` is the position expressed in steps of the pattern that was playing,
+  // already wrapped to its length -- computed on the audio thread, which is the
+  // only place that knows both the position and the tempo it was rendered at.
+  // The UI recomputing it from `transport_frames` would be reading the tempo it
+  // has now, not the one those frames were rendered with.
+  bool transport_playing = false;
+  std::uint64_t transport_frames = 0;
+  std::uint32_t transport_step = 0;
+  std::uint8_t transport_pattern = 0;
 };
 
 // The engine facade. Everything audible eventually happens behind render().
@@ -106,6 +119,17 @@ class Engine {
   // that mode is. publish_pad_config() reports the refusal, the control-side
   // view stays truthful, and the interface says so on the mode line.
   static constexpr std::size_t kPadHandoffCapacity = 32;
+
+  // Sequencer states in flight, control -> audio. Far smaller than the pad ring
+  // because there is exactly one of these objects rather than sixteen: a step
+  // toggle publishes one state, and a held key repeating at the terminal's rate
+  // cannot outrun a 5 ms block by more than a couple.
+  static constexpr std::size_t kSequencerHandoffCapacity = 8;
+
+  // Transport commands in flight. Play, stop and seek arrive at human speed; the
+  // depth is here so a burst during a stalled stream is dropped visibly rather
+  // than blocking the UI.
+  static constexpr std::size_t kTransportRingCapacity = 32;
 
   struct Config {
     std::uint32_t sample_rate = 48'000;
@@ -167,6 +191,24 @@ class Engine {
   // into the UI; silently succeeding would hide a real overload.
   [[nodiscard]] bool trigger_pad(const rt::PadEvent& event) noexcept;
 
+  // CONTROL THREAD, AT ANY TIME. Replaces the whole sequencer state.
+  //
+  // The same protocol as publish_pad_config() and for the same reason: the state
+  // is immutable once the audio thread can see it, so editing one step means
+  // building a new state. Returns false if the ring is full, in which case THE
+  // CALLER STILL OWNS `state` and the sequencer is unchanged.
+  [[nodiscard]] bool publish_sequencer(std::shared_ptr<const rt::SequencerState> state) noexcept;
+
+  // CONTROL THREAD. What this thread has most recently published -- not
+  // necessarily what the audio thread is using yet. Same one-block-ahead
+  // distinction as pad_config(), and honest for the same reason.
+  [[nodiscard]] std::shared_ptr<const rt::SequencerState> sequencer_state() const noexcept;
+
+  // CONTROL THREAD. Start, stop or seek the transport.
+  //
+  // Returns false if the ring is full, in which case the command did not happen.
+  [[nodiscard]] bool send_transport(const rt::TransportCommand& command) noexcept;
+
   // REAL-TIME. Called from the audio callback; opens its own RT_SCOPE.
   //
   // channels is a span of per-channel pointers (the CLAUDE.md `float** out`
@@ -221,6 +263,13 @@ class Engine {
   // publish_pad_config() calls refused because the handoff ring was full. A
   // non-zero value means pad edits were rejected — either nothing is rendering,
   // so the ring never drains, or something is republishing in a loop.
+  // publish_sequencer() calls refused because the ring was full. Same meaning as
+  // rejected_pad_configs(): either nothing is rendering, or something is
+  // republishing in a loop.
+  [[nodiscard]] std::uint64_t rejected_sequencer_states() const noexcept {
+    return m_sequencer_handoff.rejected_count();
+  }
+
   [[nodiscard]] std::uint64_t rejected_pad_configs() const noexcept {
     return m_pad_handoff.rejected_count();
   }
@@ -267,11 +316,37 @@ class Engine {
     // constructor rather than here, because a default-constructed
     // std::atomic<uint32_t> is zero and zero means "hit just now at velocity 0".
     std::array<std::atomic<std::uint32_t>, rt::kNumPads> pad_glow{};
+
+    // Transport, as one packed word for the same reason the playhead is one:
+    // the UI must never pair a position from one block with a playing flag from
+    // another and draw a stopped transport at a moving position. Playing in the
+    // top bit, frames in the low 63 -- 6 million years at 48 kHz.
+    std::atomic<std::uint64_t> transport{0};
+
+    // Step and pattern, packed together for the same reason again: they are read
+    // as a pair ("step 7 of pattern 2") and a torn read would name a step that
+    // pattern does not have. Pattern in the top 8 bits, step in the low 24.
+    std::atomic<std::uint32_t> transport_step{0};
   };
+
+  static constexpr std::uint64_t kTransportPlayingBit = std::uint64_t{1} << 63U;
+  static constexpr std::uint64_t kTransportFrameMask = kTransportPlayingBit - 1;
+  static constexpr std::uint32_t kTransportPatternShift = 24;
+  static constexpr std::uint32_t kTransportStepMask =
+      (std::uint32_t{1} << kTransportPatternShift) - 1;
 
   // AUDIO THREAD, at the top of every block. Adopts whatever the control thread
   // has published and retires what it displaced.
   void adopt_pad_configs() noexcept;
+  void adopt_sequencer() noexcept;
+
+  // AUDIO THREAD, at the top of every block, before the position advances.
+  void drain_transport() noexcept;
+
+  // AUDIO THREAD. Pattern and step packed for publication. Zero when no
+  // sequencer state has been published, which reads as step 0 of pattern 0 and
+  // is what an untouched sequencer should look like.
+  [[nodiscard]] std::uint32_t current_step_word() const noexcept;
 
   // AUDIO THREAD, once per block, after rendering.
   void publish_telemetry(std::span<float* const> channels, std::size_t num_frames) noexcept;
@@ -294,8 +369,17 @@ class Engine {
   // failure mode is "one block late", not "freed in the callback".
   std::shared_ptr<const rt::PadConfig> m_retiring;
 
+  // AUDIO THREAD ONLY. What the sequencer is playing, and where the transport
+  // is. Null until something is published, which is the normal state for a
+  // session that never touches the sequencer.
+  std::shared_ptr<const rt::SequencerState> m_sequencer;
+  std::shared_ptr<const rt::SequencerState> m_retiring_sequencer;
+  rt::Transport m_transport;
+
   rt::SpscRing<rt::PadEvent, kEventRingCapacity> m_events;
+  rt::SpscRing<rt::TransportCommand, kTransportRingCapacity> m_transport_commands;
   rt::HandoffRing<rt::PadConfig, kPadHandoffCapacity> m_pad_handoff;
+  rt::HandoffRing<rt::SequencerState, kSequencerHandoffCapacity> m_sequencer_handoff;
   rt::VoicePool<kMaxVoices> m_voices;
   rt::GarbageRing<kGarbageRingCapacity> m_garbage;
 
@@ -303,6 +387,7 @@ class Engine {
   // answer without reading the audio thread's table. Not a cache of m_pads — it
   // is deliberately one block *ahead* of it.
   std::array<std::shared_ptr<const rt::PadConfig>, rt::kNumPads> m_published_pads{};
+  std::shared_ptr<const rt::SequencerState> m_published_sequencer;
 
   // Written by the control thread only, and read by it -- no cross-thread access,
   // so no atomic.
