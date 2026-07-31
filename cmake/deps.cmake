@@ -183,10 +183,34 @@ foreach(_cratedig_dep IN ITEMS rtaudio samplerate screen dom component)
 endforeach()
 
 # -- M3: onset detection -----------------------------------------------------------
-# PFFFT (FFTPACK license) — no tagged releases; pin a commit hash tarball
-# FetchContent_Declare(pffft
-#   URL https://bitbucket.org/jpommier/pffft/get/<commit>.tar.gz
-#   URL_HASH SHA256=<pin at activation> SYSTEM EXCLUDE_FROM_ALL)
+#
+# PFFFT (FFTPACK license — BSD-style, see docs/LICENSING.md and NOTICE).
+#
+# Upstream has no tagged releases, so the URL names a COMMIT hash rather than a
+# branch: bitbucket serves whatever a branch currently points at, and a
+# dependency that changed underneath us would change onset results without
+# changing this repository. Verified byte-stable across two downloads, which is
+# what makes URL_HASH usable here at all.
+FetchContent_Declare(
+  pffft
+  URL https://bitbucket.org/jpommier/pffft/get/09796885cd5b.tar.gz
+  URL_HASH SHA256=fdc80563de8c31d6380886bc1ba0ffb897abde58611707ac94eb8ed8ab850cbb
+  SYSTEM EXCLUDE_FROM_ALL)
+FetchContent_MakeAvailable(pffft)
+
+# Upstream ships pffft.c/h and fftpack.c/h with NO build system of any kind, so
+# the target is ours to declare. Only pffft.c is compiled: fftpack.c is the
+# original Fortran-derived double-precision code, used by upstream's own
+# benchmark for comparison and not by the library.
+add_library(pffft STATIC ${pffft_SOURCE_DIR}/pffft.c)
+target_include_directories(pffft SYSTEM PUBLIC ${pffft_SOURCE_DIR})
+
+# Third-party C, held to its own standards rather than to ours -- the same
+# treatment RtAudio and libsamplerate get. -Werror is ours to satisfy, not
+# theirs, and pffft.c is 3000 lines of deliberate pointer arithmetic that would
+# light up every warning in our set.
+target_compile_options(pffft PRIVATE -w)
+set_target_properties(pffft PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # -- M7: scripting -----------------------------------------------------------------
 # Lua 5.4 (MIT) + sol2 (MIT, header-only)

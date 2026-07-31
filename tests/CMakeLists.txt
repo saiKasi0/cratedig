@@ -15,7 +15,9 @@ add_executable(
   unit/engine_render_test.cpp
   unit/envelope_test.cpp
   unit/engine_telemetry_test.cpp
+  unit/fft_test.cpp
   unit/fixture_decode_test.cpp
+  unit/window_test.cpp
   unit/garbage_ring_test.cpp
   unit/handoff_ring_test.cpp
   unit/interpolator_test.cpp
