@@ -9,6 +9,7 @@
 #include "rt/pad_event.hpp"
 #include "rt/sample.hpp"
 #include "tui/command.hpp"
+#include "tui/keys.hpp"
 #include "tui/render.hpp"
 #include "tui/ui_state.hpp"
 #include "tui/waveform.hpp"
@@ -29,7 +30,9 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -59,13 +62,88 @@ constexpr std::uint8_t kPad = 0;
 constexpr std::array<char, rt::kNumPads> kPadKeys{'q', 'w', 'e', 'r', 'a', 's', 'd', 'f',
                                                   'z', 'x', 'c', 'v', '1', '2', '3', '4'};
 
-[[nodiscard]] int pad_for_key(char key) noexcept {
+// The keys that are not characters, named. Their codes are the legacy control
+// bytes, which is what the Kitty protocol reports for them and what FTXUI's own
+// events are built from -- so one set of names covers both paths.
+constexpr std::uint32_t kTab = 9;
+constexpr std::uint32_t kReturn = 13;
+constexpr std::uint32_t kEscape = 27;
+constexpr std::uint32_t kSpace = 32;
+constexpr std::uint32_t kBackspace = 127;
+
+// Which pad a keystroke plays, or -1. Space is pad 1 alongside `q`.
+[[nodiscard]] int pad_for_code(std::uint32_t code) noexcept {
+  if (code == kSpace) {
+    return kPad;
+  }
+  if (code > 0x7F) {
+    return -1;
+  }
   for (std::size_t index = 0; index < kPadKeys.size(); ++index) {
-    if (kPadKeys[index] == key) {
+    if (static_cast<std::uint32_t>(kPadKeys[index]) == code) {
       return static_cast<int>(index);
     }
   }
   return -1;
+}
+
+// What a keystroke contributes to the command line, or nothing.
+//
+// Control codes are excluded by hand rather than by asking a locale: the
+// command line has to behave the same in every environment, and a Tab or a
+// Backspace appended as a literal byte would be a character the prompt cannot
+// draw and Backspace cannot cleanly remove.
+[[nodiscard]] std::string printable(std::uint32_t code) {
+  if (code < kSpace || code == kBackspace || code >= kFirstFunctionalKey) {
+    return {};
+  }
+  return utf8_encode(code);
+}
+
+// FTXUI's own events, in the vocabulary the bindings are written in.
+//
+// Always kPress, because that is all this path can know -- a terminal without
+// the protocol never says a key was released. Note that `key` is the TYPED
+// character here rather than the unshifted one, which is why the bindings use
+// character() and not key: it is the only field both paths fill in the same
+// way.
+[[nodiscard]] std::optional<KeyEvent> legacy_key(const ftxui::Event& event) {
+  if (event.is_character()) {
+    const std::uint32_t code = utf8_decode_first(event.character());
+    if (code == 0) {
+      return std::nullopt;
+    }
+    return KeyEvent{.key = code, .text = code};
+  }
+  if (event == ftxui::Event::Escape) {
+    return KeyEvent{.key = kEscape};
+  }
+  if (event == ftxui::Event::Return) {
+    return KeyEvent{.key = kReturn};
+  }
+  if (event == ftxui::Event::Backspace) {
+    return KeyEvent{.key = kBackspace};
+  }
+  if (event == ftxui::Event::Tab) {
+    return KeyEvent{.key = kTab};
+  }
+  if (event == ftxui::Event::ArrowLeft) {
+    return KeyEvent{.key = kKeyArrowLeft};
+  }
+  if (event == ftxui::Event::ArrowRight) {
+    return KeyEvent{.key = kKeyArrowRight};
+  }
+  return std::nullopt;  // mouse, resize, a sequence we do not bind
+}
+
+// Writes straight to the terminal, around FTXUI.
+//
+// The negotiation is a conversation with the terminal rather than something to
+// draw, and FTXUI has no channel for it. Unbuffered and unchecked: a terminal
+// that will not take four bytes has already gone away, and there is nothing
+// useful to do about it from inside the event loop.
+void write_terminal(std::string_view bytes) {
+  static_cast<void>(::write(STDOUT_FILENO, bytes.data(), bytes.size()));
 }
 
 // A step is an eighth of the view, so scrolling feels the same at every zoom --
@@ -282,9 +360,32 @@ int run_app(const AppOptions& options) {
   // still means something.
   ingest::SliceSet slices;
 
+  // The keyboard negotiation, in two bits. `asked` says the query has gone out;
+  // `active` says a terminal answered it and the flags are pushed. There is no
+  // third state to wait in: a terminal that does not implement the protocol
+  // never replies, so silence is the answer and no timeout is needed.
+  bool kitty_asked = false;
+  bool kitty_active = false;
+
   auto set_message = [&state](std::string text, bool is_error) {
     state.message = std::move(text);
     state.message_is_error = is_error;
+  };
+
+  // Leaves the keyboard as we found it, on the way out.
+  //
+  // Sent from INSIDE the loop, while the alternate screen is still up. The
+  // protocol's flag stack is per-screen, so popping after FTXUI has switched
+  // back would pop the MAIN screen's stack -- state belonging to the shell we
+  // came from. If this never runs (a crash, a signal), leaving the alternate
+  // screen discards our stack anyway; that is what makes the feature safe to
+  // ship, and this is only the tidy path.
+  auto quit = [&] {
+    if (kitty_active) {
+      write_terminal(kKittyPop);
+      kitty_active = false;
+    }
+    screen.Exit();
   };
 
   // Runs a parsed command. Everything it touches -- the engine's handoff ring,
@@ -392,8 +493,58 @@ int run_app(const AppOptions& options) {
         break;
       }
 
+      case CommandKind::kPadGate:
+      case CommandKind::kPadOneShot: {
+        const bool gate = command.kind == CommandKind::kPadGate;
+        const rt::TriggerMode mode = gate ? rt::TriggerMode::kGate : rt::TriggerMode::kOneShot;
+        if (command.pad > rt::kNumPads) {
+          set_message("no pad " + std::to_string(command.pad) + " (have " +
+                          std::to_string(rt::kNumPads) + ")",
+                      true);
+          break;
+        }
+
+        // Rebuilt from the CURRENT config rather than from scratch, so changing
+        // the trigger mode does not quietly discard a slice range someone spent
+        // a minute nudging. A pad with nothing on it is skipped: publishing a
+        // gate config for an empty pad would be a change with no effect and one
+        // more thing in the ring.
+        const std::size_t first = command.pad > 0 ? command.pad - 1 : 0;
+        const std::size_t last = command.pad > 0 ? command.pad : rt::kNumPads;
+        std::size_t changed = 0;
+        for (std::size_t pad = first; pad < last; ++pad) {
+          const std::shared_ptr<const rt::PadConfig> current =
+              engine.pad_config(static_cast<std::uint8_t>(pad));
+          if (current == nullptr || current->sample == nullptr) {
+            continue;
+          }
+          rt::PadConfig next = *current;
+          next.trigger = mode;
+          if (engine.publish_pad_config(std::make_shared<const rt::PadConfig>(std::move(next)))) {
+            ++changed;
+          }
+        }
+
+        const std::string what = gate ? "gate" : "one-shot";
+        if (changed == 0) {
+          set_message(what + ": no pads loaded", true);
+          break;
+        }
+        std::string said =
+            what + ": " + std::to_string(changed) + " pad" + (changed == 1 ? "" : "s");
+        // Said out loud rather than left to be discovered. A gate pad on a
+        // terminal with no key release plays through to the end like a
+        // one-shot, which is the right behaviour and a baffling one to meet
+        // without warning.
+        if (gate && !kitty_active) {
+          said += " — but this terminal reports no key release, so they play through";
+        }
+        set_message(said, gate && !kitty_active);
+        break;
+      }
+
       case CommandKind::kQuit:
-        screen.Exit();
+        quit();
         break;
     }
   };
@@ -431,39 +582,43 @@ int run_app(const AppOptions& options) {
     return render(state, columns, rows);
   });
 
-  auto root = ftxui::CatchEvent(frame, [&](const ftxui::Event& event) {
-    // The janitor tick. The engine spawns no threads of its own, so somebody has
-    // to call collect_garbage(); doing it on the frame tick keeps the whole
-    // design single-writer and costs nothing when there is nothing to collect.
-    if (event == ftxui::Event::Custom) {
-      static_cast<void>(engine.collect_garbage());
-      return false;  // let the loop redraw
-    }
+  // THE BINDINGS, WRITTEN ONCE.
+  //
+  // Both input paths -- FTXUI's own events and the CSI-u decoder -- turn a
+  // keystroke into a KeyEvent and end up here. That is the whole reason
+  // tui::KeyEvent exists: with the Kitty protocol enabled, Event::Character
+  // never fires again, so a second copy of the bindings would be a second copy
+  // that drifts.
+  //
+  // Bindings compare key.character(), not key.key. The protocol reports the
+  // UNSHIFTED key with the typed text alongside; FTXUI reports the text as the
+  // key. character() is the one value both paths agree on.
+  auto handle_key = [&](const KeyEvent& key) -> bool {
+    const std::uint32_t code = key.character();
+    const bool press = key.action == KeyAction::kPress;
+    const bool typing = press || key.action == KeyAction::kRepeat;
 
-    // Any real keystroke clears the last message. Done BEFORE the command line
-    // sees the event, so a command with something to say overwrites this and a
-    // command with nothing to say leaves the line clean. The frame tick above
-    // returns first, which is what lets a message survive being looked at.
-    state.message.clear();
-    state.message_is_error = false;
+    // A message is cleared by the next PRESS. Not by a release: in Kitty mode
+    // the release of the Return that ran a command arrives a moment after it,
+    // and clearing on that would make every answer flash and vanish.
+    if (press) {
+      state.message.clear();
+      state.message_is_error = false;
+    }
 
     // The prompt swallows EVERYTHING while it is up, pad keys included. There
     // is a `c` in `:chop`, and a prompt that plays a drum as you type it is not
     // a prompt.
     if (state.command_active) {
-      if (event == ftxui::Event::Escape) {
+      if (!typing) {
+        return true;
+      }
+      if (code == kEscape) {
         state.command_active = false;
         state.command_text.clear();
         return true;
       }
-      // Event::Return is LF, and a real terminal in raw mode sends CR -- FTXUI
-      // clears ICRNL, so the kernel does not translate it. Matching only Return
-      // is nonetheless correct: its own parser normalises "\r" to "\n" before
-      // the event is built (g_uniformize in terminal_input_parser.cpp), along
-      // with ^H to DEL for Backspace below. Checked, because it is exactly the
-      // kind of assumption an offscreen snapshot cannot fail on -- the PTY
-      // session sends a literal CR for this reason.
-      if (event == ftxui::Event::Return) {
+      if (code == kReturn) {
         const Command command = parse_command(state.command_text);
         // Closed before running, not after: `:q` exits from inside execute(),
         // and leaving the prompt up until it returns would draw one last frame
@@ -473,55 +628,65 @@ int run_app(const AppOptions& options) {
         execute(command);
         return true;
       }
-      if (event == ftxui::Event::Backspace) {
+      if (code == kBackspace) {
         pop_codepoint(state.command_text);
         return true;
       }
-      if (event.is_character()) {
-        state.command_text += event.character();
-        return true;
+      // Anything that is not a printable character -- arrows, function keys,
+      // Tab -- is eaten rather than passed through. Nothing below should act on
+      // a keystroke aimed at the prompt.
+      if (const std::string typed = printable(code); !typed.empty()) {
+        state.command_text += typed;
       }
-      // Arrows, function keys, anything else: eaten rather than passed through.
-      // Nothing below this point should act on a keystroke aimed at the prompt.
-      return true;
-    }
-
-    if (event == ftxui::Event::Character(':')) {
-      state.command_active = true;
-      state.command_text.clear();
       return true;
     }
 
     // The pad map, before the view keys: `s` and `d` and `f` are pads, and a
     // player hitting them expects a sound rather than a scroll. The view keys
-    // that survive (`h l + - f g G`) are the ones the map does not claim --
-    // except `f`, which the map does claim, so `fit` moves to `=`.
-    if (!event.input().empty() && event.input().size() == 1) {
-      const int pad = pad_for_key(event.input().front());
-      if (pad >= 0) {
-        static_cast<void>(engine.trigger_pad(rt::PadEvent{
-            .pad = static_cast<std::uint8_t>(pad), .velocity = 1.0F, .frame_offset = 0}));
-        state.selected_pad = static_cast<std::uint8_t>(pad);
+    // that survive are the ones the map does not claim -- except `f`, which the
+    // map does claim, so `fit` moved to `0`.
+    //
+    // Space is pad 1 as well. It is what M1 and M2 documented, it is what the
+    // mode line has always said, and a sampler where the biggest key on the
+    // keyboard does nothing would be a strange thing to ship.
+    if (const int pad = pad_for_code(code); pad >= 0) {
+      const auto index = static_cast<std::uint8_t>(pad);
+      if (key.action == KeyAction::kRelease) {
+        // Addressed to the pad, not to a voice: a one-shot ignores it and a
+        // gate pad lets go. Which is why this can be sent unconditionally.
+        static_cast<void>(engine.trigger_pad(
+            rt::PadEvent{.pad = index, .kind = rt::PadEventKind::kNoteOff, .velocity = 0.0F}));
         return true;
       }
+      if (!press) {
+        // AUTO-REPEAT IS NOT A HIT. Holding a pad down must sustain it, not
+        // machine-gun it at the terminal's repeat rate -- and in one-shot mode
+        // retriggering would steal a voice from itself thirty times a second.
+        return true;
+      }
+      static_cast<void>(
+          engine.trigger_pad(rt::PadEvent{.pad = index, .velocity = 1.0F, .frame_offset = 0}));
+      state.selected_pad = index;
+      return true;
     }
 
-    // Space stays bound to pad 1 as well. It is what M1 and M2 documented, it is
-    // what the mode line has always said, and a sampler where the biggest key on
-    // the keyboard does nothing would be a strange thing to ship.
-    if (event == ftxui::Event::Character(' ')) {
-      static_cast<void>(
-          engine.trigger_pad(rt::PadEvent{.pad = kPad, .velocity = 1.0F, .frame_offset = 0}));
+    if (!typing) {
+      return true;  // nothing below here has a meaning for a release
+    }
+
+    if (code == ':') {
+      state.command_active = true;
+      state.command_text.clear();
       return true;
     }
     // ESCAPE, not `q`. The QWERTY pad map claims `q` for pad 1, and a sampler
     // where the top-left pad quits instead of making a sound would be a strange
     // thing to ship. `:q` works too, for the muscle memory that expects it.
-    if (event == ftxui::Event::Escape) {
-      screen.Exit();
+    if (code == kEscape) {
+      quit();
       return true;
     }
-    if (event == ftxui::Event::Tab) {
+    if (code == kTab) {
       state.tab = state.tab == PanelTab::kSample ? PanelTab::kPattern : PanelTab::kSample;
       return true;
     }
@@ -534,32 +699,91 @@ int run_app(const AppOptions& options) {
     const auto step = static_cast<std::ptrdiff_t>(
         std::max<std::size_t>(state.view.frames_visible / kScrollDivisor, 1));
 
-    if (event == ftxui::Event::Character('h') || event == ftxui::Event::ArrowLeft) {
-      state.view.scroll_by(-step, total_frames);
-    } else if (event == ftxui::Event::Character('l') || event == ftxui::Event::ArrowRight) {
-      state.view.scroll_by(step, total_frames);
-    } else if (event == ftxui::Event::Character('H')) {
-      state.view.scroll_by(-static_cast<std::ptrdiff_t>(state.view.frames_visible), total_frames);
-    } else if (event == ftxui::Event::Character('L')) {
-      state.view.scroll_by(static_cast<std::ptrdiff_t>(state.view.frames_visible), total_frames);
-    } else if (event == ftxui::Event::Character('+') || event == ftxui::Event::Character('=')) {
-      state.view.zoom_by(kZoomStep, total_frames);
-    } else if (event == ftxui::Event::Character('-') || event == ftxui::Event::Character('_')) {
-      state.view.zoom_by(1.0 / kZoomStep, total_frames);
-    } else if (event == ftxui::Event::Character('0')) {
-      // `0` rather than `f`, which pad 8 now owns. Zero reads as "show
-      // everything" and is the one digit the 4x4 map does not claim.
-      state.view.fit(total_frames);
-    } else if (event == ftxui::Event::Character('g')) {
-      state.view.first_frame = 0;
-      state.view.clamp(total_frames);
-    } else if (event == ftxui::Event::Character('G')) {
-      state.view.first_frame = total_frames;
-      state.view.clamp(total_frames);
-    } else {
-      return false;
+    switch (code) {
+      case 'h':
+      case kKeyArrowLeft:
+        state.view.scroll_by(-step, total_frames);
+        break;
+      case 'l':
+      case kKeyArrowRight:
+        state.view.scroll_by(step, total_frames);
+        break;
+      case 'H':
+        state.view.scroll_by(-static_cast<std::ptrdiff_t>(state.view.frames_visible), total_frames);
+        break;
+      case 'L':
+        state.view.scroll_by(static_cast<std::ptrdiff_t>(state.view.frames_visible), total_frames);
+        break;
+      case '+':
+      case '=':
+        state.view.zoom_by(kZoomStep, total_frames);
+        break;
+      case '-':
+      case '_':
+        state.view.zoom_by(1.0 / kZoomStep, total_frames);
+        break;
+      case '0':
+        // `0` rather than `f`, which pad 8 now owns. Zero reads as "show
+        // everything" and is the one digit the 4x4 map does not claim.
+        state.view.fit(total_frames);
+        break;
+      case 'g':
+        state.view.first_frame = 0;
+        state.view.clamp(total_frames);
+        break;
+      case 'G':
+        state.view.first_frame = total_frames;
+        state.view.clamp(total_frames);
+        break;
+      default:
+        return false;
     }
     return true;
+  };
+
+  auto root = ftxui::CatchEvent(frame, [&](const ftxui::Event& event) {
+    // The janitor tick. The engine spawns no threads of its own, so somebody has
+    // to call collect_garbage(); doing it on the frame tick keeps the whole
+    // design single-writer and costs nothing when there is nothing to collect.
+    if (event == ftxui::Event::Custom) {
+      static_cast<void>(engine.collect_garbage());
+
+      // The capability query goes out on the first tick rather than before
+      // Loop(), because by now FTXUI has switched to the ALTERNATE SCREEN --
+      // and the protocol's flag stack is per-screen. Pushing flags onto the
+      // main screen's stack would change the state of the shell we came from,
+      // and leaving it changed is exactly what must not happen.
+      if (!kitty_asked && !options.legacy_keys) {
+        kitty_asked = true;
+        write_terminal(kKittyQuery);
+      }
+      return false;  // let the loop redraw
+    }
+
+    // The capability reply, before anything else looks at this event. A
+    // terminal that does not implement the protocol never sends one, so there
+    // is nothing to time out on and nothing is ever enabled on a guess.
+    if (kitty_asked && !kitty_active && parse_kitty_flags(event.input()).has_value()) {
+      kitty_active = true;
+      write_terminal(kKittyPush);
+      return true;
+    }
+
+    if (kitty_active) {
+      // Every keystroke now arrives as CSI-u, including the ones FTXUI would
+      // otherwise have turned into Event::Character. Anything the decoder does
+      // not recognise is not something we bind, so it is dropped rather than
+      // handed to a parser that no longer sees the whole keyboard.
+      if (const std::optional<KeyEvent> key = parse_key(event.input()); key.has_value()) {
+        return handle_key(*key);
+      }
+      return false;
+    }
+
+    if (const std::optional<KeyEvent> key = legacy_key(event); key.has_value()) {
+      return handle_key(*key);
+    }
+    return false;
   });
 
   // The refresh thread exists because Loop() is blocking and the counters change

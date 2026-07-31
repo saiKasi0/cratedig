@@ -28,6 +28,17 @@ struct AppOptions {
   // testable under a PTY in a container, where there is no /dev/snd -- and it
   // is honest about it rather than pretending to play: the mode line says so.
   bool no_audio = false;
+
+  // Never negotiate the Kitty keyboard protocol, even with a terminal that
+  // answers the query.
+  //
+  // An escape hatch rather than a feature. The protocol is only enabled after
+  // the terminal says it implements it, so this should never be needed -- but a
+  // terminal that answers and then behaves differently would otherwise leave no
+  // way to start the program at all, and "reinstall your terminal" is not an
+  // answer. The cost of taking it is losing key release, which is to say gate
+  // pads (src/tui/keys.hpp).
+  bool legacy_keys = false;
 };
 
 // Runs until the user quits. Returns a process exit status.

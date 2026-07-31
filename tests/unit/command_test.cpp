@@ -1,9 +1,9 @@
 #include "tui/command.hpp"
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <string>
 #include <string_view>
+
+#include <catch2/catch_test_macros.hpp>
 
 // The command line, parsed.
 //
@@ -68,6 +68,35 @@ TEST_CASE("slot assign carries both numbers, as typed", "[command]") {
   CHECK(command.pad == 3);
 }
 
+TEST_CASE("pad gate and pad oneshot, with the number optional", "[command]") {
+  // The number is optional and absent means ALL, because gate is a way of
+  // playing rather than a property of one chop: someone who wants held pads
+  // wants them on the bank.
+  const Command all = parse_command("pad gate");
+  REQUIRE(all.kind == CommandKind::kPadGate);
+  CHECK(all.pad == 0);
+
+  const Command one = parse_command("pad gate 3");
+  REQUIRE(one.kind == CommandKind::kPadGate);
+  CHECK(one.pad == 3);
+
+  CHECK(parse_command("pad oneshot").kind == CommandKind::kPadOneShot);
+  CHECK(parse_command("pad oneshot 16").pad == 16);
+}
+
+TEST_CASE("pad refuses what it cannot mean", "[command]") {
+  // 0 is a mistake even though "no number" means all sixteen: the two have to
+  // stay distinguishable, or a typed `pad gate 0` silently gates the bank.
+  CHECK(parse_command("pad gate 0").kind == CommandKind::kError);
+  CHECK(parse_command("pad gate x").kind == CommandKind::kError);
+  CHECK(parse_command("pad").message.find("gate") != std::string::npos);
+
+  const Command wrong = parse_command("pad loud");
+  REQUIRE(wrong.kind == CommandKind::kError);
+  CHECK(wrong.message.find("loud") != std::string::npos);
+  CHECK(wrong.message.find("oneshot") != std::string::npos);
+}
+
 TEST_CASE("quit", "[command]") {
   CHECK(parse_command("q").kind == CommandKind::kQuit);
   CHECK(parse_command("quit").kind == CommandKind::kQuit);
@@ -97,11 +126,8 @@ TEST_CASE("an incomplete command says what is missing", "[command]") {
   // the mode line is the only documentation visible at the moment of the
   // mistake.
   const Case cases[] = {
-      {"chop", "transient"},
-      {"chop grid", "grid"},
-      {"slot", "assign"},
-      {"slot assign", "assign"},
-      {"slot assign 5", "assign"},
+      {"chop", "transient"},     {"chop grid", "grid"},       {"slot", "assign"},
+      {"slot assign", "assign"}, {"slot assign 5", "assign"},
   };
 
   for (const Case& item : cases) {

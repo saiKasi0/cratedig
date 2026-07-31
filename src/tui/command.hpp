@@ -21,12 +21,14 @@ namespace tui {
 // names in the M3 acceptance criterion.
 
 enum class CommandKind : std::uint8_t {
-  kNone = 0,   // blank line: cancel, do nothing, say nothing
-  kError,      // could not be understood; `message` says why
+  kNone = 0,  // blank line: cancel, do nothing, say nothing
+  kError,     // could not be understood; `message` says why
   kChopTransient,
-  kChopGrid,   // `count` parts
+  kChopGrid,  // `count` parts
   kChopReset,
   kSlotAssign,  // `slice` -> `pad`, both 1-based as typed
+  kPadGate,     // `pad` 1-based, or 0 meaning every pad
+  kPadOneShot,  // ditto
   kQuit,
 };
 
@@ -35,7 +37,11 @@ struct Command {
 
   std::size_t count = 0;  // chop grid
   std::size_t slice = 0;  // slot assign, 1-based as the user typed it
-  std::size_t pad = 0;    // slot assign, 1-based as the user typed it
+
+  // slot assign and pad gate/oneshot, 1-based as the user typed it. Zero means
+  // "every pad", which is only reachable by leaving the number off -- see the
+  // note in parse_command about why 0 is otherwise always a mistake.
+  std::size_t pad = 0;
 
   // For kError, what was wrong -- phrased for the mode line, so it names the
   // correct spelling rather than just refusing.

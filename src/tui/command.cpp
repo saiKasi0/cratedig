@@ -114,6 +114,33 @@ namespace {
   return out;
 }
 
+// `pad gate [N]` / `pad oneshot [N]`.
+//
+// The pad number is OPTIONAL and means "all sixteen" when left off, because
+// gate is a way of playing rather than a property of one chop -- someone who
+// wants held pads wants them on the bank, not on pad 7. Naming one is still
+// allowed, since a bank with one sustaining pad in it is a real thing to want.
+[[nodiscard]] Command parse_pad(const std::vector<std::string_view>& words) {
+  if (words.size() < 2) {
+    return error("pad what? try: pad gate, pad oneshot, pad gate 3");
+  }
+  const std::string_view what = words[1];
+  if (what != "gate" && what != "oneshot") {
+    return error("unknown pad mode: " + std::string{what} + " (gate or oneshot)");
+  }
+
+  Command out = command_of(what == "gate" ? CommandKind::kPadGate : CommandKind::kPadOneShot);
+  if (words.size() >= 3) {
+    std::size_t pad = 0;
+    if (!parse_number(words[2], pad) || pad == 0) {
+      return error("pad " + std::string{what} + ": " + std::string{words[2]} +
+                   " is not a pad number");
+    }
+    out.pad = pad;
+  }
+  return out;
+}
+
 }  // namespace
 
 Command parse_command(std::string_view line) {
@@ -130,6 +157,9 @@ Command parse_command(std::string_view line) {
   }
   if (verb == "slot") {
     return parse_slot(words);
+  }
+  if (verb == "pad") {
+    return parse_pad(words);
   }
   if (verb == "q" || verb == "quit") {
     return command_of(CommandKind::kQuit);

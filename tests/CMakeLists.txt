@@ -23,6 +23,7 @@ add_executable(
   unit/garbage_ring_test.cpp
   unit/handoff_ring_test.cpp
   unit/interpolator_test.cpp
+  unit/keys_test.cpp
   unit/onset_accuracy_test.cpp
   unit/onset_test.cpp
   unit/peak_pyramid_test.cpp
@@ -102,6 +103,15 @@ if(Python3_FOUND)
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tui/pty_session.py
                    $<TARGET_FILE:cratedig> ${CMAKE_CURRENT_SOURCE_DIR}/tui/snapshots)
   set_tests_properties(tui_pty_session PROPERTIES LABELS tui)
+
+  # The other half of the pair: a pty that ANSWERS the keyboard query, so the
+  # negotiated path is driven end to end in CSI-u. The session above covers the
+  # legacy path by never answering, which is what a terminal without the
+  # protocol does -- between them both branches run on the real binary.
+  add_test(NAME tui_pty_kitty_session
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tui/pty_kitty_session.py
+                   $<TARGET_FILE:cratedig>)
+  set_tests_properties(tui_pty_kitty_session PROPERTIES LABELS tui)
 else()
-  message(STATUS "cratedig: PTY session test disabled (no python3 interpreter)")
+  message(STATUS "cratedig: PTY session tests disabled (no python3 interpreter)")
 endif()

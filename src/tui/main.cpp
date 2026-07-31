@@ -30,6 +30,7 @@ int run(int argc, char** argv) {
   std::uint32_t block_frames = 256;
   unsigned int device_id = 0;
   bool no_audio = false;
+  bool legacy_keys = false;
   bool want_devices = false;
   bool want_version = false;
 
@@ -40,6 +41,8 @@ int run(int argc, char** argv) {
   app.add_option("--device", device_id, "output device id (0 = system default)")
       ->capture_default_str();
   app.add_flag("--no-audio", no_audio, "run the interface without opening an audio device");
+  app.add_flag("--legacy-keys", legacy_keys,
+               "never negotiate the Kitty keyboard protocol (loses gate pads)");
   app.add_flag("--list-devices", want_devices, "list audio output devices and exit");
   app.add_flag("--version", want_version, "print version, FFmpeg build and license, then exit");
 
@@ -61,7 +64,8 @@ int run(int argc, char** argv) {
                                 .sample_rate = sample_rate,
                                 .block_frames = block_frames,
                                 .device_id = device_id,
-                                .no_audio = no_audio};
+                                .no_audio = no_audio,
+                                .legacy_keys = legacy_keys};
   return tui::run_app(options);
 }
 
