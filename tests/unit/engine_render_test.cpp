@@ -697,3 +697,185 @@ TEST_CASE("Engine reports a refused sequencer publish", "[unit]") {
   CHECK_FALSE(eng.publish_sequencer(nullptr));
   CHECK(eng.rejected_sequencer_states() == 4);
 }
+
+namespace {
+
+// A sequencer state with `pads` firing on the given steps of pattern 0.
+std::shared_ptr<const rt::SequencerState> make_pattern(std::initializer_list<std::size_t> steps,
+                                                       std::uint8_t pad = 1,
+                                                       std::uint32_t bpm_x100 = 12'000,
+                                                       std::uint8_t swing = 0) {
+  auto state = std::make_shared<rt::SequencerState>();
+  state->bpm_x100 = bpm_x100;
+  state->selected_pattern = 0;
+  state->patterns[0].length = 16;
+  state->patterns[0].swing = swing;
+  for (const std::size_t step : steps) {
+    state->patterns[0].steps[step][pad].on = true;
+    state->patterns[0].steps[step][pad].velocity = 127;
+  }
+  return state;
+}
+
+}  // namespace
+
+TEST_CASE("the sequencer fires a step at its exact frame", "[unit]") {
+  // 120 bpm gives 6000 frames per step. Pad 1 is the 48 kHz sample, so the phase
+  // step is exactly one frame and there is no interpolation to blur the onset.
+  engine::Engine eng{test_config()};
+  load_pads(eng);
+  REQUIRE(eng.publish_sequencer(make_pattern({2})));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  RenderCapture capture{24'000, kChannels};
+  const std::array<std::size_t, 1> blocks{2'048};
+  capture.render_in_blocks(eng, blocks);
+
+  // Step 2 is at frame 12000. Everything before it is silence -- nothing else is
+  // playing, and a step that fired early would show up here.
+  const std::span<const float> samples = capture.samples();
+  for (std::size_t frame = 0; frame < 12'000; ++frame) {
+    INFO("frame " << frame << " precedes step 2");
+    REQUIRE(samples[frame] == 0.0F);
+  }
+  CHECK(std::any_of(samples.begin() + 12'000, samples.end(),
+                    [](float value) { return value != 0.0F; }));
+}
+
+TEST_CASE("the sequencer is invariant to block size", "[unit]") {
+  // THE M4 acceptance, in miniature. The sequencer runs on the audio thread, so
+  // if a step landed on a block boundary rather than its own frame, the same
+  // pattern would render differently at 64 frames and at 2048 -- and the offline
+  // bounce could never reproduce the live render.
+  //
+  // A tempo whose frames-per-step is NOT an integer, deliberately: at 120 bpm
+  // every step lands on a round number and a block-quantising implementation
+  // would pass at 64 and 2048 by luck.
+  const auto hash_at = [](std::size_t block) {
+    engine::Engine eng{test_config()};
+    load_pads(eng);
+    REQUIRE(eng.publish_sequencer(make_pattern({0, 3, 6, 7, 11, 14}, 1, 13'700, 0)));
+    REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+    RenderCapture capture{48'000, kChannels};
+    const std::array<std::size_t, 1> blocks{block};
+    capture.render_in_blocks(eng, blocks);
+    return capture.hash();
+  };
+
+  const std::uint64_t reference = hash_at(2'048);
+  CHECK(hash_at(64) == reference);
+  CHECK(hash_at(128) == reference);
+  CHECK(hash_at(333) == reference);
+  CHECK(hash_at(1'000) == reference);
+}
+
+TEST_CASE("a swung pattern is invariant to block size", "[unit]") {
+  // Swing is where block quantisation does the most damage: it moves a step by a
+  // fraction of a step, which is exactly the resolution a block boundary throws
+  // away. At 2048-frame blocks a quantised implementation would round the swing
+  // out of existence entirely.
+  const auto hash_at = [](std::size_t block) {
+    engine::Engine eng{test_config()};
+    load_pads(eng);
+    REQUIRE(eng.publish_sequencer(make_pattern({0, 1, 2, 3, 4, 5, 6, 7}, 1, 11'300, 62)));
+    REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+    RenderCapture capture{48'000, kChannels};
+    const std::array<std::size_t, 1> blocks{block};
+    capture.render_in_blocks(eng, blocks);
+    return capture.hash();
+  };
+
+  const std::uint64_t reference = hash_at(2'048);
+  CHECK(hash_at(64) == reference);
+  CHECK(hash_at(377) == reference);
+}
+
+TEST_CASE("swing actually changes the audio", "[unit]") {
+  // The anti-vacuity guard for the case above: three identical hashes would be
+  // three identical silences if the swing were being ignored, and the invariance
+  // test could not tell the difference.
+  const auto hash_with = [](std::uint8_t swing) {
+    engine::Engine eng{test_config()};
+    load_pads(eng);
+    REQUIRE(eng.publish_sequencer(make_pattern({0, 1, 2, 3}, 1, 12'000, swing)));
+    REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+    RenderCapture capture{48'000, kChannels};
+    const std::array<std::size_t, 1> blocks{256};
+    capture.render_in_blocks(eng, blocks);
+    return capture.hash();
+  };
+
+  CHECK(hash_with(0) != hash_with(50));
+}
+
+TEST_CASE("the sequencer is silent while the transport is stopped", "[unit]") {
+  // A pattern full of steps must make no sound until play is pressed. Otherwise
+  // loading a project would start playing it.
+  engine::Engine eng{test_config()};
+  load_pads(eng);
+  REQUIRE(eng.publish_sequencer(make_pattern({0, 1, 2, 3, 4, 5, 6, 7})));
+
+  RenderCapture capture{48'000, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  capture.render_in_blocks(eng, blocks);
+
+  for (const float value : capture.samples()) {
+    REQUIRE(value == 0.0F);
+  }
+}
+
+TEST_CASE("the sequencer wraps at the pattern length", "[unit]") {
+  // A step on 0 of a 4-step pattern fires every 4 steps: at frames 0, 24000,
+  // 48000... rather than once. Getting the modulo wrong gives a pattern that
+  // plays through once and then goes quiet, which sounds like a stuck transport.
+  engine::Engine eng{test_config()};
+  load_pads(eng);
+
+  auto state = std::make_shared<rt::SequencerState>();
+  state->bpm_x100 = 12'000;  // 6000 frames per step
+  state->patterns[0].length = 4;
+  state->patterns[0].steps[0][1].on = true;
+  REQUIRE(eng.publish_sequencer(state));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  RenderCapture capture{72'000, kChannels};
+  const std::array<std::size_t, 1> blocks{512};
+  capture.render_in_blocks(eng, blocks);
+
+  // Three wraps in 72000 frames (24000 each). Each one starts a voice, so the
+  // frame just after each boundary is where the fade-in begins.
+  const std::span<const float> samples = capture.samples();
+  for (const std::size_t at : {std::size_t{0}, std::size_t{24'000}, std::size_t{48'000}}) {
+    INFO("wrap at frame " << at);
+    // Non-silent within a few hundred frames of the boundary, past the declick.
+    REQUIRE(std::any_of(samples.begin() + static_cast<std::ptrdiff_t>(at) + 64,
+                        samples.begin() + static_cast<std::ptrdiff_t>(at) + 512,
+                        [](float value) { return value != 0.0F; }));
+  }
+}
+
+TEST_CASE("a seek moves the sequencer with the transport", "[unit]") {
+  // Steps are derived from the position, so seeking to step 4 must play step 4
+  // -- not restart the pattern and not carry on from where it was.
+  engine::Engine eng{test_config()};
+  load_pads(eng);
+  REQUIRE(eng.publish_sequencer(make_pattern({5})));  // frame 30000 at 120 bpm
+
+  // Start just before step 5 and render a short window that contains only it.
+  REQUIRE(eng.send_transport(
+      rt::TransportCommand{.kind = rt::TransportCommandKind::kSeek, .position_frames = 29'000}));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  RenderCapture capture{4'000, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  capture.render_in_blocks(eng, blocks);
+
+  // Step 5 is at 30000, which is 1000 frames into this window.
+  const std::span<const float> samples = capture.samples();
+  for (std::size_t frame = 0; frame < 1'000; ++frame) {
+    INFO("frame " << frame << " precedes the seeked step");
+    REQUIRE(samples[frame] == 0.0F);
+  }
+  CHECK(std::any_of(samples.begin() + 1'000, samples.end(),
+                    [](float value) { return value != 0.0F; }));
+}

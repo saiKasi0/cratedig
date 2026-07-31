@@ -343,6 +343,17 @@ class Engine {
   // AUDIO THREAD, at the top of every block, before the position advances.
   void drain_transport() noexcept;
 
+  // AUDIO THREAD. Starts one voice on `pad`, and publishes the glow for it.
+  //
+  // The single path every producer goes through -- the keyboard and MIDI via the
+  // event ring, and the sequencer directly. Shared so that a pad lights the same
+  // way whatever triggered it.
+  void start_voice(std::uint8_t pad, float velocity, std::size_t frame_offset) noexcept;
+
+  // AUDIO THREAD, once per block. Fires every step that falls inside it, at its
+  // exact frame.
+  void fire_sequencer_steps(std::size_t num_frames) noexcept;
+
   // AUDIO THREAD. Pattern and step packed for publication. Zero when no
   // sequencer state has been published, which reads as step 0 of pattern 0 and
   // is what an untouched sequencer should look like.

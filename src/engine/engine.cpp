@@ -138,6 +138,102 @@ void Engine::drain_transport() noexcept {
   }
 }
 
+void Engine::start_voice(std::uint8_t pad, float velocity, std::size_t frame_offset) noexcept {
+  // One path for every producer -- the keyboard, MIDI, and the sequencer. Shared
+  // rather than duplicated because the glow bookkeeping below is easy to get
+  // subtly different in three places, and three pads that light differently
+  // depending on what triggered them is the kind of bug that gets blamed on the
+  // renderer.
+  if (pad >= rt::kNumPads) {
+    return;
+  }
+  const std::shared_ptr<const rt::PadConfig>& config = m_pads[pad];
+  if (config == nullptr || config->sample == nullptr) {
+    return;  // an unloaded pad is silent, not an error
+  }
+
+  // Copying the shared_ptr is an atomic increment — allocation-free and
+  // lock-free, so it is legal here. The voice releases it through the garbage
+  // ring, never by dropping it on this thread.
+  if (!m_voices.trigger(config, velocity, m_config.sample_rate, m_garbage, frame_offset)) {
+    m_published.dropped_triggers.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+
+  // Glow is published from the TRIGGER, not from the audio it produces. That
+  // is the whole point: the pad lights because the machine received the hit,
+  // at whatever level the material happens to be. Aged to zero here and
+  // advanced by publish_telemetry at the end of this same block.
+  //
+  // relaxed: the UI wants a recent value, not a synchronised one.
+  //
+  // std::lround rather than the (x + 0.5) truncation idiom: the idiom is
+  // wrong for negatives, and although velocity is clamped non-negative here,
+  // that is a fact about this line rather than about the reader. Once per
+  // trigger, not per frame, and it allocates nothing and cannot throw.
+  const auto quantised =
+      static_cast<std::uint32_t>(std::lround(std::clamp(velocity, 0.0F, 1.0F) * 255.0F));
+  m_published.pad_glow[pad].store(quantised << kGlowVelocityShift, std::memory_order_relaxed);
+}
+
+void Engine::fire_sequencer_steps(std::size_t num_frames) noexcept {
+  if (!m_transport.playing || m_sequencer == nullptr || num_frames == 0) {
+    return;
+  }
+  const rt::SequencerState& state = *m_sequencer;
+  const std::uint8_t index =
+      std::min(state.selected_pattern, static_cast<std::uint8_t>(rt::kMaxPatterns - 1));
+  const rt::Pattern& pattern = state.patterns[index];
+  const std::size_t length = rt::pattern_length(pattern);
+
+  // The block this call covers. position_frames is still the START of it --
+  // the transport advances after rendering, so this arithmetic sees the block
+  // it is about to fill rather than the one it just filled.
+  const std::uint64_t block_start = m_transport.position_frames;
+  const std::uint64_t block_end = block_start + num_frames;
+
+  // Walk forward from a deliberate under-estimate. step_scan_start() is one
+  // lower than the exact index because a swung step can land inside this block
+  // while its unswung base sits before it -- starting at the exact index would
+  // silently drop that step, and a missing note is the hardest failure to trace
+  // back to its cause.
+  //
+  // The walk terminates because step_frame() is strictly increasing (asserted in
+  // sequencer_test.cpp) and a step is never shorter than a frame at the clamped
+  // maximum tempo, so it runs at most num_frames + 2 times.
+  for (std::uint64_t step = rt::step_scan_start(block_start, m_config.sample_rate, state.bpm_x100);;
+       ++step) {
+    const std::uint64_t at =
+        rt::step_frame(step, m_config.sample_rate, state.bpm_x100, pattern.swing);
+    if (at >= block_end) {
+      break;
+    }
+    if (at < block_start) {
+      continue;  // behind us: the scan started early on purpose
+    }
+
+    // Placed inside the block rather than at its edge. This is the whole reason
+    // Task 1 existed: quantising to the block boundary would make the groove
+    // depend on the device's buffer size, and swing would round away entirely at
+    // large blocks.
+    const auto offset = static_cast<std::size_t>(at - block_start);
+    const std::size_t wrapped = static_cast<std::size_t>(step % length);
+
+    // Ascending pad order, so which pad wins a steal when the pool is full is a
+    // property of the pattern rather than of iteration order.
+    for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+      const rt::Step& cell = pattern.steps[wrapped][pad];
+      if (!cell.on) {
+        continue;
+      }
+      // 0..127 to linear 0..1, converted once here rather than stored as a
+      // float: the pattern holds what MIDI and the UI both speak.
+      const float velocity = static_cast<float>(cell.velocity) / 127.0F;
+      start_voice(static_cast<std::uint8_t>(pad), velocity, offset);
+    }
+  }
+}
+
 void Engine::adopt_pad_configs() noexcept {
   // A handle held over from a previous block, because the garbage ring was full
   // when we tried to retire it. Nothing else can proceed until it is gone: the
@@ -222,10 +318,6 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
       continue;
     }
 
-    const std::shared_ptr<const rt::PadConfig>& config = m_pads[event.pad];
-    if (config == nullptr || config->sample == nullptr) {
-      continue;  // an unloaded pad is silent, not an error
-    }
     // CLAMPED, not trusted and not dropped. frame_offset crossed a thread
     // boundary exactly as event.pad did, and a producer that disagrees with us
     // about the block length would otherwise place a hit past the end of it —
@@ -234,31 +326,14 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
     // is the worse answer for a bad number that is probably off by one.
     const std::size_t offset =
         num_frames == 0 ? 0 : std::min<std::size_t>(event.frame_offset, num_frames - 1);
-
-    // Copying the shared_ptr is an atomic increment — allocation-free and
-    // lock-free, so it is legal here. The voice releases it through the garbage
-    // ring, never by dropping it on this thread.
-    if (!m_voices.trigger(config, event.velocity, m_config.sample_rate, m_garbage, offset)) {
-      m_published.dropped_triggers.fetch_add(1, std::memory_order_relaxed);
-      continue;
-    }
-
-    // Glow is published from the TRIGGER, not from the audio it produces. That
-    // is the whole point: the pad lights because the machine received the hit,
-    // at whatever level the material happens to be. Aged to zero here and
-    // advanced by publish_telemetry at the end of this same block.
-    //
-    // relaxed: the UI wants a recent value, not a synchronised one.
-    //
-    // std::lround rather than the (x + 0.5) truncation idiom: the idiom is
-    // wrong for negatives, and although velocity is clamped non-negative here,
-    // that is a fact about this line rather than about the reader. Once per
-    // trigger, not per frame, and it allocates nothing and cannot throw.
-    const auto velocity =
-        static_cast<std::uint32_t>(std::lround(std::clamp(event.velocity, 0.0F, 1.0F) * 255.0F));
-    m_published.pad_glow[event.pad].store(velocity << kGlowVelocityShift,
-                                          std::memory_order_relaxed);
+    start_voice(event.pad, event.velocity, offset);
   }
+
+  // The sequencer, AFTER the live events. Both start voices, so the order
+  // decides which one wins a steal when the pool is full, and it has to be
+  // fixed rather than incidental. Live first is the right way round: a hit the
+  // player made is the one they will notice missing.
+  fire_sequencer_steps(num_frames);
 
   m_voices.render_add(channels, num_frames);
 
