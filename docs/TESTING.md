@@ -478,6 +478,40 @@ a meter-driven pad would barely light for a quiet sample and would not light at
 all for one triggered into silence. Negative-controlled by driving glow from
 `pad_peak`, which fails exactly that test and nothing else.
 
+### M4 acceptance, item by item
+
+`docs/ROADMAP.md` states two criteria for M4. Both are tests that run in the
+default suite, in the same two layers M3 established:
+
+| Criterion | Where it is asserted |
+|---|---|
+| a recorded pattern renders bit-exact offline | `tests/e2e/sequencer_e2e_test.cpp` — committed FNV-1a golden, block-size invariance (straight *and* swung), run-to-run equality |
+| MIDI integration test green | `tests/e2e/sequencer_e2e_test.cpp` — literal bytes through `decode_midi()` into the engine's MIDI ring and out as audio, which **cannot skip**; plus `tests/unit/midi_device_test.cpp`'s `[device]` case, which needs a port and skips loudly |
+
+Two things the hash cannot say, asserted separately because a golden only proves
+the output has not changed:
+
+- **`e2e: every step lands on its own frame`** measures the onset of each hit on
+  the rendered audio against `step_frame()`, at ragged block sizes. Every timing
+  test would otherwise pass on an engine that fired each step at its block
+  boundary — the bug sample-accurate offsets exist to prevent.
+- **`e2e: swing pushes the odd steps late and leaves the even ones`** measures the
+  shift in frames. A swing that moved every step, or moved them by the wrong
+  amount, would still be block-size invariant and still hash consistently.
+
+The PTY half (`tests/e2e/pty_sequencer_session.py`) writes the pattern by typing
+at the real binary, and asserts what the offline test structurally cannot: that
+the keys and the `:` verbs reach the **engine's** sequencer rather than a copy of
+it in the interface. That is not a formality — it is what caught the sequencer
+handoff ring filling up under `--no-audio`, where nothing calls `render()` so
+nothing ever drains it and the ninth edit of a session was refused for good.
+`tests/tui/pty_session.py` was making exactly seven.
+
+**Why the M4 golden is portable**, in one line: every step is at velocity 127,
+which is `127/127.0f == 1.0f` exactly, so the product in `amplitude * value` is
+exact and an FMA cannot round it differently. The file says it at length, and the
+rule it follows is the next section.
+
 ## RT-safety testing
 
 `src/rt/` correctness has three enforcement layers, tested as follows:

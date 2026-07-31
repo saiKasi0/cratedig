@@ -477,7 +477,23 @@ int run_app(const AppOptions& options) {
   auto edit_sequencer = [&](const auto& mutate, std::string said) {
     rt::SequencerState next = sequencer;
     mutate(next);
-    if (!engine.publish_sequencer(std::make_shared<const rt::SequencerState>(next))) {
+
+    // WITH NO DEVICE THERE IS NO CONSUMER, so there is nothing to publish to.
+    //
+    // Nothing calls render() without a stream, so nothing ever drains the
+    // handoff ring: publishing into it anyway fills it after a few keystrokes
+    // and then refuses every sequencer edit for the rest of the session. Every
+    // step toggle publishes, so "a few" is eight -- found by
+    // tests/e2e/pty_sequencer_session.py, which ran out partway through writing
+    // a bar. The interface said "sequencer busy" and meant it, which is the
+    // honest report of a state that should not have been reachable.
+    //
+    // In that mode the control-side copy IS the state, which is what --no-audio
+    // means. The same trap is sized around rather than avoided on the pad ring
+    // (see Engine::kPadHandoffCapacity); a chop publishes sixteen at once and
+    // three chops exhaust it. That is the same bug with a longer fuse.
+    if (audio_running &&
+        !engine.publish_sequencer(std::make_shared<const rt::SequencerState>(next))) {
       set_message("sequencer busy — the edit did not happen, try again", true);
       return;
     }
@@ -961,18 +977,24 @@ int run_app(const AppOptions& options) {
     state.pattern.step = telemetry.transport_step;
     state.pattern.slot = telemetry.transport_slot;
     state.pattern.cursor_step = step_cursor;
-    if (const std::shared_ptr<const rt::SequencerState> published = engine.sequencer_state();
-        published != nullptr) {
+    // Drawn from THIS THREAD'S copy rather than read back out of the engine.
+    //
+    // They are the same object whenever there is a stream, because a published
+    // edit is what moves the local copy. Without one there is nothing to publish
+    // to (see edit_sequencer above), so reading it back would draw a sequencer
+    // frozen at whatever was published before the ring filled -- which is how
+    // this was found.
+    {
       const auto index = static_cast<std::uint8_t>(lane_pattern());
-      const rt::Pattern& source = published->patterns[index];
+      const rt::Pattern& source = sequencer.patterns[index];
 
       state.pattern.has_pattern = true;
       state.pattern.pattern = index;
       state.pattern.length = rt::pattern_length(source);
       state.pattern.swing = source.swing;
-      state.pattern.bpm_x100 = published->bpm_x100;
-      state.pattern.metronome = published->metronome;
-      state.pattern.song = rt::song_slots(published->song) > 0;
+      state.pattern.bpm_x100 = sequencer.bpm_x100;
+      state.pattern.metronome = sequencer.metronome;
+      state.pattern.song = rt::song_slots(sequencer.song) > 0;
 
       // The marker is drawn only when the transport is on the pattern being
       // shown. With a song running that is often some other pattern, and a

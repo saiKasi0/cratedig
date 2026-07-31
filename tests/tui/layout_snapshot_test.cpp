@@ -862,6 +862,48 @@ TEST_CASE("a sequenced hit is lit but never inverted", "[tui]") {
   CHECK(sequenced == 0);  // the same hit from the sequencer does not
 }
 
+TEST_CASE("moving the step cursor does not move the pattern", "[tui]") {
+  // The cursor is an ATTRIBUTE, never a character. Drawing it splits the row
+  // into three pieces for FTXUI to lay out, and the failure mode of that is a
+  // row one cell narrower than its neighbours -- which reads on screen as the
+  // pattern shifting under the cursor as it moves.
+  //
+  // That is not hypothetical: it is exactly what splice_at() produced before
+  // paint_at() replaced it, because FTXUI shrinks an over-wide hbox by taking
+  // cells from every child in proportion rather than truncating the last one.
+  // Asserted over every pad and every step, in both lane columns and on both
+  // pages, because the bug only appeared on the row the cursor was on.
+  const auto lane_text = [](std::size_t pad, std::size_t step, std::uint8_t length) {
+    tui::UiState state = loaded_state(100);
+    state.tab = tui::PanelTab::kPattern;
+    state.pattern = live_pattern();
+    state.pattern.length = length;
+    state.pattern.cursor_step = step;
+    state.selected_pad = static_cast<std::uint8_t>(pad);
+    return strip_ansi(render_screen(state, 100, 30).ToString());
+  };
+
+  const std::string base = lane_text(0, 0, 16);
+  for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+    for (std::size_t step = 0; step < 16; ++step) {
+      INFO("pad " << pad + 1 << ", step " << step + 1);
+      CHECK(lane_text(pad, step, 16) == base);
+    }
+  }
+
+  // And within a page of a longer pattern. Crossing to the second page is
+  // SUPPOSED to change the text -- that is the window moving, not the row
+  // slipping -- so each page is compared against its own first cell.
+  const std::string second_page = lane_text(0, 16, 32);
+  for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+    for (std::size_t step = 16; step < 32; ++step) {
+      INFO("pad " << pad + 1 << ", step " << step + 1 << " of 32");
+      CHECK(lane_text(pad, step, 32) == second_page);
+    }
+  }
+  CHECK(second_page != lane_text(0, 0, 32));
+}
+
 TEST_CASE("the step cursor is drawn where the next edit will land", "[tui]") {
   // ON THE CELLS, not on a snapshot: the cursor is an inverted cell, so the
   // characters are identical with and without it and a text golden could not

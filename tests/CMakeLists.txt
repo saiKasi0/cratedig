@@ -43,6 +43,7 @@ add_executable(
   integration/engine_threading_test.cpp
   integration/rt_safety_test.cpp
   e2e/chop_e2e_test.cpp
+  e2e/sequencer_e2e_test.cpp
   # The guard's operator new/delete replacements must be linked into the
   # executable directly, not via a library — see src/CMakeLists.txt.
   $<TARGET_OBJECTS:cratedig_rt_guard>)
@@ -126,6 +127,16 @@ if(Python3_FOUND)
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_chop_session.py
                    $<TARGET_FILE:cratedig>)
   set_tests_properties(chop_pty_e2e PROPERTIES LABELS e2e)
+
+  # M4's acceptance, same split: sequencer_e2e_test.cpp renders the audio and
+  # this writes the pattern by typing at the binary. It is the half that can say
+  # the keys and the `:` verbs reach the ENGINE's sequencer rather than a copy of
+  # it in the interface -- which is how the handoff ring filling up under
+  # --no-audio was found.
+  add_test(NAME sequencer_pty_e2e
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_sequencer_session.py
+                   $<TARGET_FILE:cratedig>)
+  set_tests_properties(sequencer_pty_e2e PROPERTIES LABELS e2e)
 else()
   message(STATUS "cratedig: PTY session tests disabled (no python3 interpreter)")
 endif()
