@@ -1134,3 +1134,92 @@ TEST_CASE("the metronome is silent while the transport is stopped", "[unit]") {
     REQUIRE(value == 0.0F);
   }
 }
+
+TEST_CASE("Engine plays events from the MIDI ring", "[unit]") {
+  // MIDI has its own ring because rt::SpscRing is single-PRODUCER and RtMidi
+  // delivers on a thread of its own. This is the test that the second ring is
+  // actually drained rather than merely declared.
+  engine::Engine eng{test_config()};
+  load_pads(eng);
+
+  // Pad 0, whose sample outlasts the render. Pad 1's is 1500 frames and would
+  // have finished inside this window, so the voice count would read zero for a
+  // reason that has nothing to do with the ring.
+  REQUIRE(eng.submit_midi_event(rt::PadEvent{.pad = 0, .velocity = 1.0F}));
+
+  RenderCapture capture{2'048, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  capture.render_in_blocks(eng, blocks);
+
+  CHECK(std::any_of(capture.samples().begin(), capture.samples().end(),
+                    [](float value) { return value != 0.0F; }));
+  CHECK(eng.active_voices() == 1);
+  CHECK(eng.dropped_midi_events() == 0);
+}
+
+TEST_CASE("the keyboard and MIDI rings are independent", "[unit]") {
+  // Filling one must not affect the other. If they shared storage -- or if MIDI
+  // were quietly pushed onto the keyboard's ring -- a burst of key repeats would
+  // start dropping a controller's notes, which is the kind of interaction nobody
+  // would think to look for.
+  engine::Engine eng{test_config()};
+  load_pads(eng);
+
+  // Nothing renders, so nothing drains: fill the keyboard ring completely.
+  std::size_t accepted = 0;
+  for (std::size_t i = 0; i < engine::Engine::kEventRingCapacity + 8; ++i) {
+    if (eng.trigger_pad(rt::PadEvent{.pad = 1, .velocity = 1.0F})) {
+      ++accepted;
+    }
+  }
+  CHECK(accepted == engine::Engine::kEventRingCapacity);
+  CHECK(eng.dropped_events() == 8);
+
+  // The MIDI ring is untouched by that.
+  CHECK(eng.submit_midi_event(rt::PadEvent{.pad = 2, .velocity = 1.0F}));
+  CHECK(eng.dropped_midi_events() == 0);
+}
+
+TEST_CASE("Engine counts dropped MIDI events rather than blocking", "[unit]") {
+  // A full ring means the audio thread stopped draining, not that a player was
+  // too fast -- 256 events between two blocks is not something hands do. Saying
+  // so is better than silently succeeding.
+  engine::Engine eng{test_config()};
+  load_pads(eng);
+
+  std::size_t accepted = 0;
+  for (std::size_t i = 0; i < engine::Engine::kMidiRingCapacity + 5; ++i) {
+    if (eng.submit_midi_event(rt::PadEvent{.pad = 1, .velocity = 1.0F})) {
+      ++accepted;
+    }
+  }
+  CHECK(accepted == engine::Engine::kMidiRingCapacity);
+  CHECK(eng.dropped_midi_events() == 5);
+  CHECK(eng.dropped_events() == 0);  // and the keyboard's counter is untouched
+}
+
+TEST_CASE("a MIDI note-off releases a gate pad", "[unit]") {
+  // The note-off path was built engine-side in M3 with the Kitty keyboard as its
+  // only producer. MIDI is the second one, and needed no engine change -- this
+  // is what shows that claim is true rather than merely intended.
+  engine::Engine eng{test_config()};
+
+  auto config = std::make_shared<const rt::PadConfig>(
+      rt::PadConfig{.sample = make_test_sample(48'000, 1, 48'000),
+                    .pad = 3,
+                    .env = rt::AdsrFrames{.attack = 0, .decay = 0, .sustain = 1.0F, .release = 64},
+                    .trigger = rt::TriggerMode::kGate});
+  REQUIRE(eng.publish_pad_config(config));
+
+  REQUIRE(eng.submit_midi_event(rt::PadEvent{.pad = 3, .velocity = 1.0F}));
+  RenderCapture held{2'048, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  held.render_in_blocks(eng, blocks);
+  CHECK(eng.active_voices() == 1);  // still sounding: it is a gate pad
+
+  REQUIRE(eng.submit_midi_event(
+      rt::PadEvent{.pad = 3, .kind = rt::PadEventKind::kNoteOff, .velocity = 0.0F}));
+  RenderCapture released{2'048, kChannels};
+  released.render_in_blocks(eng, blocks);
+  CHECK(eng.active_voices() == 0);  // the release ran to silence and freed it
+}

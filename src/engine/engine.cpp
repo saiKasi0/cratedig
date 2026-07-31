@@ -186,6 +186,35 @@ void Engine::start_voice(std::uint8_t pad, float velocity, std::size_t frame_off
   m_published.pad_glow[pad].store(word, std::memory_order_relaxed);
 }
 
+template <typename Ring>
+void Engine::drain_pad_events(Ring& ring, std::size_t num_frames) noexcept {
+  rt::PadEvent event{};
+  while (ring.try_pop(event)) {
+    if (event.pad >= rt::kNumPads) {
+      continue;  // came from a key handler or MIDI; not trusted
+    }
+
+    if (event.kind == rt::PadEventKind::kNoteOff) {
+      // Addressed to the PAD, not to a config: the voice decides whether it
+      // cares, based on the config it is actually playing. A pad reassigned
+      // between the note-on and the note-off must still let go of the note the
+      // player is holding.
+      m_voices.note_off(event.pad);
+      continue;
+    }
+
+    // CLAMPED, not trusted and not dropped. frame_offset crossed a thread
+    // boundary exactly as event.pad did, and a producer that disagrees with us
+    // about the block length would otherwise place a hit past the end of it —
+    // where the voice would sound a block late instead. Clamping costs the hit
+    // at most a few hundred microseconds; dropping it would lose a note, which
+    // is the worse answer for a bad number that is probably off by one.
+    const std::size_t offset =
+        num_frames == 0 ? 0 : std::min<std::size_t>(event.frame_offset, num_frames - 1);
+    start_voice(event.pad, event.velocity, offset, /*sequenced=*/false);
+  }
+}
+
 void Engine::fire_sequencer_steps(std::size_t num_frames) noexcept {
   if (!m_transport.playing || m_sequencer == nullptr || num_frames == 0) {
     return;
@@ -344,6 +373,15 @@ bool Engine::trigger_pad(const rt::PadEvent& event) noexcept {
   return false;
 }
 
+bool Engine::submit_midi_event(const rt::PadEvent& event) noexcept {
+  if (m_midi_events.try_push(event)) {
+    return true;
+  }
+  // relaxed: a counter the UI reads for diagnostics; nothing is ordered by it.
+  m_dropped_midi_events.fetch_add(1, std::memory_order_relaxed);
+  return false;
+}
+
 void Engine::render(std::span<float* const> channels, std::size_t num_frames) noexcept {
   // Opened first, so everything below is held to the real-time rules — including
   // anything added here later.
@@ -372,32 +410,14 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
 
   // Drain first, so a hit that arrived during the previous block sounds in this
   // one, placed inside it by PadEvent::frame_offset.
-  rt::PadEvent event{};
-  while (m_events.try_pop(event)) {
-    if (event.pad >= rt::kNumPads) {
-      continue;  // came from a key handler or MIDI; not trusted
-    }
-
-    if (event.kind == rt::PadEventKind::kNoteOff) {
-      // Addressed to the PAD, not to a config: the voice decides whether it
-      // cares, based on the config it is actually playing. A pad reassigned
-      // between the note-on and the note-off must still let go of the note the
-      // player is holding.
-      m_voices.note_off(event.pad);
-      continue;
-    }
-
-    // CLAMPED, not trusted and not dropped. frame_offset crossed a thread
-    // boundary exactly as event.pad did, and a producer that disagrees with us
-    // about the block length would otherwise place a hit past the end of it —
-    // where the voice would sound a block late instead. Clamping costs the hit
-    // at most a few hundred microseconds; dropping it would lose a note, which
-    // is the worse answer for a bad number that is probably off by one.
-    const std::size_t offset =
-        num_frames == 0 ? 0 : std::min<std::size_t>(event.frame_offset, num_frames - 1);
-    start_voice(event.pad, event.velocity, offset, /*sequenced=*/false);
-  }
-
+  //
+  // TWO RINGS, drained one after the other: the keyboard's and MIDI's. They
+  // carry the same type and mean the same thing, and are separate only because
+  // they have different producer THREADS -- see kMidiRingCapacity. Draining
+  // MIDI second is arbitrary but fixed, so which one wins a steal on a full
+  // voice pool is reproducible rather than a matter of timing.
+  drain_pad_events(m_events, num_frames);
+  drain_pad_events(m_midi_events, num_frames);
   // The sequencer, AFTER the live events. Both start voices, so the order
   // decides which one wins a steal when the pool is full, and it has to be
   // fixed rather than incidental. Live first is the right way round: a hit the

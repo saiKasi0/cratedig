@@ -147,6 +147,19 @@ class Engine {
   // cannot outrun a 5 ms block by more than a couple.
   static constexpr std::size_t kSequencerHandoffCapacity = 8;
 
+  // MIDI events in flight, MIDI thread -> audio. ITS OWN RING, not a second
+  // producer on the keyboard's.
+  //
+  // rt::SpscRing is single-producer -- the header says so and TSan is the
+  // authority on it -- and RtMidi delivers on a thread of its own. A MIDI
+  // callback calling trigger_pad() would put two producers on one ring, which
+  // would appear to work and would be a data race. One extra ring is cheap; the
+  // alternative is a bug that only shows up under load, on someone else's
+  // machine.
+  //
+  // Deep enough for a dense chord plus pedal traffic between two audio blocks.
+  static constexpr std::size_t kMidiRingCapacity = 256;
+
   // Transport commands in flight. Play, stop and seek arrive at human speed; the
   // depth is here so a burst during a stalled stream is dropped visibly rather
   // than blocking the UI.
@@ -227,6 +240,17 @@ class Engine {
   // into the UI; silently succeeding would hide a real overload.
   [[nodiscard]] bool trigger_pad(const rt::PadEvent& event) noexcept;
 
+  // MIDI THREAD ONLY. The same event, arriving from a different thread.
+  //
+  // Separate from trigger_pad() because it goes into a separate ring -- see
+  // kMidiRingCapacity. Calling this from the control thread, or trigger_pad()
+  // from the MIDI thread, reintroduces exactly the race the split exists to
+  // prevent.
+  //
+  // Returns false if the ring is full, in which case the event is dropped and
+  // dropped_midi_events() counts it.
+  [[nodiscard]] bool submit_midi_event(const rt::PadEvent& event) noexcept;
+
   // CONTROL THREAD, AT ANY TIME. Replaces the whole sequencer state.
   //
   // The same protocol as publish_pad_config() and for the same reason: the state
@@ -286,6 +310,13 @@ class Engine {
   // Diagnostics. Any of these being non-zero after a normal session is a bug
   // somewhere, so they are exposed rather than merely counted.
   [[nodiscard]] std::uint64_t dropped_events() const noexcept { return m_dropped_events; }
+
+  // MIDI events dropped because the ring was full. Non-zero means the audio
+  // thread stopped draining, not that a player was too fast: 256 events between
+  // two blocks is not something hands can do.
+  [[nodiscard]] std::uint64_t dropped_midi_events() const noexcept {
+    return m_dropped_midi_events.load(std::memory_order_relaxed);
+  }
 
   // Also audio-thread-written and UI-read; same reasoning as frames_rendered().
   [[nodiscard]] std::uint64_t dropped_triggers() const noexcept {
@@ -401,6 +432,15 @@ class Engine {
   void start_voice(std::uint8_t pad, float velocity, std::size_t frame_offset,
                    bool sequenced) noexcept;
 
+  // AUDIO THREAD, once per block, per ring. Turns queued PadEvents into voices.
+  //
+  // Templated on the ring so the keyboard's and MIDI's differ only in capacity
+  // and producer thread, not in what happens to an event once it arrives -- a
+  // second copy of this loop is how the two paths would drift into behaving
+  // differently.
+  template <typename Ring>
+  void drain_pad_events(Ring& ring, std::size_t num_frames) noexcept;
+
   // AUDIO THREAD, once per block. Fires every step that falls inside it, at its
   // exact frame.
   void fire_sequencer_steps(std::size_t num_frames) noexcept;
@@ -445,6 +485,7 @@ class Engine {
   rt::Transport m_transport;
 
   rt::SpscRing<rt::PadEvent, kEventRingCapacity> m_events;
+  rt::SpscRing<rt::PadEvent, kMidiRingCapacity> m_midi_events;
   rt::SpscRing<rt::TransportCommand, kTransportRingCapacity> m_transport_commands;
   rt::HandoffRing<rt::PadConfig, kPadHandoffCapacity> m_pad_handoff;
   rt::HandoffRing<rt::SequencerState, kSequencerHandoffCapacity> m_sequencer_handoff;
@@ -460,6 +501,12 @@ class Engine {
   // Written by the control thread only, and read by it -- no cross-thread access,
   // so no atomic.
   std::uint64_t m_dropped_events = 0;
+
+  // The MIDI equivalent, and ATOMIC where the one above is not: it is written by
+  // the MIDI thread and read by the UI. Making it a plain uint64_t would be a
+  // data race for the sake of saving nothing -- the same mistake frames_rendered
+  // was fixed for in M1. Relaxed: it is a progress counter and orders nothing.
+  std::atomic<std::uint64_t> m_dropped_midi_events{0};
 };
 
 }  // namespace engine
