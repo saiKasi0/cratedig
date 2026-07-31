@@ -461,6 +461,23 @@ The acceptance item "pads light on trigger at any sample level" is asserted wher
 the signal exists — `tests/unit/engine_telemetry_test.cpp`, against a −60 dBFS
 sample.
 
+### M3 acceptance, item by item
+
+`docs/ROADMAP.md` lists four criteria. Each is a test that runs in the default
+suite, not a claim:
+
+| Criterion | Where it is asserted |
+|---|---|
+| e2e chop script passes bit-exact | `tests/e2e/chop_e2e_test.cpp` — committed FNV-1a golden, block-size invariance, run-to-run equality |
+| onset precision/recall ≥ 0.9 on a labeled set | `tests/unit/onset_accuracy_test.cpp` — `>= 0.9` on the synthetic set (never skips) and on the inspected loops (`[fixture]`) |
+| a pad reassigned mid-stream allocates nothing and destroys nothing on the audio thread | `tests/integration/rt_safety_test.cpp` under the RT guard, and `tests/integration/engine_threading_test.cpp` under TSan |
+| pads light on trigger **at any sample level** | `tests/unit/engine_telemetry_test.cpp` — against a −60 dBFS sample, which is why glow is driven from the trigger and not from `pad_peak` |
+
+The last one is the reason `PadGlow` exists at all: peak follows audio level, so
+a meter-driven pad would barely light for a quiet sample and would not light at
+all for one triggered into silence. Negative-controlled by driving glow from
+`pad_peak`, which fails exactly that test and nothing else.
+
 ## RT-safety testing
 
 `src/rt/` correctness has three enforcement layers, tested as follows:
