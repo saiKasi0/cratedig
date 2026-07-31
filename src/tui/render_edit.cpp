@@ -305,9 +305,8 @@ void place_handle(std::string& row, std::size_t column, std::string_view left,
   // precision. These are POSITIONS in a file, and the two of them are read
   // against each other and against the slice table below -- a unit that changes
   // with the zoom would make the same boundary read differently at two zooms.
-  const std::string start = "start " + with_precision(
-                                           static_cast<double>(slice.start_frame) / rate, 3) +
-                            "s";
+  const std::string start =
+      "start " + with_precision(static_cast<double>(slice.start_frame) / rate, 3) + "s";
   const std::string end =
       "end " + with_precision(static_cast<double>(slice.end_frame) / rate, 3) + "s";
 
@@ -357,8 +356,7 @@ void place_handle(std::string& row, std::size_t column, std::string_view left,
   return "zero-cross · " + start + " · " + end;
 }
 
-[[nodiscard]] Element slice_panel(const UiState& state, const Layout& layout,
-                                  std::size_t columns) {
+[[nodiscard]] Element slice_panel(const UiState& state, const Layout& layout, std::size_t columns) {
   const std::size_t wide = panel_wave_columns(columns);
   const SliceMark& slice = state.slices[state.edit.slice];
 
@@ -374,9 +372,9 @@ void place_handle(std::string& row, std::size_t column, std::string_view left,
   // row instead would put the accent on ninety cells of empty space -- invisible, but
   // it is the accent budget, and a budget you cannot measure is not one.
   Elements inside;
-  inside.push_back(ftxui::hbox({ftxui::text(std::string(kGutter, ' ')),
-                                with_rules(std::string(wide, ' '), start_column, end_column,
-                                           "┯")}));
+  inside.push_back(
+      ftxui::hbox({ftxui::text(std::string(kGutter, ' ')),
+                   with_rules(std::string(wide, ' '), start_column, end_column, "┯")}));
   for (Element& row : slice_body(state, layout, columns, start_column, end_column)) {
     inside.push_back(std::move(row));
   }
@@ -396,17 +394,17 @@ void place_handle(std::string& row, std::size_t column, std::string_view left,
   // visible yet. The mockup's decorative "zoom 1:8" is the same fact said twice,
   // so it is said once.
   const std::size_t per_column = std::max<std::size_t>(state.edit.view.frames_visible / wide, 1);
-  auto title = ftxui::hbox({
-                   ftxui::text(" slice " + two_digit(state.edit.slice + 1) + " ") |
-                       ftxui::color(theme::bright()) | ftxui::bold,
-                   ftxui::filler(),
-                   ftxui::text((state.edit.snap_enabled ? std::string{" snap zero-cross · "}
-                                                        : std::string{" snap off · "}) +
-                               std::to_string(per_column) + " smp/col ") |
-                       ftxui::color(theme::muted()),
-               }) |
-               ftxui::size(ftxui::WIDTH, ftxui::EQUAL,
-                           static_cast<int>(columns > 2 ? columns - 2 : 1));
+  auto title =
+      ftxui::hbox({
+          ftxui::text(" slice " + two_digit(state.edit.slice + 1) + " ") |
+              ftxui::color(theme::bright()) | ftxui::bold,
+          ftxui::filler(),
+          ftxui::text((state.edit.snap_enabled ? std::string{" snap zero-cross · "}
+                                               : std::string{" snap off · "}) +
+                      std::to_string(per_column) + " smp/col ") |
+              ftxui::color(theme::muted()),
+      }) |
+      ftxui::size(ftxui::WIDTH, ftxui::EQUAL, static_cast<int>(columns > 2 ? columns - 2 : 1));
 
   return ftxui::window(std::move(title), ftxui::vbox(std::move(inside))) |
          ftxui::color(theme::structure()) |
@@ -526,9 +524,8 @@ constexpr std::size_t kParamsCells = 2 * (kParamNameCells + kParamValueCells) + 
       }
       line += clause;
     }
-    block.push_back(ftxui::hbox({ftxui::text("   "),
-                                 ftxui::text(line) | ftxui::color(theme::bright()),
-                                 ftxui::filler()}));
+    block.push_back(ftxui::hbox(
+        {ftxui::text("   "), ftxui::text(line) | ftxui::color(theme::bright()), ftxui::filler()}));
   }
   return block;
 }
@@ -591,9 +588,8 @@ constexpr std::size_t kParamsCells = 2 * (kParamNameCells + kParamValueCells) + 
   for (std::size_t slot = 0; slot < kLetters.size(); ++slot) {
     letters = splice_at(letters, shape.label_column[slot], kLetters[slot]);
   }
-  block.push_back(
-      ftxui::hbox({ftxui::text("   "), ftxui::text(letters) | ftxui::color(theme::label()),
-                   ftxui::filler()}));
+  block.push_back(ftxui::hbox(
+      {ftxui::text("   "), ftxui::text(letters) | ftxui::color(theme::label()), ftxui::filler()}));
   return block;
 }
 
@@ -617,25 +613,17 @@ constexpr std::size_t kParamsCells = 2 * (kParamNameCells + kParamValueCells) + 
     const SliceMark& slice = state.slices[index];
     const bool current = index == state.edit.slice;
 
-    const std::string line = two_digit(index + 1) + "  " +
-                             pad_left(with_precision(static_cast<double>(slice.start_frame) / rate,
-                                                     3),
-                                      6) +
-                             "  " +
-                             pad_left(with_precision(static_cast<double>(slice.end_frame) / rate, 3),
-                                      6) +
-                             "  " +
-                             pad_left(with_precision(static_cast<double>(slice.end_frame -
-                                                                        slice.start_frame) /
-                                                         rate,
-                                                     3),
-                                      5) +
-                             "  " + key_for_slice(state, index);
+    const std::string line =
+        two_digit(index + 1) + "  " +
+        pad_left(with_precision(static_cast<double>(slice.start_frame) / rate, 3), 6) + "  " +
+        pad_left(with_precision(static_cast<double>(slice.end_frame) / rate, 3), 6) + "  " +
+        pad_left(with_precision(static_cast<double>(slice.end_frame - slice.start_frame) / rate, 3),
+                 5) +
+        "  " + key_for_slice(state, index);
 
     // Bold, not accent: the accent is already spent on the boundary rules, and
     // a second orange thing would make neither of them the one to look at.
-    out.push_back(ftxui::text(line) |
-                  ftxui::color(current ? theme::bright() : theme::muted()) |
+    out.push_back(ftxui::text(line) | ftxui::color(current ? theme::bright() : theme::muted()) |
                   (current ? ftxui::bold : ftxui::nothing));
   }
   while (out.size() < rows) {
@@ -714,9 +702,9 @@ constexpr std::size_t kParamsCells = 2 * (kParamNameCells + kParamValueCells) + 
   body.push_back(ftxui::hbox({ftxui::filler(),
                               ftxui::text("nothing chopped yet") | ftxui::color(theme::muted()),
                               ftxui::filler()}));
-  body.push_back(ftxui::hbox({ftxui::filler(),
-                              ftxui::text(":chop transient") | ftxui::color(theme::label()),
-                              ftxui::filler()}));
+  body.push_back(
+      ftxui::hbox({ftxui::filler(), ftxui::text(":chop transient") | ftxui::color(theme::label()),
+                   ftxui::filler()}));
   body.push_back(ftxui::filler());
   return ftxui::vbox(std::move(body)) |
          ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, static_cast<int>(rows));
@@ -728,8 +716,7 @@ std::size_t edit_wave_columns_for(std::size_t terminal_columns) noexcept {
   return panel_wave_columns(terminal_columns);
 }
 
-Element render_edit(const UiState& state, std::size_t terminal_columns,
-                    std::size_t terminal_rows) {
+Element render_edit(const UiState& state, std::size_t terminal_columns, std::size_t terminal_rows) {
   const Layout layout = layout_for(terminal_columns, terminal_rows);
 
   Elements screen;
@@ -759,17 +746,16 @@ Element render_edit(const UiState& state, std::size_t terminal_columns,
   };
 
   Elements captions;
-  captions.push_back(sized(ftxui::hbox({ftxui::text(" envelope") | ftxui::color(theme::label()),
-                                        ftxui::filler()}),
-                           envelope_width));
+  captions.push_back(
+      sized(ftxui::hbox({ftxui::text(" envelope") | ftxui::color(theme::label()), ftxui::filler()}),
+            envelope_width));
   if (layout.show_table) {
     captions.push_back(
-        sized(ftxui::hbox({ftxui::text("slices  " + std::to_string(state.slices.size()) +
-                                       (state.chop_algorithm.empty()
-                                            ? ""
-                                            : " · " + state.chop_algorithm)) |
-                               ftxui::color(theme::label()),
-                           ftxui::filler()}),
+        sized(ftxui::hbox(
+                  {ftxui::text("slices  " + std::to_string(state.slices.size()) +
+                               (state.chop_algorithm.empty() ? "" : " · " + state.chop_algorithm)) |
+                       ftxui::color(theme::label()),
+                   ftxui::filler()}),
               table_width));
   }
   screen.push_back(ftxui::hbox(std::move(captions)));
@@ -777,9 +763,9 @@ Element render_edit(const UiState& state, std::size_t terminal_columns,
   if (layout.show_table) {
     screen.push_back(ftxui::hbox({
         sized(ftxui::text(""), envelope_width),
-        sized(ftxui::hbox({ftxui::text("nn   start     end    len  pad") |
-                               ftxui::color(theme::structure()),
-                           ftxui::filler()}),
+        sized(ftxui::hbox(
+                  {ftxui::text("nn   start     end    len  pad") | ftxui::color(theme::structure()),
+                   ftxui::filler()}),
               table_width),
     }));
   } else {

@@ -8,8 +8,8 @@
 #include <cmath>
 #include <cstddef>
 #include <iomanip>
-#include <sstream>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -93,8 +93,7 @@ std::string splice_at(std::string_view text, std::size_t column, std::string_vie
 
 ftxui::Element mode_line(const UiState& state, std::size_t columns, std::string_view prefix,
                          const std::vector<std::string>& facts,
-                         std::span<const std::string_view> hint_tiers,
-                         std::size_t min_fact_cells) {
+                         std::span<const std::string_view> hint_tiers, std::size_t min_fact_cells) {
   // The prompt takes the WHOLE line when it is up. A `:` line sharing space
   // with a keymap is a prompt you cannot read, and the facts it would be
   // competing with are all still one keystroke away.
@@ -128,7 +127,8 @@ ftxui::Element mode_line(const UiState& state, std::size_t columns, std::string_
   // What the last command said, in place of everything else. See UiState for
   // why it wins over the counters and the keymap both.
   if (!state.message.empty()) {
-    const std::size_t room = columns > utf8_cells(prefix) + 1 ? columns - utf8_cells(prefix) - 1 : 1;
+    const std::size_t room =
+        columns > utf8_cells(prefix) + 1 ? columns - utf8_cells(prefix) - 1 : 1;
     std::string text = state.message;
     if (utf8_cells(text) > room) {
       text = utf8_split(text, room).first;
