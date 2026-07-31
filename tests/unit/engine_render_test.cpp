@@ -468,3 +468,103 @@ TEST_CASE("Engine retires finished samples to the janitor", "[unit]") {
   CHECK(sample.use_count() == 2);  // the voice's reference is gone; the pad still holds one
   CHECK(eng.garbage_overflows() == 0);
 }
+
+TEST_CASE("Engine places a trigger inside the block", "[unit]") {
+  // The engine half of sample-accurate triggering: PadEvent::frame_offset has
+  // been carried since M1 and ignored until M4.
+  //
+  // Compared against the SAME trigger at offset zero rather than against a
+  // hard-coded frame. set_pad_sample() builds a config with the default 32-frame
+  // declick fade, so a voice's first frames are legitimately zero and "the first
+  // non-zero sample" is not where the voice started -- an assertion phrased that
+  // way tests the fade, not the offset.
+  constexpr std::uint32_t kOffset = 41;
+  constexpr std::size_t kFrames = 1'024;
+
+  const auto render_at = [](std::uint32_t offset) {
+    engine::Engine eng{test_config()};
+    load_pads(eng);
+    REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 1, .velocity = 1.0F, .frame_offset = offset}));
+    RenderCapture capture{kFrames, kChannels};
+    const std::array<std::size_t, 1> blocks{kFrames};  // one block, so the offset is inside it
+    capture.render_in_blocks(eng, blocks);
+    std::vector<float> out(capture.samples().begin(), capture.samples().end());
+    return out;
+  };
+
+  const std::vector<float> aligned = render_at(0);
+  const std::vector<float> offset = render_at(kOffset);
+
+  for (std::size_t frame = 0; frame < kOffset; ++frame) {
+    INFO("frame " << frame << " precedes the offset and must be untouched");
+    REQUIRE(offset[frame] == 0.0F);
+  }
+  // Shifted, not merely delayed: every frame after the offset is bit-identical
+  // to the un-offset render, which is what shows the envelope and the fade
+  // advanced with the audio rather than during the skipped frames.
+  for (std::size_t frame = 0; frame + kOffset < kFrames; ++frame) {
+    INFO("aligned frame " << frame << " vs offset frame " << (frame + kOffset));
+    REQUIRE(aligned[frame] == offset[frame + kOffset]);
+  }
+  // And it is not silence being compared with silence.
+  CHECK(std::any_of(aligned.begin(), aligned.end(), [](float v) { return v != 0.0F; }));
+}
+
+TEST_CASE("Engine clamps a frame offset past the end of the block", "[unit]") {
+  // frame_offset crossed a thread boundary exactly as event.pad did, so a
+  // producer that disagrees with us about the block length must not be able to
+  // push a voice past the end of it.
+  //
+  // What is asserted here is that the hit SURVIVES -- clamped rather than
+  // dropped, because a note slightly late beats a note silently lost. Where
+  // exactly it lands is pinned at the pool level, in voice_pool_test.cpp, where
+  // there is no fade in the way.
+  engine::Engine eng{test_config()};
+  load_pads(eng);
+  REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 1, .velocity = 1.0F, .frame_offset = 100'000}));
+
+  RenderCapture capture{2'048, kChannels};
+  const std::array<std::size_t, 1> blocks{512};
+  capture.render_in_blocks(eng, blocks);
+
+  const std::span<const float> samples = capture.samples();
+  CHECK(std::any_of(samples.begin(), samples.end(), [](float v) { return v != 0.0F; }));
+
+  // Not at the top of the block either: a clamp that collapsed to zero would
+  // turn every bad offset into an on-the-beat hit, which is the failure mode
+  // that would never be noticed.
+  CHECK(samples[0] == 0.0F);
+  CHECK(samples[1] == 0.0F);
+}
+
+TEST_CASE("Engine output with offset triggers is invariant to block size", "[unit]") {
+  // The property that matters most for M4: the sequencer will place hits at
+  // exact frames, and if a hit lands on a different frame under a different
+  // block size then the offline bounce cannot reproduce the live render -- which
+  // is the whole acceptance.
+  //
+  // Offsets are chosen to straddle a 64-frame boundary, so under small blocks
+  // they are NOT all inside the first block and the clamp has to behave.
+  constexpr std::size_t kFrames = 8'192;
+
+  const auto render_with = [](std::span<const std::size_t> blocks) {
+    engine::Engine eng{test_config()};
+    load_pads(eng);
+    REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 1, .velocity = 1.0F, .frame_offset = 0}));
+    REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 0, .velocity = 0.5F, .frame_offset = 37}));
+    RenderCapture capture{kFrames, kChannels};
+    capture.render_in_blocks(eng, blocks);
+    return capture.hash();
+  };
+
+  const std::array<std::size_t, 1> one_block{kMaxBlock};
+  const std::array<std::size_t, 1> small{64};
+  const std::array<std::size_t, 3> mixed{128, 512, 333};
+
+  // Every event is queued before the first render() call, so all of them are
+  // drained in block one whatever its size -- which is what makes this a fair
+  // comparison rather than a test of when the events happened to be pushed.
+  const std::uint64_t reference = render_with(one_block);
+  CHECK(render_with(small) == reference);
+  CHECK(render_with(mixed) == reference);
+}

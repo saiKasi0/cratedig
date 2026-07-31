@@ -84,6 +84,23 @@ struct Voice {
   // attribution even as the pad's config moves on underneath it.
   std::uint8_t pad = 0;
 
+  // Frames into the NEXT block before this voice begins sounding.
+  //
+  // This is what makes a trigger sample-accurate rather than block-quantised: a
+  // hit is placed where it belongs inside the block instead of at whichever
+  // boundary happened to come first. Consumed by the first render_add() after
+  // the trigger and zero thereafter -- it describes one block, not the voice.
+  //
+  // Implemented as a starting index for the render loop rather than by splitting
+  // the block into sub-spans. Costs nothing per frame, and the envelope and the
+  // declick fades line up for free because both advance per RENDERED frame: skip
+  // the frame and you skip its envelope step too, which is exactly right.
+  //
+  // An offset at or past the block length leaves nothing to render this block
+  // and starts the voice at the beginning of the next one. The engine clamps
+  // before it gets here, so that is a floor rather than a behaviour to rely on.
+  std::size_t start_offset = 0;
+
   // Producing audio. A voice that has run off the end of its slice clears this
   // but keeps `config` until the GarbageRing accepts it — see reclaim().
   bool active = false;
@@ -112,9 +129,15 @@ class VoicePool {
   // every voice is busy AND the garbage ring is full, i.e. the janitor has
   // stalled. Dropping the hit is the correct outcome there: the alternative is
   // releasing a reference on the audio thread.
+  //
+  // `frame_offset` places the hit inside the next block — see Voice::start_offset.
+  // It defaults to zero, which is where every trigger landed before M4 and is
+  // still where a live keypress lands: a key that was pressed between two blocks
+  // has no more precise time than "the start of the next one".
   template <typename GarbageSink>
   bool trigger(const std::shared_ptr<const PadConfig>& config, float velocity,
-               std::uint32_t engine_sample_rate, GarbageSink& garbage) noexcept {
+               std::uint32_t engine_sample_rate, GarbageSink& garbage,
+               std::size_t frame_offset = 0) noexcept {
     if (config == nullptr || config->sample == nullptr || config->sample->empty() ||
         engine_sample_rate == 0) {
       return false;
@@ -161,6 +184,7 @@ class VoicePool {
     slot->started_at = m_next_sequence++;
     slot->peak = 0.0F;
     slot->pad = config->pad;
+    slot->start_offset = frame_offset;
     slot->env.trigger(config->env);
     slot->active = true;
 
@@ -384,7 +408,14 @@ class VoicePool {
     // loop of the audio callback.
     float block_peak = 0.0F;
 
-    for (std::size_t frame = 0; frame < num_frames; ++frame) {
+    // Where this voice starts inside the block, consumed BEFORE the loop rather
+    // than after it: every early return below leaves through `return`, so
+    // clearing it afterwards would leave a stale offset on a voice that ended
+    // mid-block and apply it again to whatever reused the slot.
+    const std::size_t first = voice.start_offset;
+    voice.start_offset = 0;
+
+    for (std::size_t frame = first; frame < num_frames; ++frame) {
       const auto index = static_cast<std::size_t>(voice.phase >> kPhaseFractionBits);
 
       // The END OF THE SLICE, not the end of the sample. This is the line that

@@ -122,8 +122,7 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
   adopt_pad_configs();
 
   // Drain first, so a hit that arrived during the previous block sounds in this
-  // one. M1 starts every voice at the block boundary; PadEvent::frame_offset is
-  // where M4 will make that sample-accurate.
+  // one, placed inside it by PadEvent::frame_offset.
   rt::PadEvent event{};
   while (m_events.try_pop(event)) {
     if (event.pad >= rt::kNumPads) {
@@ -143,10 +142,19 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
     if (config == nullptr || config->sample == nullptr) {
       continue;  // an unloaded pad is silent, not an error
     }
+    // CLAMPED, not trusted and not dropped. frame_offset crossed a thread
+    // boundary exactly as event.pad did, and a producer that disagrees with us
+    // about the block length would otherwise place a hit past the end of it —
+    // where the voice would sound a block late instead. Clamping costs the hit
+    // at most a few hundred microseconds; dropping it would lose a note, which
+    // is the worse answer for a bad number that is probably off by one.
+    const std::size_t offset =
+        num_frames == 0 ? 0 : std::min<std::size_t>(event.frame_offset, num_frames - 1);
+
     // Copying the shared_ptr is an atomic increment — allocation-free and
     // lock-free, so it is legal here. The voice releases it through the garbage
     // ring, never by dropping it on this thread.
-    if (!m_voices.trigger(config, event.velocity, m_config.sample_rate, m_garbage)) {
+    if (!m_voices.trigger(config, event.velocity, m_config.sample_rate, m_garbage, offset)) {
       m_published.dropped_triggers.fetch_add(1, std::memory_order_relaxed);
       continue;
     }

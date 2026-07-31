@@ -716,3 +716,101 @@ TEST_CASE("declick never eats more than half a slice", "[unit]") {
   CHECK(out[0] == 0.0F);  // still starts silent
   CHECK(*std::max_element(out.begin(), out.begin() + 10) == 1.0F);
 }
+
+TEST_CASE("a trigger with a frame offset starts exactly there", "[unit]") {
+  // Sample-accurate triggering, which is the whole point of PadEvent::frame_offset
+  // and the thing M4's sequencer is built on. Before this, every hit landed on a
+  // block boundary and a step placed 3 ms into a block sounded at 0 ms.
+  rt::VoicePool<4> pool;
+  rt::GarbageRing<8> garbage;
+  Buffers buffers{1, 64};
+
+  constexpr std::size_t kOffset = 17;  // deliberately not a round number
+  const auto config = make_config(make_sample(128, 1, kEngineRate, 0.5F));
+  REQUIRE(pool.trigger(config, 1.0F, kEngineRate, garbage, kOffset));
+  pool.render_add(buffers.channels(), 64);
+
+  const std::vector<float>& out = buffers.channel(0);
+  for (std::size_t frame = 0; frame < kOffset; ++frame) {
+    INFO("frame " << frame << " is before the offset and must be silent");
+    REQUIRE(out[frame] == 0.0F);
+  }
+  // And it starts on the very next frame, rather than one late -- an off-by-one
+  // here is inaudible and would quietly bias every sequenced hit by a sample.
+  CHECK(out[kOffset] == 0.5F);
+}
+
+TEST_CASE("an offset trigger is the same audio, moved", "[unit]") {
+  // The strong form: offsetting a hit must SHIFT it, not alter it. If the
+  // envelope, the declick fade or the phase advanced during the skipped frames,
+  // the two runs below would differ somewhere after the offset -- which is
+  // exactly the bug that a "silent until the offset" check alone would miss.
+  constexpr std::size_t kOffset = 23;
+  constexpr std::size_t kFrames = 256;
+
+  const auto config = std::make_shared<const rt::PadConfig>(
+      rt::PadConfig{.sample = make_sample(512, 1, kEngineRate, 0.75F),
+                    .env = rt::AdsrFrames{.attack = 40, .decay = 30, .sustain = 0.4F},
+                    .fade_in_frames = 16,
+                    .fade_out_frames = 16});
+
+  rt::VoicePool<4> aligned_pool;
+  rt::GarbageRing<8> aligned_garbage;
+  Buffers aligned{1, kFrames};
+  REQUIRE(aligned_pool.trigger(config, 1.0F, kEngineRate, aligned_garbage));
+  aligned_pool.render_add(aligned.channels(), kFrames);
+
+  rt::VoicePool<4> offset_pool;
+  rt::GarbageRing<8> offset_garbage;
+  Buffers offset{1, kFrames};
+  REQUIRE(offset_pool.trigger(config, 1.0F, kEngineRate, offset_garbage, kOffset));
+  offset_pool.render_add(offset.channels(), kFrames);
+
+  for (std::size_t frame = 0; frame + kOffset < kFrames; ++frame) {
+    INFO("frame " << frame << " aligned vs " << (frame + kOffset) << " offset");
+    REQUIRE(aligned.channel(0)[frame] == offset.channel(0)[frame + kOffset]);
+  }
+}
+
+TEST_CASE("a frame offset applies to one block only", "[unit]") {
+  // start_offset describes a block, not a voice. A voice that survives into the
+  // next block must render it from frame 0 -- leaving the offset set would make
+  // every subsequent block of a long note skip its first samples, which sounds
+  // like a stutter and would be blamed on the interpolator.
+  rt::VoicePool<4> pool;
+  rt::GarbageRing<8> garbage;
+  Buffers buffers{1, 32};
+
+  const auto config = make_config(make_sample(512, 1, kEngineRate, 1.0F));
+  REQUIRE(pool.trigger(config, 1.0F, kEngineRate, garbage, 30));
+  pool.render_add(buffers.channels(), 32);
+  CHECK(buffers.channel(0)[29] == 0.0F);
+  CHECK(buffers.channel(0)[30] == 1.0F);
+
+  buffers.clear();
+  pool.render_add(buffers.channels(), 32);
+  for (std::size_t frame = 0; frame < 32; ++frame) {
+    INFO("second block, frame " << frame);
+    REQUIRE(buffers.channel(0)[frame] == 1.0F);
+  }
+}
+
+TEST_CASE("an offset past the block starts the voice in the next one", "[unit]") {
+  // The floor rather than a behaviour to rely on: the engine clamps before this
+  // can happen. What matters is that it degrades to a block-late hit instead of
+  // reading past the end of the buffer.
+  rt::VoicePool<4> pool;
+  rt::GarbageRing<8> garbage;
+  Buffers buffers{1, 16};
+
+  const auto config = make_config(make_sample(128, 1, kEngineRate, 1.0F));
+  REQUIRE(pool.trigger(config, 1.0F, kEngineRate, garbage, 999));
+  pool.render_add(buffers.channels(), 16);
+  for (const float value : buffers.channel(0)) {
+    REQUIRE(value == 0.0F);
+  }
+
+  buffers.clear();
+  pool.render_add(buffers.channels(), 16);
+  CHECK(buffers.channel(0)[0] == 1.0F);
+}
