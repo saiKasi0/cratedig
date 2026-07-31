@@ -1,0 +1,26 @@
+# Onset ground truth for drum_heavy_kick.flac — one time in seconds per line.
+#
+# This is a GOLDEN FILE (docs/TESTING.md): never edited to make a test pass.
+#
+# HOW IT WAS LABELLED, precisely, because the method is what makes the number
+# it produces mean anything:
+#
+#   By INSPECTION of the decoded waveform at sample resolution, not by ear and
+#   not by running the detector this is used to check. The file was decoded to
+#   48 kHz mono and its first samples read directly:
+#
+#     frame  0   +0.00000
+#     frame  1   +0.00327     0.1% of peak
+#     frame  3   +0.01073     1% of peak
+#     frame 11   +0.05688     5% of peak
+#     frame 40                10% of peak
+#     frame 112               50% of peak
+#
+#   The file is a single isolated kick that begins at its first sample and
+#   decays away; there is no second attack anywhere in its 0.27 s. So there is
+#   exactly one onset and it is at the beginning.
+#
+# Labelling this file is defensible because it contains one obvious event. The
+# CC0 percussion LOOPS in this pack are not labelled, and deliberately so —
+# see the note in docs/TESTING.md.
+0.000

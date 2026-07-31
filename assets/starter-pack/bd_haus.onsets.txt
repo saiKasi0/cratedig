@@ -1,0 +1,27 @@
+# Onset ground truth for bd_haus.flac — one time in seconds per line.
+#
+# This is a GOLDEN FILE (docs/TESTING.md): never edited to make a test pass.
+#
+# HOW IT WAS LABELLED, and why this file is worth having:
+#
+#   By INSPECTION of the decoded waveform at sample resolution, not by ear and
+#   not by running the detector this is used to check. Decoded to 48 kHz mono:
+#
+#     frame  11   0.23 ms    first sample above 0.1% of peak
+#     frame  18   0.38 ms    1% of peak
+#     frame 241   5.02 ms    5% of peak
+#     frame 242   5.04 ms    10% of peak
+#     frame 246   5.12 ms    50% of peak
+#
+#   The interesting part is the gap. This kick opens with a very quiet
+#   pre-ring — an alternating few samples at 1e-5 to 1e-3, well below anything
+#   audible — and then the actual attack arrives at 5 ms and reaches half scale
+#   within four more samples.
+#
+#   The onset is the ATTACK, at 5 ms, not the pre-ring at 0.23 ms. A crude
+#   amplitude gate would answer 0.23 ms and be wrong by 5 ms; that difference is
+#   exactly what this file is here to catch, and it is why the label is a
+#   judgement recorded with its reasoning rather than a number a script emitted.
+#
+#   One onset: the rest of the 0.22 s is decay, with no second attack.
+0.005

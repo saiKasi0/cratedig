@@ -47,7 +47,12 @@
 version = 1
 
 # Fixtures land with the milestone whose tests consume them. Still outstanding:
-#   M3 — percussive material + hand-labeled *.onsets.txt ground truth
+#   M3 — a real performance with hand-labeled onsets. The two single-hit files
+#        below now carry committed *.onsets.txt (labeled by inspection at sample
+#        resolution; each file records its own method). The percussion LOOPS are
+#        deliberately unlabeled: they are dense sustained textures rather than
+#        discrete patterns, and labeling them would produce ground truth nobody
+#        could defend. See "The onset ground truth" in docs/TESTING.md.
 #   M5 — near-silent and clipped/loud files for metering and limiter edges
 #   M6 — remaining codecs/containers
 #
@@ -92,7 +97,12 @@ source_url = "https://raw.githubusercontent.com/sonic-pi-net/sonic-pi/622864a774
 sha256 = "9c141c8de85e695baf6d490c9904b057d97c2c49fa3985f0396fea320ce35a57"
 # FLAC, 44.1 kHz, mono, 0.27 s. The "starter-pack kick" named in the M1
 # acceptance criterion, and the file the shell loads by default.
-used_by = ["tests/unit/fixture_decode_test.cpp", "M1 acceptance: cratedig plays a kick"]
+used_by = [
+  "tests/unit/fixture_decode_test.cpp",
+  "tests/unit/onset_accuracy_test.cpp",
+  "M1 acceptance: cratedig plays a kick",
+]
+# Onset ground truth: drum_heavy_kick.onsets.txt (committed, one onset at 0.000).
 
 [[fixture]]
 path = "bd_haus.flac"
@@ -102,7 +112,11 @@ source_url = "https://raw.githubusercontent.com/sonic-pi-net/sonic-pi/622864a774
 sha256 = "b9aa2aa81a8ccabc1a93763e689587447860497a661ed03ba3f9bd6c06e99346"
 # FLAC, 44.1 kHz, stereo, 0.22 s. Second percussive source, and the short stereo
 # case for the channel-mapping path.
-used_by = ["tests/unit/fixture_decode_test.cpp"]
+#
+# Onset ground truth: bd_haus.onsets.txt (committed, one onset at 0.005). The
+# 5 ms is not a typo -- this kick opens with an inaudible pre-ring before its
+# actual attack, which is exactly why it is worth labeling.
+used_by = ["tests/unit/fixture_decode_test.cpp", "tests/unit/onset_accuracy_test.cpp"]
 
 [[fixture]]
 path = "ambi_choir.flac"

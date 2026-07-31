@@ -32,6 +32,53 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
+def check_onset_labels(fixtures: list[dict], errors: list[str]) -> int:
+    """Validate every committed *.onsets.txt.
+
+    These are golden files (docs/TESTING.md): hand-made ground truth for the
+    onset accuracy tests, tracked in git rather than fetched. Three things can
+    go wrong silently, so all three are checked here rather than discovered as
+    a confusing test failure:
+
+      - a label file for audio that is not in the manifest, which would mean
+        ground truth for something with no recorded provenance;
+      - a malformed line, which std::stod would turn into a zero and quietly
+        drag the measured accuracy down;
+      - times out of order or negative, which would break the one-to-one
+        matching the score depends on.
+    """
+    known_audio = {entry.get("path") for entry in fixtures}
+    count = 0
+
+    for label_path in sorted(PACK_DIR.glob("*.onsets.txt")):
+        count += 1
+        audio = label_path.name.removesuffix(".onsets.txt")
+        if not any(other.startswith(audio + ".") for other in known_audio if other):
+            errors.append(
+                f"{label_path.name}: labels audio {audio!r}, which is not in the manifest"
+            )
+
+        previous = -1.0
+        for number, raw in enumerate(label_path.read_text().splitlines(), start=1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                value = float(line)
+            except ValueError:
+                errors.append(f"{label_path.name}:{number}: {line!r} is not a number")
+                continue
+            if value < 0.0:
+                errors.append(f"{label_path.name}:{number}: negative time {value}")
+            if value <= previous:
+                errors.append(
+                    f"{label_path.name}:{number}: {value} is not after the previous label"
+                )
+            previous = value
+
+    return count
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -118,8 +165,13 @@ def main() -> int:
                 f"    on disk:  {actual}"
             )
 
+    labels = check_onset_labels(fixtures, errors)
+
     for message in errors:
         print(f"error: {message}", file=sys.stderr)
+
+    if labels:
+        print(f"onset labels: {labels} file(s) well-formed")
 
     summary = f"fixtures: {checked} verified, {missing} not fetched, {derived} derived (not hash-enforced)"
     print(summary, file=sys.stderr if errors else sys.stdout)

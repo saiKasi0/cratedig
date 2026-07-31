@@ -14,11 +14,14 @@ namespace ingest {
 // milliseconds on a short loop -- everything the audio thread may not do. It
 // produces positions; the audio thread never sees this code.
 //
-// The method is spectral flux with an adaptive median threshold, which is the
-// standard approach for percussive material (Dixon, "Onset Detection
-// Revisited", DAFx-06) and the one docs/ROADMAP.md names. Flux rather than
-// amplitude, because a snare landing over a ringing kick barely changes the
-// amplitude envelope while changing the spectrum completely.
+// The method is LOG-magnitude spectral flux with an adaptive median threshold,
+// which is the standard approach for percussive material (Dixon, "Onset
+// Detection Revisited", DAFx-06) and the one docs/ROADMAP.md names. Flux rather
+// than amplitude, because a snare landing over a ringing kick barely changes the
+// amplitude envelope while changing the spectrum completely; log rather than
+// linear because a real kick's pitch-falling decay does change the spectrum, and
+// on linear magnitudes it changes it enough to look like a second hit. See the
+// note at the flux loop in onset.cpp for the measurement.
 
 struct OnsetParams {
   // Frames between analysis windows. 256 at 48 kHz is 5.3 ms, which bounds how

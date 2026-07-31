@@ -172,15 +172,25 @@ TEST_CASE("backtracking is what puts the position on the attack", "[unit]") {
   const Alignment raw = align(ingest::detect_onsets(sample, without).frames, truth, kTolerance);
   const Alignment backtracked = align(ingest::detect_onsets(sample).frames, truth, kTolerance);
 
-  INFO("worst late: " << raw.worst_late << " frames without backtracking, "
-                      << backtracked.worst_late << " with");
+  const std::ptrdiff_t raw_worst = std::max(std::abs(raw.worst_early), raw.worst_late);
+  const std::ptrdiff_t fixed_worst =
+      std::max(std::abs(backtracked.worst_early), backtracked.worst_late);
 
-  // Measured: 64 frames late without, 0 with. Asserted as a strict improvement
-  // rather than as those two numbers, because the exact figure depends on where
-  // the hop grid happens to fall relative to each hit -- but that backtracking
-  // helps, and by more than a rounding, does not.
-  CHECK(raw.worst_late > 0);
-  CHECK(backtracked.worst_late < raw.worst_late);
+  INFO("worst offset from the attack: "
+       << raw_worst << " frames without backtracking, " << fixed_worst << " with (early/late raw ["
+       << raw.worst_early << ", " << raw.worst_late << "], fixed [" << backtracked.worst_early
+       << ", " << backtracked.worst_late << "])");
+
+  // The magnitude of the error either way, not just lateness. Without the
+  // backtrack-and-refine pass a position is quantised to the analysis hop, so it
+  // is off by up to 256 frames in whichever direction the grid happens to fall;
+  // with it, the position is found at sample resolution.
+  //
+  // Asserted as a strict improvement rather than as the two measured numbers,
+  // because how far off the raw position is depends entirely on where the hop
+  // grid lands relative to each hit -- but that the pass helps does not.
+  CHECK(raw_worst > 0);
+  CHECK(fixed_worst < raw_worst);
 }
 
 TEST_CASE("a dense roll is not collapsed into one hit", "[unit]") {

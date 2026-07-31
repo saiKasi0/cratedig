@@ -212,12 +212,59 @@ dead weight and unverifiable provenance risk.
 | Sample rates | At least one 44.1 kHz and one 48 kHz file so the resampler path is always exercised | M1 | **done** — the Sonic Pi files are 44.1 kHz, `kick_48k.wav` is derived |
 | Stereo | A file with genuinely different left and right content, so a decoder that duplicates channel 0 is caught | M1 | **done** — `ambi_choir.flac`, `bd_haus.flac` |
 | Long-form | One file > 3 minutes, for buffering/streaming and peak-pyramid stress | M2 | **done** — `long_form_drums.flac`, 5.5 min, assembled locally from nine CC0 sources |
-| Percussive | Short percussive material **with hand-labeled onset ground truth committed as text** next to the manifest (`*.onsets.txt`, one time-in-seconds per line) | M3 | pending |
+| Percussive | Short percussive material **with hand-labeled onset ground truth committed as text** next to the manifest (`*.onsets.txt`, one time-in-seconds per line) | M3 | **partly** — see below |
 | Near-silent | Signal near the noise floor — metering, denormal, and auto-gain edge cases | M5 | pending |
 | Clipped / loud | Material at or over 0 dBFS — limiter, clip indicator, and headroom paths | M5 | pending |
 
 Onset ground truth is hand-labeled and committed; it is a golden file and falls
 under the "never edit to make a test pass" rule above.
+`scripts/verify_fixtures.py` checks every `*.onsets.txt` for a manifest-listed
+audio file, parseable numbers, and ascending non-negative times — a malformed
+line would otherwise parse as zero and quietly drag the measured accuracy down.
+
+### The onset ground truth, and what it is not
+
+The M3 acceptance is "onset precision/recall ≥ 0.9 on labeled set". *Which*
+labeled set is the whole question, so the three used are described here rather
+than left to be inferred from the test.
+
+| Set | Ground truth from | Skips? |
+|---|---|---|
+| Synthetic patterns | **Construction** — hits placed at frames the test chose | never |
+| Real hits, arranged | **Construction** — two CC0 kick recordings placed at known times | `[fixture]` |
+| `drum_heavy_kick`, `bd_haus` | **Inspection** of the decoded waveform | `[fixture]` |
+
+The two inspected files are single isolated hits. `bd_haus` is the one that
+earns its place: it opens with ~5 ms of inaudible pre-ring before the real
+attack, so a crude amplitude gate answers 0.23 ms where the onset is at 5 ms.
+Each label file records how it was labelled, at sample resolution, in its own
+header.
+
+**The CC0 percussion loops are deliberately NOT labeled.** `loop_industrial`,
+`loop_perc1`, `loop_tabla`, `loop_compus`, `loop_garzul` and `loop_safari` were
+all examined at millisecond resolution while writing these tests, and every one
+is a dense sustained texture — reverberant industrial noise, hand-percussion
+washes, tabla rolls — rather than a pattern of discrete hits. None has isolated
+attacks that could be labeled with confidence. Labeling them anyway would
+produce ground truth that could not be defended, and a precision/recall figure
+computed against it would be a number rather than a measurement.
+
+**What is still missing**, stated plainly: a real performance with real timing
+and overlapping hits, labeled by a human listening to it. The arranged-real-hits
+set is the closest available substitute — real transients and real spectra, with
+labels that are exact because the test placed them — but it has no timing feel
+and no hits landing on top of each other. That gap needs ears, and archive.org
+(where public-domain recordings live) has been unreachable from this machine
+throughout M2 and M3.
+
+**One thing the real material changed about the implementation.** The first
+version of the detector used linear-magnitude spectral flux and scored precision
+0.33 on the arranged real hits — 43 detections for 14 hits — while scoring a
+perfect 1.0 on every synthetic case. The 29 extras were all *inside* the kick
+decays, because a real kick's pitch-falling tail keeps pushing energy into bins
+that were quiet. Log-magnitude flux fixed it: 14 for 14, none spurious. No
+synthetic test could have found that, which is the argument for keeping real
+material in the loop even when its labels have to be constructed.
 
 ### Source URLs are pinned to a commit, not a tag
 

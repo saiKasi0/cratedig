@@ -177,9 +177,23 @@ OnsetResult detect_onsets(const rt::Sample& sample, const OnsetParams& params) {
     // HALF-WAVE RECTIFIED: only bins that got LOUDER count. Energy leaving a
     // band is a note ending, and a detector that counted it would fire twice
     // per hit -- once at the attack and once at the decay.
+    //
+    // ON LOG MAGNITUDES, which is not cosmetic. A real kick's decay is a
+    // pitch-falling sine, so as its fundamental sweeps downward it keeps
+    // pushing energy into bins that were quiet -- and on linear magnitudes
+    // those rises are large enough to look like attacks. Measured on a pattern
+    // built from two real CC0 kick recordings: 43 detections for 14 hits, all
+    // 29 extras inside the decays at consistent offsets. On log magnitudes: 14
+    // for 14, none spurious.
+    //
+    // The reason it works is the shape of the compression. A hit is a rise
+    // across the WHOLE spectrum at once; a pitch sweep is a large rise in a few
+    // bins. log() flattens the large narrow rise and preserves the small broad
+    // one, so the two stop being confusable. log1p rather than log because bins
+    // are legitimately zero and log(0) is not.
     float sum = 0.0F;
     for (std::size_t bin = 0; bin < kBins; ++bin) {
-      const float rise = current[bin] - previous[bin];
+      const float rise = std::log1p(current[bin]) - std::log1p(previous[bin]);
       if (rise > 0.0F) {
         sum += rise;
       }
