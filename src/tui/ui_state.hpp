@@ -81,6 +81,38 @@ struct PadState {
   std::string name;  // empty when nothing is loaded
   float level = 0.0F;
   bool loaded = false;
+
+  // Which slice this pad plays, or none. Displayed rather than acted on -- the
+  // engine already has the config.
+  bool has_slice = false;
+  std::size_t slice_index = 0;
+
+  // How long ago the pad was hit, in seconds, and how hard. Straight from
+  // engine::PadGlow; `glow_seconds` is meaningless unless `triggered`.
+  bool triggered = false;
+  float glow_seconds = 0.0F;
+  float glow_velocity = 0.0F;
+};
+
+// How long a pad stays visibly lit after a hit.
+//
+// A LOOK, not an engine fact, which is why it lives here and not in the
+// telemetry: the engine publishes an age and the interface decides what to do
+// with it. 0.35 s is long enough to see at 30 Hz and short enough that a
+// sixteenth at 160 bpm still reads as separate flashes.
+inline constexpr float kGlowSeconds = 0.35F;
+
+// The visible strength of a pad's glow, 0 when it is not lit.
+//
+// Velocity scales it, so a soft hit lights the pad less than a hard one -- the
+// same information the player put in, coming back out.
+[[nodiscard]] float glow_intensity(const PadState& pad) noexcept;
+
+// One chop, as the interface needs it. Frames rather than seconds so the
+// waveform view can place it without a rate conversion at every use.
+struct SliceMark {
+  std::size_t start_frame = 0;
+  std::size_t end_frame = 0;
 };
 
 struct UiState {
@@ -101,6 +133,11 @@ struct UiState {
 
   WaveView view;
   PanelTab tab = PanelTab::kSample;
+
+  // The chops, ascending and non-overlapping. Empty until something has been
+  // chopped, which is the state the wave panel's ruler row falls back to.
+  std::vector<SliceMark> slices;
+  std::string chop_algorithm;  // "transient" or "grid n", for the panel
 
   std::array<PadState, rt::kNumPads> pads;
   std::uint8_t selected_pad = 0;

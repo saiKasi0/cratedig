@@ -192,6 +192,53 @@ void fill_bins(tui::UiState& state, int columns) {
   return state;
 }
 
+// A chopped state: sixteen slices across the fixture, assigned to pads, with
+// three pads glowing at different ages so the whole ramp appears in one frame.
+[[nodiscard]] tui::UiState chopped_state(int columns) {
+  tui::UiState state = playing_state(columns);
+  state.chop_algorithm = "transient";
+
+  constexpr std::size_t kSlices = 16;
+  for (std::size_t index = 0; index < kSlices; ++index) {
+    const std::size_t start = (kFixtureFrames * index) / kSlices;
+    const std::size_t end = (kFixtureFrames * (index + 1)) / kSlices;
+    state.slices.push_back(tui::SliceMark{.start_frame = start, .end_frame = end});
+
+    // "s07" rather than "chop7". A pad cell has five columns for a name, so
+    // "chop10".."chop16" all truncate to "chop1" and the grid stops
+    // distinguishing them -- which is exactly the sort of thing a snapshot is
+    // for noticing. Short and zero-padded, so every cell is the same width and
+    // the column of names lines up.
+    const std::string number =
+        index < 9 ? "0" + std::to_string(index + 1) : std::to_string(index + 1);
+    state.pads[index] = tui::PadState{.name = "s" + number,
+                                      .level = 0.0F,
+                                      .loaded = true,
+                                      .has_slice = true,
+                                      .slice_index = index};
+  }
+
+  // One pad at each step of the glow ramp, plus one that was hit long enough ago
+  // to be dark again. Without all four in one snapshot, a change to the ramp
+  // could alter three of them invisibly.
+  state.pads[0].triggered = true;
+  state.pads[0].glow_seconds = 0.01F;
+  state.pads[0].glow_velocity = 1.0F;  // hot
+  state.pads[5].triggered = true;
+  state.pads[5].glow_seconds = 0.15F;
+  state.pads[5].glow_velocity = 1.0F;  // lit
+  state.pads[10].triggered = true;
+  state.pads[10].glow_seconds = 0.30F;
+  state.pads[10].glow_velocity = 1.0F;  // dim
+  state.pads[15].triggered = true;
+  state.pads[15].glow_seconds = 2.00F;
+  state.pads[15].glow_velocity = 1.0F;  // long over
+
+  state.pads[0].level = 0.82F;
+  state.pads[5].level = 0.31F;
+  return state;
+}
+
 }  // namespace
 
 TEST_CASE("PERFORM renders at the 100x30 design grid", "[tui]") {
@@ -223,6 +270,99 @@ TEST_CASE("PERFORM renders at the 100x30 design grid", "[tui]") {
     state.tab = tui::PanelTab::kPattern;
     check_snapshot("perform_pattern_100x30", state, 100, 30);
   }
+
+  SECTION("chopped, with pads glowing") {
+    check_snapshot("perform_chopped_100x30", chopped_state(100), 100, 30);
+  }
+
+  SECTION("chopped and zoomed, so most boundaries are off screen") {
+    // The other half of the slice ruler: when only a few boundaries fall inside
+    // the view, only those get a tick -- and the numbers stay the SLICE numbers
+    // rather than being renumbered from what happens to be visible.
+    tui::UiState state = chopped_state(100);
+    state.view.first_frame = kFixtureFrames / 2;
+    state.view.frames_visible = kFixtureFrames / 8;
+    state.view.clamp(kFixtureFrames);
+    fill_bins(state, 100);
+    check_snapshot("perform_chopped_zoom_100x30", state, 100, 30);
+  }
+}
+
+TEST_CASE("slice markers replace the time ruler only when there are slices", "[tui]") {
+  // Two states differing only in whether anything has been chopped. Before, the
+  // row pair is elapsed time; after, it is numbered boundaries.
+  const std::string unchopped = strip_ansi(render_screen(playing_state(100), 100, 30).ToString());
+  const std::string chopped = strip_ansi(render_screen(chopped_state(100), 100, 30).ToString());
+
+  CHECK(unchopped != chopped);
+  CHECK(unchopped.find("┬") != std::string::npos);  // the time ruler's own ticks
+  CHECK(chopped.find("┬") != std::string::npos);    // ...and the slice ruler's
+
+  // The give-away is the numbering: slice numbers are 01..16, times are not.
+  CHECK(chopped.find("01") != std::string::npos);
+  CHECK(chopped.find("16") != std::string::npos);
+}
+
+TEST_CASE("a pad's glow fades and then goes out", "[tui]") {
+  // The ramp, asserted on the rendered cells rather than by reading the layout:
+  // the rule is about what reaches the screen.
+  //
+  // Counted as ACCENT CELLS on the pad row, because the ramp is built from
+  // intensity and weight rather than from four different colours -- in sixteen
+  // colours there is no glow, and a ramp made of colours would simply not exist
+  // on a 16-colour console.
+  const auto lit_pads = [](float age) {
+    tui::UiState state = chopped_state(100);
+    for (tui::PadState& pad : state.pads) {
+      pad.triggered = false;
+      pad.level = 0.0F;
+    }
+    state.playing = false;
+    state.pads[0].triggered = true;
+    state.pads[0].glow_seconds = age;
+    state.pads[0].glow_velocity = 1.0F;
+
+    const ftxui::Screen screen = render_screen(state, 100, 30);
+    std::size_t accent = 0;
+    for (int y = 14; y < 27; ++y) {
+      for (int x = 0; x < 46; ++x) {
+        if (screen.CellAt(x, y).foreground_color == tui::theme::accent() ||
+            screen.CellAt(x, y).inverted) {
+          ++accent;
+        }
+      }
+    }
+    return accent;
+  };
+
+  const std::size_t fresh = lit_pads(0.01F);
+  const std::size_t old = lit_pads(0.30F);
+  const std::size_t gone = lit_pads(1.00F);
+
+  INFO("accent/inverted cells in the pad grid: " << fresh << " fresh, " << old << " fading, "
+                                                 << gone << " past the fade");
+  CHECK(fresh > 0);
+  CHECK(gone == 0);
+  CHECK(old > 0);
+}
+
+TEST_CASE("a soft hit lights a pad less than a hard one", "[tui]") {
+  // Velocity scales the glow, so the information the player put in comes back
+  // out. Without it every hit looks identical and the grid stops telling you
+  // anything about how you played.
+  tui::PadState hard{};
+  hard.triggered = true;
+  hard.glow_seconds = 0.0F;
+  hard.glow_velocity = 1.0F;
+
+  tui::PadState soft = hard;
+  soft.glow_velocity = 0.2F;
+
+  CHECK(tui::glow_intensity(hard) > tui::glow_intensity(soft));
+  CHECK(tui::glow_intensity(soft) > 0.0F);
+
+  tui::PadState never{};
+  CHECK(tui::glow_intensity(never) == 0.0F);
 }
 
 TEST_CASE("PERFORM degrades on smaller and larger terminals", "[tui]") {

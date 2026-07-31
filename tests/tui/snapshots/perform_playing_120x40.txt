@@ -37,4 +37,4 @@
                                                                                                                         
                                                                                                                         
                                                                                                                         
-  perform   voices 2/16 · peak -3.0 dB · CoreAudio              space play · hl scroll · +- zoom · f fit · tab · q quit 
+  perform   voices 2/16 · peak -3.0 dB · CoreAudio    qwer/asdf/zxcv/1234 pads · hl scroll · +- zoom · 0 fit · esc quit 

@@ -44,6 +44,25 @@ constexpr auto kFrameInterval = std::chrono::milliseconds(33);
 
 constexpr std::uint8_t kPad = 0;
 
+// The map the mockups print in the caption row, in grid order.
+//
+// The mockups contradict themselves about the bottom row: the PERFORM caption
+// says `qwer asdf zxcv 1234`, while the onboarding screen says number keys set
+// velocity. The caption row wins -- it is on the screen being built, and it is
+// what the pad grid's own legend already tells the player. Velocity arrives
+// with MIDI in M4, where it comes from a controller that actually has it.
+constexpr std::array<char, rt::kNumPads> kPadKeys{'q', 'w', 'e', 'r', 'a', 's', 'd', 'f',
+                                                  'z', 'x', 'c', 'v', '1', '2', '3', '4'};
+
+[[nodiscard]] int pad_for_key(char key) noexcept {
+  for (std::size_t index = 0; index < kPadKeys.size(); ++index) {
+    if (kPadKeys[index] == key) {
+      return static_cast<int>(index);
+    }
+  }
+  return -1;
+}
+
 // A step is an eighth of the view, so scrolling feels the same at every zoom --
 // the alternative, a fixed number of frames, is either glacial when zoomed out
 // or a jump-cut when zoomed in.
@@ -184,6 +203,9 @@ int run_app(const AppOptions& options) {
     state.master_peak = telemetry.master_peak;
     for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
       state.pads[pad].level = telemetry.pad_peak[pad];
+      state.pads[pad].triggered = telemetry.pad_glow[pad].triggered;
+      state.pads[pad].glow_seconds = telemetry.pad_glow[pad].seconds_since_trigger;
+      state.pads[pad].glow_velocity = telemetry.pad_glow[pad].velocity;
     }
     state.active_voices = engine.active_voices();
     state.xruns = device.xrun_count();
@@ -210,12 +232,33 @@ int run_app(const AppOptions& options) {
       static_cast<void>(engine.collect_garbage());
       return false;  // let the loop redraw
     }
+    // The pad map, before the view keys: `s` and `d` and `f` are pads, and a
+    // player hitting them expects a sound rather than a scroll. The view keys
+    // that survive (`h l + - f g G`) are the ones the map does not claim --
+    // except `f`, which the map does claim, so `fit` moves to `=`.
+    if (!event.input().empty() && event.input().size() == 1) {
+      const int pad = pad_for_key(event.input().front());
+      if (pad >= 0) {
+        static_cast<void>(engine.trigger_pad(rt::PadEvent{
+            .pad = static_cast<std::uint8_t>(pad), .velocity = 1.0F, .frame_offset = 0}));
+        state.selected_pad = static_cast<std::uint8_t>(pad);
+        return true;
+      }
+    }
+
+    // Space stays bound to pad 1 as well. It is what M1 and M2 documented, it is
+    // what the mode line has always said, and a sampler where the biggest key on
+    // the keyboard does nothing would be a strange thing to ship.
     if (event == ftxui::Event::Character(' ')) {
       static_cast<void>(
           engine.trigger_pad(rt::PadEvent{.pad = kPad, .velocity = 1.0F, .frame_offset = 0}));
       return true;
     }
-    if (event == ftxui::Event::Character('q') || event == ftxui::Event::Escape) {
+    // ESCAPE, not `q`. The QWERTY pad map claims `q` for pad 1, and a sampler
+    // where the top-left pad quits instead of making a sound would be a strange
+    // thing to ship. `:q` arrives with the command line and will be the one to
+    // reach for; escape is what there is until then.
+    if (event == ftxui::Event::Escape) {
       screen.Exit();
       return true;
     }
@@ -244,7 +287,9 @@ int run_app(const AppOptions& options) {
       state.view.zoom_by(kZoomStep, total_frames);
     } else if (event == ftxui::Event::Character('-') || event == ftxui::Event::Character('_')) {
       state.view.zoom_by(1.0 / kZoomStep, total_frames);
-    } else if (event == ftxui::Event::Character('f')) {
+    } else if (event == ftxui::Event::Character('0')) {
+      // `0` rather than `f`, which pad 8 now owns. Zero reads as "show
+      // everything" and is the one digit the 4x4 map does not claim.
       state.view.fit(total_frames);
     } else if (event == ftxui::Event::Character('g')) {
       state.view.first_frame = 0;

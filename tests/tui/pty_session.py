@@ -240,8 +240,13 @@ def main() -> int:
     alive = drain(fd, SETTLE_SECONDS, output)
 
     # A short session that touches every part of the interface this test can
-    # reach: trigger a pad, zoom in twice, scroll right, switch panel tab.
-    for key in (" ", "+", "+", "l", "\t"):
+    # reach: trigger pads on two different QWERTY keys, zoom in twice, scroll
+    # right, switch panel tab.
+    #
+    # "w" is pad 2, which is unloaded, so it produces no sound and no glow --
+    # deliberately, because a silent unloaded pad still has to be a no-op rather
+    # than an error, and this is where that gets exercised on the real binary.
+    for key in (" ", "q", "w", "+", "+", "l", "\t"):
         if not alive:
             break
         os.write(fd, key.encode())
@@ -252,7 +257,9 @@ def main() -> int:
     painted = frame.render()
 
     if alive:
-        os.write(fd, b"q")
+        # ESCAPE, not "q" -- the QWERTY pad map claims q for pad 1 from M3, and
+        # a session that sent "q" here would trigger a pad and then hang.
+        os.write(fd, b"\x1b")
     drain(fd, EXIT_SECONDS, output)
 
     # `frame` is the screen as it stood before quitting. `tail` replays the whole

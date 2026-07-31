@@ -15,6 +15,17 @@ namespace {
 
 }  // namespace
 
+float glow_intensity(const PadState& pad) noexcept {
+  if (!pad.triggered || pad.glow_seconds >= kGlowSeconds) {
+    return 0.0F;
+  }
+  // Linear decay, scaled by how hard the pad was hit. Linear rather than
+  // exponential for the same reason the meters are: on four discrete brightness
+  // steps the curve is not distinguishable, and this runs every frame.
+  const float remaining = 1.0F - (pad.glow_seconds / kGlowSeconds);
+  return std::clamp(remaining * pad.glow_velocity, 0.0F, 1.0F);
+}
+
 void WaveView::fit(std::size_t total_frames) noexcept {
   first_frame = 0;
   frames_visible = total_frames;

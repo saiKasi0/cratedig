@@ -260,9 +260,59 @@ struct Layout {
   return body;
 }
 
-// A time ruler where the mockups put slice markers. M3 replaces this row pair
-// with numbered slice boundaries; until there are slices, elapsed time is the
-// thing a listener actually wants to read off a waveform.
+// Numbered slice boundaries, as the mockups draw them: a tick row and a number
+// row.
+//
+// Only slices INSIDE the current view get a tick, and a number is only drawn
+// when there is room for it between this boundary and the next -- at full
+// zoom-out on a densely chopped file the boundaries are a couple of columns
+// apart, and printing "12" across three of them turns the row into noise.
+[[nodiscard]] Elements slice_ruler(const UiState& state, std::size_t columns) {
+  std::string tick_row(columns, ' ');
+  std::string label_row(columns, ' ');
+
+  std::size_t previous_label_end = 0;
+  bool any_visible = false;
+
+  for (std::size_t index = 0; index < state.slices.size(); ++index) {
+    const std::size_t column = state.view.column_of(state.slices[index].start_frame, columns);
+    if (column >= columns) {
+      continue;  // outside the view
+    }
+    any_visible = true;
+    tick_row[column] = '|';
+
+    // Slice numbers are 1-based on screen, as everything else the player counts
+    // is: pads, bars, channels.
+    const std::string number =
+        index < 9 ? "0" + std::to_string(index + 1) : std::to_string(index + 1);
+    const std::size_t start = column + 1;
+    if (start >= previous_label_end && start + number.size() <= columns) {
+      label_row.replace(start, number.size(), number);
+      previous_label_end = start + number.size() + 1;
+    }
+  }
+
+  if (!any_visible) {
+    return {};
+  }
+
+  std::string drawn;
+  for (const char cell : tick_row) {
+    drawn += (cell == '|') ? "┬" : "─";
+  }
+
+  return Elements{
+      ftxui::text(drawn) | ftxui::color(theme::label()),
+      ftxui::text(label_row) | ftxui::color(theme::muted()),
+  };
+}
+
+// A time ruler, for when there are no slices yet.
+//
+// The mockups draw slice markers in this row pair and slice_ruler() above does
+// that -- but before anything is chopped there are none, and elapsed time is
+// what a listener actually wants to read off a waveform in the meantime.
 [[nodiscard]] Elements wave_ruler(const UiState& state, std::size_t columns) {
   const double rate = static_cast<double>(std::max(state.sample_rate, 1U));
   const double span_seconds = static_cast<double>(state.view.frames_visible) / rate;
@@ -331,7 +381,16 @@ struct Layout {
   }
   content.push_back(ftxui::filler());
   if (layout.wave_ruler && state.has_sample()) {
-    for (Element& row : wave_ruler(state, columns)) {
+    // Slice markers take the row pair the moment there are slices; the time
+    // ruler is what stands there until then. slice_ruler() returns nothing when
+    // no boundary falls inside the view, which is a real state -- zoomed into
+    // the middle of one long slice -- and the time ruler is the right answer
+    // there too.
+    Elements ruler = state.slices.empty() ? Elements{} : slice_ruler(state, columns);
+    if (ruler.empty()) {
+      ruler = wave_ruler(state, columns);
+    }
+    for (Element& row : ruler) {
       content.push_back(std::move(row));
     }
   }
@@ -351,11 +410,49 @@ struct Layout {
          ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, static_cast<int>(layout.wave_panel_height));
 }
 
+// The glow ramp: four steps of intensity and weight, not four colours.
+//
+// In sixteen colours there is no glow -- a terminal that has one orange has one
+// orange, and fading it is not available. What IS available on every terminal is
+// bold, dim, and inverse, so the ramp is built from those and reads the same on
+// a 16-colour console as on a truecolor one. The brightest step inverts the
+// cell, which is the only way to make a character genuinely brighter than its
+// neighbours without a colour to spend.
+enum class GlowStep : std::uint8_t { kOff = 0, kDim, kLit, kHot };
+
+[[nodiscard]] GlowStep glow_step(const PadState& pad) noexcept {
+  const float intensity = glow_intensity(pad);
+  if (intensity <= 0.0F) {
+    return GlowStep::kOff;
+  }
+  if (intensity < 0.25F) {
+    return GlowStep::kDim;
+  }
+  if (intensity < 0.6F) {
+    return GlowStep::kLit;
+  }
+  return GlowStep::kHot;
+}
+
+[[nodiscard]] Element with_glow(Element element, GlowStep step) {
+  switch (step) {
+    case GlowStep::kHot:
+      return std::move(element) | ftxui::color(theme::accent()) | ftxui::bold | ftxui::inverted;
+    case GlowStep::kLit:
+      return std::move(element) | ftxui::color(theme::accent()) | ftxui::bold;
+    case GlowStep::kDim:
+      return std::move(element) | ftxui::color(theme::accent());
+    case GlowStep::kOff:
+      break;
+  }
+  return element;
+}
+
 [[nodiscard]] Element pad_cell(const UiState& state, const Layout& layout, std::size_t index,
                                std::size_t cell_width) {
   const PadState& pad = state.pads[index];
   const bool selected = index == state.selected_pad;
-  const bool sounding = state.playing && state.playhead_pad == index;
+  const GlowStep glow = glow_step(pad);
 
   std::string number = index < 9 ? "0" + std::to_string(index + 1) : std::to_string(index + 1);
 
@@ -367,9 +464,13 @@ struct Layout {
     name = utf8_split(name, name_room).first;
   }
 
+  // The NUMBER carries the glow, not the name. It is the fixed part of the cell,
+  // so the flash is a constant two-character shape in a constant place --
+  // sixteen of those read as a grid lighting up, which is the point. Glowing the
+  // name instead would make each pad flash a different width.
   auto number_element = ftxui::text(number + " ");
-  if (sounding) {
-    number_element = std::move(number_element) | ftxui::color(theme::accent());
+  if (glow != GlowStep::kOff) {
+    number_element = with_glow(std::move(number_element), glow);
   } else if (pad.loaded) {
     number_element = std::move(number_element) | ftxui::color(theme::label());
   } else {
@@ -565,10 +666,14 @@ struct Layout {
   // the longest hint that still fits -- the same balance the mockups strike,
   // and the right one: the facts are what changed since the last frame.
   constexpr std::string_view kHintTiers[] = {
-      "space play · hl scroll · +- zoom · f fit · tab · q quit ",
-      "space play · hl scroll · +- zoom · q quit ",
-      "space · hl · +- · q ",
-      "q quit ",
+      "qwer/asdf/zxcv/1234 pads · hl scroll · +- zoom · 0 fit · esc quit ",
+      "qwer.. pads · hl scroll · +- zoom · 0 fit · esc quit ",
+      "pads qwer.. · hl · +- · esc ",
+      // The pad keys survive one tier further down than anything else. They are
+      // what makes the thing playable; scroll and zoom are discoverable by
+      // pressing something, and a pad map is not.
+      "pads qwer.. · esc ",
+      "esc quit ",
   };
 
   // Room for "voices n/nn · peak -x.x dB" -- the two facts worth the width at
