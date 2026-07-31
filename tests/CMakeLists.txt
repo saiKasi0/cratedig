@@ -38,6 +38,7 @@ add_executable(
   tui/waveform_perf_test.cpp
   integration/engine_threading_test.cpp
   integration/rt_safety_test.cpp
+  e2e/chop_e2e_test.cpp
   # The guard's operator new/delete replacements must be linked into the
   # executable directly, not via a library — see src/CMakeLists.txt.
   $<TARGET_OBJECTS:cratedig_rt_guard>)
@@ -112,6 +113,15 @@ if(Python3_FOUND)
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tui/pty_kitty_session.py
                    $<TARGET_FILE:cratedig>)
   set_tests_properties(tui_pty_kitty_session PROPERTIES LABELS tui)
+
+  # docs/ROADMAP.md's M3 acceptance, typed into the real binary. Labelled e2e
+  # rather than tui because it is the acceptance rather than a layout check:
+  # `ctest -L e2e` must run the whole sentence, analysis and all, and this is the
+  # half of it that has a terminal in the way.
+  add_test(NAME chop_pty_e2e
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_chop_session.py
+                   $<TARGET_FILE:cratedig>)
+  set_tests_properties(chop_pty_e2e PROPERTIES LABELS e2e)
 else()
   message(STATUS "cratedig: PTY session tests disabled (no python3 interpreter)")
 endif()

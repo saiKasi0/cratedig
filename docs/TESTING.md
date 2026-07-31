@@ -86,6 +86,26 @@ fails both invariance tests and passes again when restored.
 The M0 silence golden `0xEB05052EA5B62325` is still asserted for an engine with
 nothing triggered. It costs nothing to keep and guards the whole render path.
 
+### When a golden hash may be committed, and when only invariance may be
+
+The contract above says *on the same platform*, and that is the honest bound: a
+hash of real audio is generally **not** portable. An `a*b+c` that one target fuses
+into a single FMA and another does not differs in the last bit, and a hash
+notices what the ear never would. arm64 always has FMA; baseline x86-64 does not.
+
+So a committed constant is allowed only when the path under test provably has no
+such expression in it, and the test must say which ones it avoided and why. The
+M3 e2e (below) qualifies for two specific reasons — the phase fraction is exactly
+zero, so the Hermite kernel collapses to an exact copy, and the pads use the
+default flat-sustain envelope, so `Envelope::level()` never evaluates its
+`m_start + m_step * position` ramp. Both were then **checked** on AppleClang/arm64
+and clang-18/x86-64, not merely argued.
+
+Anything outside that — a retuned pad, a real attack, decoded material through
+libsamplerate — asserts run-to-run equality and block-size invariance instead. Two
+runs on one machine agreeing is a real property and does not need a constant to
+express it.
+
 ## Golden vectors and golden audio
 
 - Golden vectors (DSP input → expected output, committed under `tests/data/`) are
@@ -390,6 +410,56 @@ goes through instrumentation, so the budget is not checked, the buffer drops to
 30 seconds, and the `[fixture]` variant is skipped under TSan — at full size it
 took the TSan suite from 5 seconds to 80, for a single-threaded test with nothing
 for TSan to inspect.
+
+## The M3 chop acceptance
+
+`docs/ROADMAP.md` states M3's acceptance as one sentence — "import → `:chop
+transient` → play chops end-to-end e2e script passes bit-exact" — and it is tested
+in two layers, because the sentence makes two different claims.
+
+| File | Answers |
+|---|---|
+| `tests/e2e/chop_e2e_test.cpp` | Does the pipeline produce the right audio? Real ingest and engine code, no terminal, no device, no file. |
+| `tests/e2e/pty_chop_session.py` | Does typing those two words into the real binary do it? Real onset detection inside the real program. |
+
+Both build their own percussive loop — eight hits, 0.25 s apart, after 0.1 s of
+silence — from **integer arithmetic and no libm**, for the same reason
+`write_fixture_wav()` does: `std::sin` is not required to give the same last bit
+on two platforms, so a golden over material generated with it would be a golden
+over the host's libm. And because the material is built rather than fetched, the
+milestone's acceptance **cannot skip** — the one outcome an acceptance may never
+have. The real starter-pack loop is covered by a `[fixture]` variant, which is an
+addition rather than the acceptance.
+
+What the offline half asserts, beyond the hash:
+
+- The chop found the eight hits that were *constructed*, within 10 ms. Nothing is
+  derived from what the detector reports, so the check is not circular — and a
+  chop that fell back to one slice covering everything would otherwise produce
+  entirely plausible audio and pass every other assertion in the file.
+- **Each pad plays its own chop**, compared to the source frame by frame and
+  bit-exactly. This is what makes it a chop test rather than a playback test: a
+  hash cannot tell you all sixteen pads are playing the top of the file.
+- Nothing was dropped — no refused pad config, no dropped trigger, no garbage-ring
+  overflow.
+
+Triggers are pushed at exactly their scheduled frame, by rendering up to it
+first. The engine drains its event ring at the top of a block, so a trigger pushed
+at an arbitrary moment would land at a different frame under a different block
+size, and the invariance assertion would be failing for a reason that has nothing
+to do with the engine.
+
+Negative-controlled four ways, each fired: publishing every pad from frame 0
+(fails the per-pad comparison *and* changes the hash), letting the render overshoot
+to the next block boundary (fails block-size invariance on both the synthetic and
+the fixture case), writing six hits into the PTY fixture while the assertion
+expects eight, and sending `:chop grid 4` in place of `:chop transient`.
+
+The PTY half deliberately does **not** assert that pads light. `--no-audio` opens
+no device, so `render()` never runs and the audio thread never publishes a glow.
+The acceptance item "pads light on trigger at any sample level" is asserted where
+the signal exists — `tests/unit/engine_telemetry_test.cpp`, against a −60 dBFS
+sample.
 
 ## RT-safety testing
 
