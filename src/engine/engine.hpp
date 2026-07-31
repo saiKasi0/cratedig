@@ -20,6 +20,26 @@
 
 namespace engine {
 
+// How long ago a pad was last hit, and how hard.
+//
+// The signal the pad grid lights from. NOT the peak level, which is already
+// published and already decays and is nevertheless the wrong answer: peak
+// follows the audio, so a quiet sample barely lights its pad and a pad triggered
+// into near-silence does not light at all. What a player wants to see is that
+// the machine received the hit -- an acknowledgement, not a meter.
+struct PadGlow {
+  // Since the most recent trigger. Grows without bound; the interface decides
+  // how fast to fade, because that is a look rather than an engine fact.
+  float seconds_since_trigger = 0.0F;
+
+  // The velocity of that trigger, in [0, 1].
+  float velocity = 0.0F;
+
+  // False until the pad has been hit at least once. Distinguishes "hit a long
+  // time ago" from "never hit", which otherwise look identical.
+  bool triggered = false;
+};
+
 // What the interface needs to know about what the audio thread is doing, as one
 // consistent snapshot.
 //
@@ -39,6 +59,10 @@ struct Telemetry {
 
   // Per-pad level, same fall behaviour. Indexed by pad.
   std::array<float, rt::kNumPads> pad_peak{};
+
+  // Per-pad trigger acknowledgement. Indexed by pad. See PadGlow above for why
+  // this is not the same thing as pad_peak.
+  std::array<PadGlow, rt::kNumPads> pad_glow{};
 };
 
 // The engine facade. Everything audible eventually happens behind render().
@@ -203,6 +227,20 @@ class Engine {
   static constexpr std::uint32_t kPlayheadPadShift = 56;
   static constexpr std::uint64_t kPlayheadFrameMask = (std::uint64_t{1} << kPlayheadPadShift) - 1;
 
+  // Glow is likewise ONE packed word per pad rather than two atomics: age in the
+  // low 24 bits, quantised velocity in the top 8. Same reasoning as the playhead
+  // -- two atomics would let the UI pair one hit's age with another's velocity,
+  // and a pad that flashes at the wrong brightness is a visible wrong answer
+  // rather than a rounding.
+  //
+  // 24 bits of frames is 349 seconds at 48 kHz, far past any glow. The count
+  // saturates one short of the mask so that the all-ones sentinel below stays
+  // unreachable however long the program runs.
+  static constexpr std::uint32_t kGlowVelocityShift = 24;
+  static constexpr std::uint32_t kGlowFrameMask = (std::uint32_t{1} << kGlowVelocityShift) - 1;
+  static constexpr std::uint32_t kGlowFrameMax = kGlowFrameMask - 1;
+  static constexpr std::uint32_t kNeverTriggered = 0xFFFF'FFFFU;
+
   // Everything the audio thread writes and the UI reads, on its own cache lines.
   //
   // Grouped rather than scattered through the class because these are written
@@ -217,6 +255,11 @@ class Engine {
 
     std::atomic<float> master_peak{0.0F};
     std::array<std::atomic<float>, rt::kNumPads> pad_peak{};
+
+    // Written on trigger and aged once per block. Initialised in the Engine
+    // constructor rather than here, because a default-constructed
+    // std::atomic<uint32_t> is zero and zero means "hit just now at velocity 0".
+    std::array<std::atomic<std::uint32_t>, rt::kNumPads> pad_glow{};
   };
 
   // AUDIO THREAD, at the top of every block. Adopts whatever the control thread

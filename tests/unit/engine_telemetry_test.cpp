@@ -242,3 +242,132 @@ TEST_CASE("the fall time does not depend on the block size", "[unit]") {
   CHECK(small_blocks - large_blocks < 0.02F);
   CHECK(large_blocks - small_blocks < 0.02F);
 }
+
+// --- pad glow ----------------------------------------------------------------
+
+TEST_CASE("an untriggered pad reports no glow", "[unit]") {
+  // Distinguishable from "hit a long time ago". A default-constructed
+  // atomic<uint32_t> is zero and zero decodes as "hit just now at velocity 0",
+  // so the engine seeds these to a sentinel -- without which every pad would
+  // light on the first frame of every session.
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.set_pad_sample(0, make_flat_sample(0.5F)));
+  render_frames(eng, 512);
+
+  for (const engine::PadGlow& glow : eng.telemetry().pad_glow) {
+    CHECK_FALSE(glow.triggered);
+  }
+}
+
+TEST_CASE("a pad glows the moment it is triggered", "[unit]") {
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.set_pad_sample(5, make_flat_sample(0.5F)));
+  trigger(eng, 5, 0.75F);
+  render_frames(eng, 128);
+
+  const engine::Telemetry state = eng.telemetry();
+  CHECK(state.pad_glow[5].triggered);
+  CHECK(state.pad_glow[5].seconds_since_trigger < 0.01F);
+  // Quantised to 8 bits on the way through, so within half a step of 1/255.
+  CHECK(state.pad_glow[5].velocity > 0.74F);
+  CHECK(state.pad_glow[5].velocity < 0.76F);
+
+  // ...and its neighbours are untouched.
+  CHECK_FALSE(state.pad_glow[4].triggered);
+  CHECK_FALSE(state.pad_glow[6].triggered);
+}
+
+TEST_CASE("a pad glows at any sample level", "[unit]") {
+  // The M3 acceptance criterion, and the reason glow is published from the
+  // trigger rather than from the audio: "pads light on trigger AT ANY SAMPLE
+  // LEVEL".
+  //
+  // -60 dBFS is 0.001 linear -- audible, and utterly invisible on a meter that
+  // is eight characters tall. Driving the pad grid from pad_peak would light
+  // this pad by less than an eighth of one cell, which is to say not at all.
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.set_pad_sample(2, make_flat_sample(0.001F)));
+  trigger(eng, 2, 1.0F);
+  render_frames(eng, 256);
+
+  const engine::Telemetry state = eng.telemetry();
+
+  // The peak meter can barely see it...
+  CHECK(state.pad_peak[2] < 0.002F);
+
+  // ...and the glow is at full strength regardless.
+  CHECK(state.pad_glow[2].triggered);
+  CHECK(state.pad_glow[2].velocity > 0.99F);
+  CHECK(state.pad_glow[2].seconds_since_trigger < 0.01F);
+}
+
+TEST_CASE("a pad triggered into silence still glows", "[unit]") {
+  // The other half of the same point: a pad whose sample is digital silence
+  // produces no audio at all, and must still acknowledge the hit. Nothing
+  // derived from the output could do this.
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.set_pad_sample(1, make_flat_sample(0.0F)));
+  trigger(eng, 1, 1.0F);
+  render_frames(eng, 256);
+
+  const engine::Telemetry state = eng.telemetry();
+  CHECK(state.pad_peak[1] == 0.0F);
+  CHECK(state.pad_glow[1].triggered);
+  CHECK(state.pad_glow[1].velocity > 0.99F);
+}
+
+TEST_CASE("glow ages with rendered frames and does not depend on the block size", "[unit]") {
+  const auto age_after = [](std::size_t block) {
+    engine::Engine eng{test_config()};
+    REQUIRE(eng.set_pad_sample(0, make_flat_sample(0.5F, 44'100, 300)));
+    trigger(eng, 0);
+    for (std::size_t done = 0; done < kEngineRate; done += block) {
+      render_frames(eng, block);
+    }
+    return eng.telemetry().pad_glow[0].seconds_since_trigger;
+  };
+
+  const float small_blocks = age_after(64);
+  const float large_blocks = age_after(512);
+  INFO("after one second: " << small_blocks << " s at 64 frames, " << large_blocks << " s at 512");
+
+  // One second of rendering is one second of glow age, whatever the block size.
+  CHECK(small_blocks > 0.99F);
+  CHECK(small_blocks < 1.01F);
+  CHECK(large_blocks > 0.99F);
+  CHECK(large_blocks < 1.01F);
+}
+
+TEST_CASE("retriggering a pad restarts its glow", "[unit]") {
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.set_pad_sample(0, make_flat_sample(0.5F, 44'100, 300)));
+
+  trigger(eng, 0, 1.0F);
+  render_frames(eng, kEngineRate / 2);
+  REQUIRE(eng.telemetry().pad_glow[0].seconds_since_trigger > 0.4F);
+
+  trigger(eng, 0, 0.25F);
+  render_frames(eng, 128);
+
+  const engine::Telemetry state = eng.telemetry();
+  CHECK(state.pad_glow[0].seconds_since_trigger < 0.01F);
+  CHECK(state.pad_glow[0].velocity < 0.26F);  // the new, softer hit
+}
+
+TEST_CASE("glow saturates rather than wrapping", "[unit]") {
+  // 24 bits of frames is 349 seconds at 48 kHz. Rendering that far here would be
+  // slow, so this checks the property at the boundary instead: a pad left alone
+  // must keep reading "a long time ago" rather than suddenly reading "just now".
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.set_pad_sample(0, make_flat_sample(0.5F, 44'100, 300)));
+  trigger(eng, 0);
+
+  float previous = 0.0F;
+  for (int second = 0; second < 4; ++second) {
+    render_frames(eng, kEngineRate);
+    const float age = eng.telemetry().pad_glow[0].seconds_since_trigger;
+    CHECK(age >= previous);  // monotone, never wrapping back to zero
+    previous = age;
+  }
+  CHECK(previous > 3.9F);
+}

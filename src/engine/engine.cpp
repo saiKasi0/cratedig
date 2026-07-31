@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -12,7 +13,14 @@
 
 namespace engine {
 
-Engine::Engine(const Config& config) noexcept : m_config(config) {}
+Engine::Engine(const Config& config) noexcept : m_config(config) {
+  // A default-constructed atomic<uint32_t> is zero, and zero decodes as "hit
+  // just now, at velocity 0" -- which would light every pad on the first frame
+  // of every session. relaxed: nothing is running yet.
+  for (std::atomic<std::uint32_t>& glow : m_published.pad_glow) {
+    glow.store(kNeverTriggered, std::memory_order_relaxed);
+  }
+}
 
 bool Engine::publish_pad_config(std::shared_ptr<const rt::PadConfig> config) noexcept {
   if (config == nullptr || config->pad >= rt::kNumPads) {
@@ -140,7 +148,24 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
     // ring, never by dropping it on this thread.
     if (!m_voices.trigger(config, event.velocity, m_config.sample_rate, m_garbage)) {
       m_published.dropped_triggers.fetch_add(1, std::memory_order_relaxed);
+      continue;
     }
+
+    // Glow is published from the TRIGGER, not from the audio it produces. That
+    // is the whole point: the pad lights because the machine received the hit,
+    // at whatever level the material happens to be. Aged to zero here and
+    // advanced by publish_telemetry at the end of this same block.
+    //
+    // relaxed: the UI wants a recent value, not a synchronised one.
+    //
+    // std::lround rather than the (x + 0.5) truncation idiom: the idiom is
+    // wrong for negatives, and although velocity is clamped non-negative here,
+    // that is a fact about this line rather than about the reader. Once per
+    // trigger, not per frame, and it allocates nothing and cannot throw.
+    const auto velocity =
+        static_cast<std::uint32_t>(std::lround(std::clamp(event.velocity, 0.0F, 1.0F) * 255.0F));
+    m_published.pad_glow[event.pad].store(velocity << kGlowVelocityShift,
+                                          std::memory_order_relaxed);
   }
 
   m_voices.render_add(channels, num_frames);
@@ -189,10 +214,27 @@ void Engine::publish_telemetry(std::span<float* const> channels, std::size_t num
     }
   }
 
+  const auto elapsed_frames =
+      static_cast<std::uint32_t>(num_frames > kGlowFrameMax ? kGlowFrameMax : num_frames);
+
   for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
     const float previous = m_published.pad_peak[pad].load(std::memory_order_relaxed);
     m_published.pad_peak[pad].store(std::max(pad_peak[pad], previous - fall),
                                     std::memory_order_relaxed);
+
+    // Age the glow by this block. Saturating rather than wrapping: a pad hit
+    // once and then left alone for six minutes must keep reading "a long time
+    // ago" instead of suddenly reading "just now".
+    const std::uint32_t glow = m_published.pad_glow[pad].load(std::memory_order_relaxed);
+    if (glow == kNeverTriggered) {
+      continue;
+    }
+    const std::uint32_t age = glow & kGlowFrameMask;
+    if (age >= kGlowFrameMax) {
+      continue;
+    }
+    const std::uint32_t aged = std::min(age + elapsed_frames, kGlowFrameMax);
+    m_published.pad_glow[pad].store((glow & ~kGlowFrameMask) | aged, std::memory_order_relaxed);
   }
 
   float master = 0.0F;
@@ -223,8 +265,17 @@ Telemetry Engine::telemetry() const noexcept {
   }
 
   snapshot.master_peak = m_published.master_peak.load(std::memory_order_relaxed);
+  const auto rate = static_cast<float>(m_config.sample_rate == 0 ? 1U : m_config.sample_rate);
   for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
     snapshot.pad_peak[pad] = m_published.pad_peak[pad].load(std::memory_order_relaxed);
+
+    const std::uint32_t glow = m_published.pad_glow[pad].load(std::memory_order_relaxed);
+    if (glow == kNeverTriggered) {
+      continue;  // leaves the default-constructed PadGlow, which reads as untriggered
+    }
+    snapshot.pad_glow[pad].triggered = true;
+    snapshot.pad_glow[pad].seconds_since_trigger = static_cast<float>(glow & kGlowFrameMask) / rate;
+    snapshot.pad_glow[pad].velocity = static_cast<float>(glow >> kGlowVelocityShift) / 255.0F;
   }
   return snapshot;
 }
