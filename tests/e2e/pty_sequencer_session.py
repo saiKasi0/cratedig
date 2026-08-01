@@ -33,7 +33,6 @@ from __future__ import annotations
 import fcntl
 import os
 import pty
-import re
 import shutil
 import struct
 import sys
@@ -57,6 +56,8 @@ from pty_session import (  # noqa: E402
     Grid,
     decode_stream,
     drain,
+    lane_cells,
+    steps_on,
 )
 
 RATE = 48_000
@@ -85,27 +86,6 @@ def write_fixture(path: Path) -> None:
         out.setsampwidth(2)
         out.setframerate(RATE)
         out.writeframes(bytes(samples))
-
-
-def lane_cells(painted: str) -> dict[int, str]:
-    """The pattern lane, as {pad number: its step cells}.
-
-    Matched on a two-digit label followed by groups of step cells, which is the
-    lane and nothing else -- the pad grid's own labels are followed by a name,
-    not by dots. Each lane ROW carries two pads (1-8 on the left, 9-16 on the
-    right) and also has the pad grid to its left on the same screen line, so
-    picking rows out is not enough: the pad has to come from the label beside the
-    cells, which is the whole point of reading it this way.
-    """
-    found: dict[int, str] = {}
-    for match in re.finditer(r"(\d\d) ([█·]{4}(?: [█·]{4})*)", painted):
-        found[int(match.group(1))] = match.group(2)
-    return found
-
-
-def steps_on(painted: str) -> int:
-    """How many steps are lit across the whole lane."""
-    return sum(cells.count("█") for cells in lane_cells(painted).values())
 
 
 def main() -> int:

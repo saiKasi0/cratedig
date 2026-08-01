@@ -180,6 +180,27 @@ def decode_stream(data: bytes | bytearray) -> str:
     return ""
 
 
+def lane_cells(painted: str) -> dict[int, str]:
+    """The pattern lane, as {pad number: its step cells}.
+
+    Matched on a two-digit label followed by groups of step cells, which is the
+    lane and nothing else -- the pad grid's own labels are followed by a name,
+    not by dots. Each lane ROW carries two pads (1-8 on the left, 9-16 on the
+    right) and also has the pad grid to its left on the same screen line, so
+    picking rows out is not enough: the pad has to come from the label beside the
+    cells, which is the whole point of reading it this way.
+    """
+    found: dict[int, str] = {}
+    for match in re.finditer(r"(\d\d) ([█·]{4}(?: [█·]{4})*)", painted):
+        found[int(match.group(1))] = match.group(2)
+    return found
+
+
+def steps_on(painted: str) -> int:
+    """How many steps are lit across the whole lane."""
+    return sum(cells.count("█") for cells in lane_cells(painted).values())
+
+
 def write_fixture_wav(path: Path) -> None:
     """A deterministic 48 kHz WAV, written here rather than fetched.
 
@@ -282,8 +303,12 @@ def main() -> int:
     alive = drain(fd, SETTLE_SECONDS, output)
 
     # A short session that touches every part of the interface this test can
-    # reach: trigger pads on two different QWERTY keys, zoom in twice, scroll
-    # right, switch panel tab.
+    # reach: trigger pads on two different keys, zoom in twice, scroll right,
+    # switch panel tab.
+    #
+    # No space here any more -- it is the transport as of M4.5, and starting the
+    # transport before the snapshot is taken would put a `play` on the mode line
+    # that has nothing to do with what this frame is meant to show.
     #
     # "2" is pad 2, which is unloaded, so it produces no sound and no glow --
     # deliberately, because a silent unloaded pad still has to be a no-op rather
@@ -293,7 +318,7 @@ def main() -> int:
     # is pad 5. This session used to press `q` for pad 1 and, after a four-slice
     # chop, land on a pad with nothing on it -- which is how the rotation proved
     # it had actually taken effect.
-    for key in (" ", "1", "2", "+", "+", "l", "\t"):
+    for key in ("1", "2", "+", "+", "l", "\t"):
         if not alive:
             break
         os.write(fd, key.encode())
@@ -480,12 +505,36 @@ def main() -> int:
         if "outside" not in screen_now():
             command_failures.append("`:bpm 900` was not refused")
 
-        # The transport key. With no device nothing renders, so the honest
-        # answer is to say that rather than to light up a transport that cannot
-        # move.
+        # THE TRANSPORT IS SPACE, and space is no longer a pad. Both halves are
+        # asserted, because either alone would pass on a build that had done only
+        # one of them -- a space that still triggered pad 1 *and* ran the
+        # transport would answer the message check perfectly.
+        #
+        # With no device nothing renders, so the honest answer to pressing play
+        # is to say so rather than to light up a transport that cannot move,
+        # which is also what makes the message a usable signal here.
+        #
+        # The lane is up from the step edits above, so a space that still
+        # selected a pad would move the cursor's row -- and the way to see that
+        # is to WRITE with it afterwards and look at which row lit up. Counting
+        # steps alone would not: selecting a pad lights nothing by itself.
+        alive = send("z")  # pad 13, a row nothing has written to yet
+        alive = send(" ")
+        if "no audio device" not in screen_now():
+            command_failures.append("space did not say why the transport cannot run")
+
+        alive = send("t")
+        landed = [pad for pad, cells in lane_cells(screen_now()).items() if "█" in cells]
+        if 13 not in landed:
+            command_failures.append(
+                f"space moved the pad selection off 13 before the step was written: {landed}"
+            )
+        alive = send("t")  # and take it back off
+
+        # `p` is the alias and has to keep working; M6 takes it back for a pad.
         alive = send("p")
         if "no audio device" not in screen_now():
-            command_failures.append("`p` did not say why the transport cannot run")
+            command_failures.append("`p` no longer runs the transport")
 
     if alive:
         # ESCAPE, not "q" -- the pad map claims every letter it uses, and a

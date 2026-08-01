@@ -27,4 +27,4 @@
 ╰──────────┴──────────┴──────────┴──────────╯ ╰────────────────────────────────────────────────────╯
                                                                                                     
                                                                                                     
-  perform   92.60 bpm · play · voices 2/16     1234.. pads · p play · t step · hl +- · : · esc quit 
+  perform   92.60 bpm · play · voices 2/16         1234.. pads · space play · t step · : · esc quit 

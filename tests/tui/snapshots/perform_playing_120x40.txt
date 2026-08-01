@@ -37,4 +37,4 @@
                                                                                                                         
                                                                                                                         
                                                                                                                         
-  perform   120.00 bpm · stop · voices 2/16   1234.. pads · p play · [] t step · hl scroll · +- zoom · : cmd · esc quit 
+  perform   120.00 bpm · stop · voices 2/16               1234.. pads · space play · [] t step · hl · +- · : · esc quit 

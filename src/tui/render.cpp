@@ -829,21 +829,19 @@ constexpr std::size_t kLaneRows = 8;  // pads per column
   // the longest hint that still fits -- the same balance the mockups strike,
   // and the right one: the facts are what changed since the last frame.
   static constexpr std::string_view kHintTiers[] = {
-      "1234/qwer/asdf/zxcv pads · p play · [] t step · hl scroll · +- zoom · : cmd · esc quit ",
-      // `: cmd` displaces `0 fit` from here down. Chopping is what the machine
-      // is FOR, and `:` is the only way to reach it; fit is one of several view
-      // keys, and the neighbouring `+- zoom` already says the view moves.
-      "1234.. pads · p play · [] t step · hl scroll · +- zoom · : cmd · esc quit ",
+      "1234/qwer/asdf/zxcv pads · space play · [] t step · hl scroll · +- zoom · : cmd · esc quit ",
+      "1234.. pads · space play · [] t step · hl scroll · +- zoom · : cmd · esc quit ",
       // The view keys lose their WORDS before the step keys lose theirs: `hl`
       // and `+-` are two keys you can try, while `t` without "step" says
       // nothing about what it edits -- and writing a pattern is the thing M4
       // added, with no other way at all to reach it.
-      "1234.. pads · p play · [] t step · hl · +- · : · esc quit ",
-      // What the 100-column design grid gets. `[]` goes before `t step` does,
-      // because a cursor you cannot move is still a cursor you can see, while a
-      // toggle key nobody knows about leaves the lane unreachable.
-      "1234.. pads · p play · t step · hl +- · : · esc quit ",
-      "1234.. pads · p play · t step · : · esc ",
+      "1234.. pads · space play · [] t step · hl · +- · : · esc quit ",
+      "1234.. pads · space play · t step · hl +- · : · esc quit ",
+      // What the 100-column design grid gets. The view keys go before `:` does,
+      // because chopping is what the machine is FOR and `:` is the only way to
+      // reach it, while scroll and zoom are discoverable by pressing an arrow.
+      "1234.. pads · space play · t step · : · esc quit ",
+      "1234.. pads · space play · t step · esc ",
       // The pad keys survive further down than anything else. They are what
       // makes the thing playable; scroll, zoom and the transport are
       // discoverable by pressing something, and a pad map is not.

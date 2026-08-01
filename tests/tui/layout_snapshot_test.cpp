@@ -1057,9 +1057,17 @@ TEST_CASE("the mode line reports the tempo and the transport", "[tui]") {
   const std::string running = strip_ansi(render_screen(state, 100, 30).ToString());
   CHECK(running.find("play") != std::string::npos);
 
-  // And the keymap names the keys that reach them, at the design size.
-  CHECK(running.find("p play") != std::string::npos);
+  // And the keymap names the keys that reach them, at the design size. Space
+  // rather than `p` as of M4.5: `p` is still an alias, but the line names the
+  // binding a player should learn, and `p` goes back to being a pad in M6.
+  CHECK(running.find("space play") != std::string::npos);
   CHECK(running.find("t step") != std::string::npos);
+
+  // The command line survives to the design size too. It is the only way to
+  // reach chopping, which is what the machine is for -- if a hint tier ever
+  // drops it at 100 columns, that is a regression rather than a trade.
+  CHECK(running.find(": ") != std::string::npos);
+  CHECK(running.find("esc quit") != std::string::npos);
 }
 
 TEST_CASE("a sequenced hit is still visible at every step below hot", "[tui]") {

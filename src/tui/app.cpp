@@ -62,19 +62,6 @@ constexpr std::uint32_t kEscape = 27;
 constexpr std::uint32_t kSpace = 32;
 constexpr std::uint32_t kBackspace = 127;
 
-// Which pad a keystroke plays, or rt::kNumPads for none.
-//
-// The map itself is tui::pad_for_key in keys.hpp -- ONE table, shared with the
-// caption row that prints it. This adds only the bindings that are not part of
-// the grid: space is pad 1 alongside `1` and `q`, because the biggest key on the
-// keyboard should do something.
-[[nodiscard]] std::uint8_t pad_for_code(std::uint32_t code) noexcept {
-  if (code == kSpace) {
-    return kPad;
-  }
-  return pad_for_key(code);
-}
-
 // What a keystroke contributes to the command line, or nothing.
 //
 // Control codes are excluded by hand rather than by asking a locale: the
@@ -1175,10 +1162,11 @@ int run_app(const AppOptions& options) {
     // of M4.5: `1234` are pads 1-4 rather than 13-16, which is where they sit on
     // the keyboard relative to the rest of the grid.
     //
-    // Space is pad 1 as well. It is what M1 and M2 documented, it is what the
-    // mode line has always said, and a sampler where the biggest key on the
-    // keyboard does nothing would be a strange thing to ship.
-    if (const std::uint8_t index = pad_for_code(code); index < rt::kNumPads) {
+    // SPACE IS NOT A PAD, as of M4.5. It was pad 1 from M1, on the argument that
+    // the biggest key on the keyboard should do something -- and the something
+    // it should do turns out to be the transport, which is what it does in every
+    // other machine that has one. Pad 1 is still two keys away, on `1` and `q`.
+    if (const std::uint8_t index = pad_for_key(code); index < rt::kNumPads) {
       if (key.action == KeyAction::kRelease) {
         // Addressed to the pad, not to a voice: a one-shot ignores it and a
         // gate pad lets go. Which is why this can be sent unconditionally.
@@ -1207,9 +1195,9 @@ int run_app(const AppOptions& options) {
       state.command_text.clear();
       return true;
     }
-    // ESCAPE, not `q`. The QWERTY pad map claims `q` for pad 1, and a sampler
-    // where the top-left pad quits instead of making a sound would be a strange
-    // thing to ship. `:q` works too, for the muscle memory that expects it.
+    // ESCAPE, not `q`. The pad map claims `q`, and a sampler where a pad quits
+    // instead of making a sound would be a strange thing to ship. `:q` works
+    // too, for the muscle memory that expects it.
     if (code == kEscape) {
       quit();
       return true;
@@ -1219,14 +1207,16 @@ int run_app(const AppOptions& options) {
       return true;
     }
 
-    // THE TRANSPORT. `p` rather than space, which is pad 1 and has been since
-    // M1 -- a sampler where the biggest key on the keyboard stops making a
-    // sound the moment a sequencer arrives would be a bad trade.
+    // THE TRANSPORT, on space and on `p`.
+    //
+    // Space is the binding; `p` is an alias, and stays one because M6 wants `p`
+    // for a pad in the right-hand mirror of the grid. Naming space as the
+    // primary is what makes that possible without taking the transport with it.
     //
     // PRESS ONLY, not repeat: holding it would start and stop the transport at
     // the terminal's repeat rate, which is the same reason a held pad does not
     // retrigger.
-    if (code == 'p' && press) {
+    if ((code == kSpace || code == 'p') && press) {
       transport_asked = !transport_asked;
       set_transport(transport_asked);
       // Said out loud rather than left to be discovered, exactly as `pad gate`
