@@ -76,13 +76,18 @@ TEST_CASE("Envelope walks attack, decay and sustain exactly", "[unit]") {
   CHECK(env.stage() == rt::EnvStage::kSustain);
 }
 
+// No declick floor: these cases are about what the SPEC's release does, and the
+// floor is the caller's policy on top of it (see PadConfig::release_floor_frames).
+// The floored behaviour has its own case at the bottom of this file.
+constexpr std::size_t kNoFloor = 0;
+
 TEST_CASE("Envelope releases from sustain to silence and goes idle", "[unit]") {
   rt::Envelope env;
   env.trigger(kAdsr);
   static_cast<void>(run(env, 12));  // through attack and decay, into sustain
   REQUIRE(env.stage() == rt::EnvStage::kSustain);
 
-  env.release();
+  env.release(kNoFloor);
   const std::vector<float> values = run(env, 6);
 
   CHECK(values[0] == 0.5F);
@@ -109,7 +114,7 @@ TEST_CASE("Envelope releases from wherever the level actually is", "[unit]") {
   static_cast<void>(run(env, 32));  // a quarter of the way up
   REQUIRE(env.level() == 0.25F);
 
-  env.release();
+  env.release(kNoFloor);
   const std::vector<float> values = run(env, 5);
 
   CHECK(values[0] == 0.25F);
@@ -136,10 +141,10 @@ TEST_CASE("Envelope handles zero-length segments", "[unit]") {
     CHECK(env.next() == 0.75F);
   }
 
-  SECTION("zero release silences on the spot") {
+  SECTION("zero release silences on the spot, when nothing floors it") {
     rt::Envelope env;
     env.trigger(rt::AdsrFrames{.attack = 0, .decay = 0, .sustain = 1.0F, .release = 0});
-    env.release();
+    env.release(kNoFloor);
     CHECK(env.idle());
     CHECK(env.next() == 0.0F);
   }
@@ -156,7 +161,7 @@ TEST_CASE("Envelope handles zero-length segments", "[unit]") {
 
 TEST_CASE("Envelope release on an idle envelope does nothing", "[unit]") {
   rt::Envelope env;
-  env.release();
+  env.release(kNoFloor);
   CHECK(env.idle());
   CHECK(env.next() == 0.0F);
 }
@@ -228,4 +233,51 @@ TEST_CASE("Envelope retrigger restarts from the beginning", "[unit]") {
   env.trigger(kAdsr);
   CHECK(env.stage() == rt::EnvStage::kAttack);
   CHECK(env.next() == 0.0F);
+}
+
+TEST_CASE("Envelope release takes at least the floor, however short the spec", "[unit]") {
+  // THE CLICK THIS FIXES. AdsrFrames::release defaults to zero, so a default pad
+  // released from full scale fell to silence in a single frame -- a step
+  // discontinuity, which is audible as a click and which choke groups and gate
+  // note-offs both did from M3 until M4.5.
+  rt::Envelope env;
+  env.trigger(rt::AdsrFrames{});  // the default: no attack, no release, full sustain
+  REQUIRE(env.next() == 1.0F);
+
+  constexpr std::size_t kFloor = 4;
+  env.release(kFloor);
+
+  // Four frames of ramp, arriving at silence, and MONOTONIC -- a fall that
+  // overshot or wobbled would be its own artefact.
+  const std::vector<float> values = run(env, kFloor + 1);
+  CHECK(values[0] == 1.0F);
+  CHECK(values[1] == 0.75F);
+  CHECK(values[2] == 0.5F);
+  CHECK(values[3] == 0.25F);
+  CHECK(values[4] == 0.0F);
+  CHECK(env.idle());
+}
+
+TEST_CASE("Envelope release keeps the longer of the spec and the floor", "[unit]") {
+  // The floor is a MINIMUM, not an override: a pad with a deliberate 200 ms
+  // release must still get 200 ms. Getting this backwards would silently turn
+  // every musical release into a declick, which is a much worse bug than the
+  // click it was meant to fix -- and one nobody would look for here.
+  rt::Envelope slow;
+  slow.trigger(rt::AdsrFrames{.attack = 0, .decay = 0, .sustain = 1.0F, .release = 8});
+  static_cast<void>(slow.next());
+  slow.release(/*floor_frames=*/2);
+  const std::vector<float> values = run(slow, 9);
+  CHECK(values[4] == 0.5F);  // halfway down after four of eight frames
+  CHECK(values[8] == 0.0F);
+  CHECK(slow.idle());
+
+  // And releasing from part-way up still starts where the level actually is,
+  // which is the property the floor must not disturb.
+  rt::Envelope rising;
+  rising.trigger(rt::AdsrFrames{.attack = 128, .decay = 0, .sustain = 1.0F, .release = 0});
+  static_cast<void>(run(rising, 32));
+  REQUIRE(rising.level() == 0.25F);
+  rising.release(/*floor_frames=*/4);
+  CHECK(rising.next() == 0.25F);
 }

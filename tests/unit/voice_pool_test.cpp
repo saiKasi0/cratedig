@@ -524,12 +524,18 @@ TEST_CASE("VoicePool chokes other voices in the same group", "[unit]") {
   rt::GarbageRing<8> garbage;
   Buffers buffers{1, 16};
 
+  // A HARD CUT, asked for explicitly. What this case is about is whether the
+  // choke happened at all, not the shape of the fall -- and since M4.5 the fall
+  // has a shape by default (release_floor_frames), so "gone by the next frame"
+  // has to be requested rather than assumed. The floored version is its own case
+  // below.
   auto in_group = [](std::uint8_t pad, std::uint8_t group) {
     return std::make_shared<const rt::PadConfig>(
         rt::PadConfig{.sample = make_sample(4'000, 1, kEngineRate, 1.0F),
                       .pad = pad,
                       .fade_in_frames = 0,
                       .fade_out_frames = 0,
+                      .release_floor_frames = 0,
                       .choke_group = group});
   };
 
@@ -558,6 +564,7 @@ TEST_CASE("VoicePool chokes an earlier hit on the same pad", "[unit]") {
       rt::PadConfig{.sample = make_sample(4'000, 1, kEngineRate, 1.0F),
                     .fade_in_frames = 0,
                     .fade_out_frames = 0,
+                    .release_floor_frames = 0,  // a hard cut, so "gone" is one frame
                     .choke_group = 3});
 
   REQUIRE(pool.trigger(hat, 1.0F, kEngineRate, garbage));
@@ -594,6 +601,7 @@ TEST_CASE("VoicePool note_off releases gate voices and ignores one-shots", "[uni
                       .pad = pad,
                       .fade_in_frames = 0,
                       .fade_out_frames = 0,
+                      .release_floor_frames = 0,  // a hard cut, as above
                       .trigger = mode});
   };
 
@@ -609,6 +617,48 @@ TEST_CASE("VoicePool note_off releases gate voices and ignores one-shots", "[uni
   // one-shot rather than an oversight.
   CHECK(pool.active_count() == 1);
   CHECK(buffers.channel(0)[0] == 1.0F);
+}
+
+TEST_CASE("VoicePool releases through the declick floor by default", "[unit]") {
+  // The click this fixes, at the level a player meets it: a choke on a pad with
+  // no envelope configured used to cut from full scale to nothing in one frame.
+  // The three cases above ask for that on purpose; this is what happens when
+  // nobody asks for anything, which is the common case and was the broken one.
+  rt::VoicePool<4> pool;
+  rt::GarbageRing<8> garbage;
+  Buffers buffers{1, 16};
+
+  auto in_group = [](std::uint8_t pad) {
+    return std::make_shared<const rt::PadConfig>(
+        rt::PadConfig{.sample = make_sample(4'000, 1, kEngineRate, 1.0F),
+                      .pad = pad,
+                      .fade_in_frames = 0,
+                      .fade_out_frames = 0,
+                      .choke_group = 1});  // release_floor_frames left at its default
+  };
+
+  REQUIRE(pool.trigger(in_group(0), 1.0F, kEngineRate, garbage));
+  REQUIRE(pool.trigger(in_group(1), 1.0F, kEngineRate, garbage));
+
+  // Both are still sounding: the choked one is falling, not gone.
+  pool.render_add(buffers.channels(), 16);
+  CHECK(pool.active_count() == 2);
+
+  // The sum starts at 2.0 -- the surviving voice at full scale plus the choked
+  // one still at the level it was cut from -- and falls monotonically toward the
+  // survivor alone. A hard cut would have started at 1.0.
+  const std::span<const float> out = buffers.channel(0);
+  CHECK(out[0] == 2.0F);
+  for (std::size_t frame = 1; frame < 16; ++frame) {
+    INFO("frame " << frame);
+    CHECK(out[frame] <= out[frame - 1]);
+    CHECK(out[frame] >= 1.0F);
+  }
+
+  // And it is gone by the end of the floor rather than hanging about.
+  Buffers rest{1, static_cast<int>(rt::kDefaultFadeFrames)};
+  pool.render_add(rest.channels(), rt::kDefaultFadeFrames);
+  CHECK(pool.active_count() == 1);
 }
 
 // --- declick -----------------------------------------------------------------

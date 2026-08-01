@@ -1,6 +1,7 @@
 #ifndef CRATEDIG_RT_ENVELOPE_HPP
 #define CRATEDIG_RT_ENVELOPE_HPP
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 
@@ -65,11 +66,22 @@ class Envelope {
   // point: a pad choked 5 ms into a 200 ms attack must fall from the quiet level
   // it actually reached, not jump up to sustain first and then fall. That jump
   // is an audible click, and it is the classic way to get one.
-  void release() noexcept {
+  //
+  // `floor_frames` is the SHORTEST this fall is allowed to take, and it exists
+  // because getting the level right is only half of not clicking. AdsrFrames'
+  // release defaults to zero, so a default pad released from full scale went to
+  // silence in a single frame -- a step discontinuity, which is the other
+  // classic way to get one. Choke groups and gate note-offs both did that from
+  // M3 until M4.5.
+  //
+  // The floor is the caller's policy rather than part of the spec: this stays a
+  // pure ADSR that knows nothing about declicking, and PadConfig carries the
+  // number so a pad that genuinely wants a hard cut can still ask for zero.
+  void release(std::size_t floor_frames) noexcept {
     if (m_stage == EnvStage::kIdle) {
       return;
     }
-    begin(EnvStage::kRelease, level(), 0.0F, m_spec.release);
+    begin(EnvStage::kRelease, level(), 0.0F, std::max(m_spec.release, floor_frames));
   }
 
   // AUDIO THREAD. Silences immediately. For a voice being stolen, where the

@@ -205,7 +205,7 @@ class VoicePool {
     for (Voice& voice : m_voices) {
       if (voice.active && voice.pad == pad && voice.config != nullptr &&
           voice.config->trigger == TriggerMode::kGate) {
-        voice.env.release();
+        voice.env.release(voice.config->release_floor_frames);
       }
     }
   }
@@ -223,7 +223,7 @@ class VoicePool {
         continue;
       }
       if (voice.config->choke_group == group) {
-        voice.env.release();
+        voice.env.release(voice.config->release_floor_frames);
       }
     }
   }

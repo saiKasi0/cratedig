@@ -105,6 +105,19 @@ struct PadConfig {
   // Retuning a chop resamples it -- there is no time-stretch until v2.
   float pitch_ratio = 1.0F;
 
+  // The shortest a RELEASE is allowed to take, whatever `env.release` says.
+  //
+  // Not a musical setting -- a declick, which is why it defaults to the same
+  // kDefaultFadeFrames the boundary fades use. `AdsrFrames::release` defaults to
+  // zero, so without this a default pad released from full scale fell to silence
+  // in one frame: a step discontinuity, and a click. Choke groups and gate
+  // note-offs both did that from M3 until M4.5, and the panic key would have
+  // made it sixteen at once.
+  //
+  // Zero is legal and means a hard cut, for a pad that genuinely wants one --
+  // which is why this is a field rather than a constant inside Envelope.
+  std::size_t release_floor_frames = kDefaultFadeFrames;
+
   // 0 means "not in a group". Triggering a pad in group G releases every other
   // sounding voice in G, which is how a closed hat cuts an open one.
   std::uint8_t choke_group = 0;
