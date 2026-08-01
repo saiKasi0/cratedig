@@ -1,6 +1,7 @@
 #ifndef CRATEDIG_TUI_RENDER_DETAIL_HPP
 #define CRATEDIG_TUI_RENDER_DETAIL_HPP
 
+#include "tui/keys.hpp"
 #include "tui/ui_state.hpp"
 
 #include <ftxui/dom/elements.hpp>
@@ -22,10 +23,11 @@
 
 namespace tui::detail {
 
-// The QWERTY map the pad grid prints in its corners and the slice table prints
-// in its `pad` column. Grid order, so index == pad number - 1.
-inline constexpr std::string_view kPadKeys[] = {"q", "w", "e", "r", "a", "s", "d", "f",
-                                                "z", "x", "c", "v", "1", "2", "3", "4"};
+// The pad map the caption row prints and the slice table prints in its `pad`
+// column. Re-exported rather than redefined: there is ONE table, in keys.hpp,
+// and this name exists so the renderers do not have to know that the map is a
+// keyboard fact rather than a layout one.
+using tui::kPadKeys;
 
 [[nodiscard]] std::string with_precision(double value, int digits);
 

@@ -11,7 +11,7 @@
 │0.00s       1.15s          2.30s         3.45s          4.60s          5.75s         6.90s          8.05s        9.20s│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
                                                                                                                         
- pads  bank a       keys  qwer asdf zxcv 1234                                                                           
+ pads  bank a       keys  1234 qwer asdf zxcv                                                                           
 ╭──────────┬──────────┬──────────┬──────────╮ ╭ sample │ pattern ──────────────────────────────────────────────────────╮
 │ 01 drums │ 02 kick  │ 03 --    │ 04 --    │ │ file       long_form_drums.flac                                        │
 │ ██████▅▁ │ ██▄▁▁▁▁▁ │ ▁▁▁▁▁▁▁▁ │ ▁▁▁▁▁▁▁▁ │ │ format     44100 Hz · stereo                                           │
@@ -37,4 +37,4 @@
                                                                                                                         
                                                                                                                         
                                                                                                                         
-  perform   120.00 bpm · stop · voices 2/16   qwer.. pads · p play · [] t step · hl scroll · +- zoom · : cmd · esc quit 
+  perform   120.00 bpm · stop · voices 2/16   1234.. pads · p play · [] t step · hl scroll · +- zoom · : cmd · esc quit 

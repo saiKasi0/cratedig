@@ -1,4 +1,4 @@
- cratedig  0.0.1  edit                  long_form_drums.flac · slice 06 · pad s 
+ cratedig  0.0.1  edit                  long_form_drums.flac · slice 06 · pad w 
                                                                                 
 ╭ slice 06 ───────────────────────────────────── snap zero-cross · 586 smp/col ╮
 │                    ┯                                          ┯              │
@@ -15,10 +15,10 @@
                                                                                 
  envelope                                     slices  16 · transient            
                                               nn   start     end    len  pad    
-   a 1.20 ms · d 84.0 ms · s -6.0 dB          04   1.725   2.300  0.575  r      
-   trig gate · choke 1 · gain 0.0 dB          05   2.300   2.875  0.575  a      
-                                              06   2.875   3.450  0.575  s      
-                                              07   3.450   4.025  0.575  d      
+   a 1.20 ms · d 84.0 ms · s -6.0 dB          04   1.725   2.300  0.575  4      
+   trig gate · choke 1 · gain 0.0 dB          05   2.300   2.875  0.575  q      
+                                              06   2.875   3.450  0.575  w      
+                                              07   3.450   4.025  0.575  e      
                                                                                 
                                                                                 
   edit      slice 06/16 · undo 4    [ ] slice · hl/HL nudge · z zoom · esc back 

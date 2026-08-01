@@ -1,4 +1,4 @@
- cratedig  0.0.1  edit                                      long_form_drums.flac · slice 06 · pad s 
+ cratedig  0.0.1  edit                                      long_form_drums.flac · slice 06 · pad w 
                                                                                                     
 ╭ slice 06 ─────────────────────────────────────────────────────────── snap zero-cross · 9 smp/col ╮
 │                                   ┯                                                              │
@@ -19,12 +19,12 @@
                                                                                                     
  envelope                                                         slices  16 · transient            
                                                                   nn   start     end    len  pad    
-   ⣷⣤⡀                          a       1.20 ms    trig  gate     03   1.150   1.725  0.575  e      
-   ⣿⣿⣿⣶⣄                        d       84.0 ms    choke 1        04   1.725   2.300  0.575  r      
-   ⣿⣿⣿⣿⣿⣿⣦⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣄⡀         s       -6.0 dB    gain  0.0 dB   05   2.300   2.875  0.575  a      
-   ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣦⣄⡀     r        120 ms    tune  0.00 st  06   2.875   3.450  0.575  s      
-   ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣦⣄⡀                                   07   3.450   4.025  0.575  d      
-   a  d        s          r                                       08   4.025   4.600  0.575  f      
+   ⣷⣤⡀                          a       1.20 ms    trig  gate     03   1.150   1.725  0.575  3      
+   ⣿⣿⣿⣶⣄                        d       84.0 ms    choke 1        04   1.725   2.300  0.575  4      
+   ⣿⣿⣿⣿⣿⣿⣦⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣄⡀         s       -6.0 dB    gain  0.0 dB   05   2.300   2.875  0.575  q      
+   ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣦⣄⡀     r        120 ms    tune  0.00 st  06   2.875   3.450  0.575  w      
+   ⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣦⣄⡀                                   07   3.450   4.025  0.575  e      
+   a  d        s          r                                       08   4.025   4.600  0.575  r      
                                                                                                     
                                                                                                     
   edit      slice 06/16 · undo 4         [ ] slice · hl start · HL end · z zoom · u undo · esc back 

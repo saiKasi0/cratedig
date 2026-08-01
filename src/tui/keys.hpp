@@ -1,12 +1,54 @@
 #ifndef CRATEDIG_TUI_KEYS_HPP
 #define CRATEDIG_TUI_KEYS_HPP
 
+#include "rt/pad_event.hpp"
+
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
 
 namespace tui {
+
+// THE PAD MAP, in pad order: index == pad number - 1.
+//
+// ONE TABLE, and it lives here rather than beside the renderer because it is a
+// keyboard fact. There were two until M4.5 -- one in app.cpp that decided what a
+// keystroke played and one in render_detail.hpp that decided what the caption
+// row printed -- with nothing checking that they agreed. Rotating the map is
+// exactly the change that updates one and not the other, so the rotation came
+// with merging them.
+//
+// The number row is on TOP, where it is on the keyboard. It read the other way
+// round until M4.5 (`qwer asdf zxcv 1234`), which put pads 13-16 above pads 1-4
+// on a QWERTY board and made the grid disagree with the hand playing it. The
+// mockups' caption row still shows the old order; docs/design/README.md records
+// the departure.
+//
+// Single characters, and the input path depends on that: pad_for_code() compares
+// one codepoint. A multi-character entry here would silently stop matching.
+inline constexpr std::array<std::string_view, rt::kNumPads> kPadKeys{
+    "1", "2", "3", "4", "q", "w", "e", "r", "a", "s", "d", "f", "z", "x", "c", "v"};
+
+// Which pad a keystroke plays, or kNumPads for none.
+//
+// Here rather than in app.cpp so the map and the lookup cannot drift apart, and
+// so a test can reach it -- app.cpp's copy lived in an anonymous namespace
+// inside the binary's own translation unit and could not be tested at all.
+[[nodiscard]] constexpr std::uint8_t pad_for_key(std::uint32_t code) noexcept {
+  if (code > 0x7F) {
+    return rt::kNumPads;  // no pad key is non-ASCII, so this cannot match
+  }
+  for (std::size_t index = 0; index < kPadKeys.size(); ++index) {
+    const std::string_view key = kPadKeys[index];
+    if (key.size() == 1 && static_cast<std::uint32_t>(key[0]) == code) {
+      return static_cast<std::uint8_t>(index);
+    }
+  }
+  return rt::kNumPads;
+}
 
 // The keyboard, decoded.
 //

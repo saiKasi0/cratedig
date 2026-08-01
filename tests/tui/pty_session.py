@@ -285,10 +285,15 @@ def main() -> int:
     # reach: trigger pads on two different QWERTY keys, zoom in twice, scroll
     # right, switch panel tab.
     #
-    # "w" is pad 2, which is unloaded, so it produces no sound and no glow --
+    # "2" is pad 2, which is unloaded, so it produces no sound and no glow --
     # deliberately, because a silent unloaded pad still has to be a no-op rather
     # than an error, and this is where that gets exercised on the real binary.
-    for key in (" ", "q", "w", "+", "+", "l", "\t"):
+    #
+    # The number row is the TOP row of the map as of M4.5: `1` is pad 1 and `q`
+    # is pad 5. This session used to press `q` for pad 1 and, after a four-slice
+    # chop, land on a pad with nothing on it -- which is how the rotation proved
+    # it had actually taken effect.
+    for key in (" ", "1", "2", "+", "+", "l", "\t"):
         if not alive:
             break
         os.write(fd, key.encode())
@@ -340,8 +345,8 @@ def main() -> int:
             command_failures.append("the program exited during the chop")
 
         # The answer is cleared by the next keystroke, so it can never be read
-        # as a reply to something else. "q" is pad 1, which now holds slice 1.
-        alive = send("q")
+        # as a reply to something else. "1" is pad 1, which now holds slice 1.
+        alive = send("1")
         after = screen_now()
         if "4 slices" in after:
             command_failures.append("the message survived the next keystroke")
@@ -419,7 +424,7 @@ def main() -> int:
         if "pattern 01" not in screen_now():
             command_failures.append("`t` did not bring the pattern lane up")
 
-        # `q` selected pad 1 earlier, so the step lands on its row. The toggle
+        # `1` selected pad 1 earlier, so the step lands on its row. The toggle
         # prints no message on purpose -- the lane is where the answer is, and
         # this is the only test that can say the lane really redraws.
         #
@@ -483,8 +488,8 @@ def main() -> int:
             command_failures.append("`p` did not say why the transport cannot run")
 
     if alive:
-        # ESCAPE, not "q" -- the QWERTY pad map claims q for pad 1 from M3, and
-        # a session that sent "q" here would trigger a pad and then hang.
+        # ESCAPE, not "q" -- the pad map claims every letter it uses, and a
+        # session that sent one here would trigger a pad and then hang.
         os.write(fd, b"\x1b")
     drain(fd, EXIT_SECONDS, output)
 

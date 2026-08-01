@@ -87,19 +87,25 @@ def write_fixture(path: Path) -> None:
         out.writeframes(bytes(samples))
 
 
-def lane_rows(painted: str) -> list[str]:
-    """The pattern lane's pad rows, as they are drawn.
+def lane_cells(painted: str) -> dict[int, str]:
+    """The pattern lane, as {pad number: its step cells}.
 
-    Matched on the two-digit pad label followed by step cells, which is the lane
-    and nothing else on the screen -- the pad grid's own labels are followed by a
-    name, not by dots.
+    Matched on a two-digit label followed by groups of step cells, which is the
+    lane and nothing else -- the pad grid's own labels are followed by a name,
+    not by dots. Each lane ROW carries two pads (1-8 on the left, 9-16 on the
+    right) and also has the pad grid to its left on the same screen line, so
+    picking rows out is not enough: the pad has to come from the label beside the
+    cells, which is the whole point of reading it this way.
     """
-    return [row for row in painted.split("\n") if re.search(r"\d\d [█·]{4} ", row)]
+    found: dict[int, str] = {}
+    for match in re.finditer(r"(\d\d) ([█·]{4}(?: [█·]{4})*)", painted):
+        found[int(match.group(1))] = match.group(2)
+    return found
 
 
 def steps_on(painted: str) -> int:
     """How many steps are lit across the whole lane."""
-    return sum(row.count("█") for row in lane_rows(painted))
+    return sum(cells.count("█") for cells in lane_cells(painted).values())
 
 
 def main() -> int:
@@ -169,19 +175,48 @@ def main() -> int:
             failures.append(f"the pad 1 row has {steps_on(beat)} steps, expected 4")
 
         # The shape, not just the count. Four steps could be four adjacent ones.
-        rows = lane_rows(beat)
-        if not rows:
-            failures.append("no pattern lane rows on screen at all")
-        elif "█··· █··· █··· █···" not in rows[0]:
-            failures.append(f"pad 1's row is not four-on-the-floor: {rows[0]!r}")
+        pad_one = lane_cells(beat).get(1, "")
+        if pad_one != "█··· █··· █··· █···":
+            failures.append(f"pad 1's row is not four-on-the-floor: {pad_one!r}")
 
         # A second pad, so the lane is carrying more than one row and the pad
-        # selection is what decides where a step lands. "w" is pad 2.
+        # selection is what decides where a step lands. "w" is pad 6.
         alive = send("w")
         alive = send("]]]]t")
         two = screen_now()
         if steps_on(two) != 5:
-            failures.append(f"after writing on pad 2 the lane has {steps_on(two)} steps, expected 5")
+            failures.append(f"after writing on pad 6 the lane has {steps_on(two)} steps, expected 5")
+
+        # THE PAD MAP, END TO END: the caption row prints the keys, and pressing
+        # them has to reach the pads the row claims. That is the one statement
+        # tests/unit/keys_test.cpp structurally cannot make -- it can check the
+        # lookup against the table, but not that the table is what the running
+        # program uses.
+        #
+        # Read off the screen rather than hard-coded, so a rotation that updates
+        # the legend and not the keyboard fails here rather than looking right.
+        caption = next((row for row in screen_now().split("\n") if "keys  " in row), "")
+        keys = caption.split("keys  ", 1)[1].split() if "keys  " in caption else []
+        if len(keys) != 4 or any(len(group) != 4 for group in keys):
+            failures.append(f"the caption row does not print four groups of four: {keys!r}")
+        else:
+            # The first key of the first group must play pad 1, and the first of
+            # the last group must play pad 13 -- the two ends of the map, which
+            # is what a rotation moves.
+            for key, pad_number in ((keys[0][0], 1), (keys[3][0], 13)):
+                before = steps_on(screen_now())
+                alive = send(key)
+                alive = send("t")
+                after = lane_cells(screen_now())
+                if steps_on(screen_now()) != before + 1:
+                    failures.append(f"`{key}` then `t` did not write exactly one step")
+                elif "█" not in after.get(pad_number, ""):
+                    landed = [pad for pad, cells in after.items() if "█" in cells]
+                    failures.append(
+                        f"the caption row says `{key}` is in the group for pad {pad_number}, "
+                        f"but the step landed on {landed}"
+                    )
+                alive = send("t")  # put it back, so the counts below still hold
 
     if alive:
         # The verbs, each checked by its answer AND -- where it is visible -- by

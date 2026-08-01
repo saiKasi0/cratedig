@@ -1,5 +1,9 @@
 #include "tui/keys.hpp"
 
+#include "rt/pad_event.hpp"
+
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -255,4 +259,62 @@ TEST_CASE("utf8_decode_first is the inverse, and refuses what encode would not e
     INFO("bytes: " << text.size());
     CHECK(tui::utf8_decode_first(text) == 0);
   }
+}
+
+// -- the pad map ---------------------------------------------------------------
+
+TEST_CASE("the pad map is one table, and the lookup reads it", "[unit][keys]") {
+  // There were TWO tables until M4.5 -- one in app.cpp deciding what a keystroke
+  // played, one in render_detail.hpp deciding what the caption row printed --
+  // with nothing checking they agreed. Rotating the map is exactly the change
+  // that updates one and not the other, and the failure would be silent: the
+  // legend on screen would name a key that plays a different pad.
+  //
+  // WHAT THIS TEST CAN AND CANNOT DO. It asserts the lookup reads the table; it
+  // cannot assert that nobody adds a second table somewhere else, because a
+  // table inside app.cpp's anonymous namespace is not reachable from here. The
+  // end-to-end version of that claim is in tests/e2e/pty_sequencer_session.py,
+  // which presses the keys the caption row prints and checks which lane row
+  // lights up -- the only place where "the legend and the keyboard agree" is a
+  // statement about the whole program.
+  for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+    const std::string_view key = tui::kPadKeys[pad];
+    INFO("pad " << pad + 1 << " is " << key);
+    REQUIRE(key.size() == 1);  // pad_for_key compares one codepoint
+    CHECK(tui::pad_for_key(static_cast<std::uint32_t>(key[0])) == pad);
+  }
+}
+
+TEST_CASE("the pad map runs in pad order, number row first", "[unit][keys]") {
+  // The rotation itself, stated as the thing a player sees: the top row of the
+  // grid is the top row of the keyboard. It read `qwer asdf zxcv 1234` until
+  // M4.5, which put pads 13-16 above pads 1-4 under the hand.
+  const std::array<std::string_view, rt::kNumPads> expected{"1", "2", "3", "4", "q", "w", "e", "r",
+                                                            "a", "s", "d", "f", "z", "x", "c", "v"};
+  CHECK(tui::kPadKeys == expected);
+
+  // Spot-checked from the player's end as well, so a wholesale re-ordering that
+  // also updated the line above would still have to be deliberate.
+  CHECK(tui::pad_for_key('1') == 0);
+  CHECK(tui::pad_for_key('q') == 4);
+  CHECK(tui::pad_for_key('z') == 12);
+  CHECK(tui::pad_for_key('v') == 15);
+}
+
+TEST_CASE("a key that is not on the pad map plays nothing", "[unit][keys]") {
+  // kNumPads is the "no pad" answer rather than -1, so a caller that forgets to
+  // check reads past the end of a sixteen-element array instead of indexing with
+  // a negative number -- both are bugs, but the first is the one ASan catches.
+  for (const std::uint32_t code :
+       {std::uint32_t{'p'}, std::uint32_t{'t'}, std::uint32_t{'['}, std::uint32_t{' '},
+        std::uint32_t{'.'}, std::uint32_t{0}, tui::kKeyArrowLeft, std::uint32_t{0x1F600}}) {
+    INFO("code " << code);
+    CHECK(tui::pad_for_key(code) == rt::kNumPads);
+  }
+
+  // Every pad key is distinct: a duplicate would make one pad unreachable and
+  // the caption row would still print it.
+  std::array<std::string_view, rt::kNumPads> sorted = tui::kPadKeys;
+  std::sort(sorted.begin(), sorted.end());
+  CHECK(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end());
 }

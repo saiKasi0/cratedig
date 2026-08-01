@@ -53,16 +53,6 @@ constexpr auto kFrameInterval = std::chrono::milliseconds(33);
 
 constexpr std::uint8_t kPad = 0;
 
-// The map the mockups print in the caption row, in grid order.
-//
-// The mockups contradict themselves about the bottom row: the PERFORM caption
-// says `qwer asdf zxcv 1234`, while the onboarding screen says number keys set
-// velocity. The caption row wins -- it is on the screen being built, and it is
-// what the pad grid's own legend already tells the player. Velocity arrives
-// with MIDI in M4, where it comes from a controller that actually has it.
-constexpr std::array<char, rt::kNumPads> kPadKeys{'q', 'w', 'e', 'r', 'a', 's', 'd', 'f',
-                                                  'z', 'x', 'c', 'v', '1', '2', '3', '4'};
-
 // The keys that are not characters, named. Their codes are the legacy control
 // bytes, which is what the Kitty protocol reports for them and what FTXUI's own
 // events are built from -- so one set of names covers both paths.
@@ -72,20 +62,17 @@ constexpr std::uint32_t kEscape = 27;
 constexpr std::uint32_t kSpace = 32;
 constexpr std::uint32_t kBackspace = 127;
 
-// Which pad a keystroke plays, or -1. Space is pad 1 alongside `q`.
-[[nodiscard]] int pad_for_code(std::uint32_t code) noexcept {
+// Which pad a keystroke plays, or rt::kNumPads for none.
+//
+// The map itself is tui::pad_for_key in keys.hpp -- ONE table, shared with the
+// caption row that prints it. This adds only the bindings that are not part of
+// the grid: space is pad 1 alongside `1` and `q`, because the biggest key on the
+// keyboard should do something.
+[[nodiscard]] std::uint8_t pad_for_code(std::uint32_t code) noexcept {
   if (code == kSpace) {
     return kPad;
   }
-  if (code > 0x7F) {
-    return -1;
-  }
-  for (std::size_t index = 0; index < kPadKeys.size(); ++index) {
-    if (static_cast<std::uint32_t>(kPadKeys[index]) == code) {
-      return static_cast<int>(index);
-    }
-  }
-  return -1;
+  return pad_for_key(code);
 }
 
 // What a keystroke contributes to the command line, or nothing.
@@ -1184,13 +1171,14 @@ int run_app(const AppOptions& options) {
     // The pad map, before the view keys: `s` and `d` and `f` are pads, and a
     // player hitting them expects a sound rather than a scroll. The view keys
     // that survive are the ones the map does not claim -- except `f`, which the
-    // map does claim, so `fit` moved to `0`.
+    // map does claim, so `fit` moved to `0`. The number row is claimed too, as
+    // of M4.5: `1234` are pads 1-4 rather than 13-16, which is where they sit on
+    // the keyboard relative to the rest of the grid.
     //
     // Space is pad 1 as well. It is what M1 and M2 documented, it is what the
     // mode line has always said, and a sampler where the biggest key on the
     // keyboard does nothing would be a strange thing to ship.
-    if (const int pad = pad_for_code(code); pad >= 0) {
-      const auto index = static_cast<std::uint8_t>(pad);
+    if (const std::uint8_t index = pad_for_code(code); index < rt::kNumPads) {
       if (key.action == KeyAction::kRelease) {
         // Addressed to the pad, not to a voice: a one-shot ignores it and a
         // gate pad lets go. Which is why this can be sent unconditionally.
