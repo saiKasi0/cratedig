@@ -25,6 +25,25 @@ enum class PadEventKind : std::uint8_t {
   // event the engine already handles, rather than each bringing their own idea
   // of what letting go means.
   kNoteOff,
+
+  // Stop this pad NOW, whatever its trigger mode.
+  //
+  // Not a note-off with a flag: a note-off means "the player let go", which a
+  // one-shot is entitled to ignore, and this means "stop making that sound",
+  // which nothing is. Conflating them would make `:stop 3` silently do nothing
+  // on exactly the pads it is most wanted for -- one-shots long enough that
+  // waiting for them is the problem.
+  //
+  // Released through the pad's declick floor rather than cut, so it is silence
+  // rather than a click (PadConfig::release_floor_frames).
+  kStop,
+
+  // The same for every sounding voice. `pad` is ignored.
+  //
+  // The panic key. A separate kind rather than kStop with a sentinel pad,
+  // because "all" is not a pad number and encoding it as one is how a stray
+  // 255 turns into a silent room.
+  kStopAll,
 };
 
 // A pad hit, sent control -> audio through an SpscRing.

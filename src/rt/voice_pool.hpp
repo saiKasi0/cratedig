@@ -210,6 +210,34 @@ class VoicePool {
     }
   }
 
+  // AUDIO THREAD. Stops one pad, whatever its trigger mode.
+  //
+  // Distinct from note_off(), which a one-shot ignores by design. This is the
+  // one that a one-shot must not ignore: it exists because a long sample cannot
+  // otherwise be stopped once it is playing, which is the whole complaint M4.5
+  // is answering.
+  void stop_pad(std::uint8_t pad) noexcept {
+    for (Voice& voice : m_voices) {
+      if (voice.active && voice.pad == pad && voice.config != nullptr) {
+        voice.env.release(voice.config->release_floor_frames);
+      }
+    }
+  }
+
+  // AUDIO THREAD. Stops everything. The panic.
+  //
+  // Released rather than cut, so sixteen voices ending at once is silence rather
+  // than sixteen clicks in the same frame -- which is the loudest artefact this
+  // program could make, and would arrive at the exact moment somebody was trying
+  // to make it stop.
+  void stop_all() noexcept {
+    for (Voice& voice : m_voices) {
+      if (voice.active && voice.config != nullptr) {
+        voice.env.release(voice.config->release_floor_frames);
+      }
+    }
+  }
+
   // AUDIO THREAD. Releases every sounding voice in `group`, except `keep`.
   //
   // Group 0 means "not in a group" and chokes nothing -- otherwise every

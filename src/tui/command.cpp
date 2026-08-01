@@ -298,6 +298,29 @@ namespace {
   return out;
 }
 
+// `stop` / `stop N`.
+//
+// Bare `stop` is everything AND the transport; `stop N` is one pad and leaves
+// the transport alone. The asymmetry is deliberate: "stop everything" is a
+// panic and has to actually produce silence, while "stop pad 3" is surgery on
+// something still running.
+[[nodiscard]] Command parse_stop(const std::vector<std::string_view>& words) {
+  Command out = command_of(CommandKind::kStop);
+  if (words.size() < 2) {
+    return out;  // all of them, and the transport with them
+  }
+  std::size_t pad = 0;
+  if (!parse_number(words[1], pad) || pad == 0) {
+    return error("stop: " + std::string{words[1]} + " is not a pad number");
+  }
+  if (pad > rt::kNumPads) {
+    return error("stop: no pad " + std::string{words[1]} + " (have " +
+                 std::to_string(rt::kNumPads) + ")");
+  }
+  out.pad = pad;
+  return out;
+}
+
 [[nodiscard]] Command parse_metro(const std::vector<std::string_view>& words) {
   Command out = command_of(CommandKind::kMetronome);
   if (words.size() < 2) {
@@ -354,6 +377,9 @@ Command parse_command(std::string_view line) {
   }
   if (verb == "metro") {
     return parse_metro(words);
+  }
+  if (verb == "stop") {
+    return parse_stop(words);
   }
   // `edit` with no number opens whichever slice is already selected, which is
   // what you want after `[`/`]` in PERFORM; with one, it jumps.

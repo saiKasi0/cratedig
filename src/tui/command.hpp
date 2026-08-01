@@ -45,6 +45,12 @@ enum class CommandKind : std::uint8_t {
   kSongClear,  // back to one pattern repeating
   kMetronome,  // `toggle`
 
+  // Stop sounding voices. `pad` is 1-based as typed, or 0 for all of them --
+  // and unlike `pad gate`, "all" here also stops the transport, because a
+  // running sequencer would retrigger within a step and the silence would last
+  // a fraction of a beat.
+  kStop,
+
   kQuit,
 };
 

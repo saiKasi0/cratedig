@@ -536,6 +536,25 @@ def main() -> int:
         if "no audio device" not in screen_now():
             command_failures.append("`p` no longer runs the transport")
 
+        # THE PANIC. Nothing is audible under --no-audio, so what is checked here
+        # is that the key and the verb both reach the program and say so -- the
+        # audio itself is asserted in engine_render_test.cpp, where voices exist.
+        alive = send(".")
+        if "stopped everything" not in screen_now():
+            command_failures.append("`.` did not stop everything")
+
+        alive = send(":stop 3\r")
+        if "stopped pad 3" not in screen_now():
+            command_failures.append("`:stop 3` did not stop one pad")
+
+        alive = send(":stop\r")
+        if "stopped everything" not in screen_now():
+            command_failures.append("`:stop` did not stop everything")
+
+        alive = send(":stop 99\r")
+        if "no pad 99" not in screen_now():
+            command_failures.append("`:stop 99` was not refused")
+
     if alive:
         # ESCAPE, not "q" -- the pad map claims every letter it uses, and a
         # session that sent one here would trigger a pad and then hang.

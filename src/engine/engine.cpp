@@ -190,8 +190,22 @@ template <typename Ring>
 void Engine::drain_pad_events(Ring& ring, std::size_t num_frames) noexcept {
   rt::PadEvent event{};
   while (ring.try_pop(event)) {
+    // BEFORE the pad range check, because this one does not name a pad. Reading
+    // its `pad` at all would make a panic depend on a field nobody sets.
+    if (event.kind == rt::PadEventKind::kStopAll) {
+      m_voices.stop_all();
+      continue;
+    }
+
     if (event.pad >= rt::kNumPads) {
       continue;  // came from a key handler or MIDI; not trusted
+    }
+
+    if (event.kind == rt::PadEventKind::kStop) {
+      // Not a note-off: a one-shot ignores those, and a one-shot too long to
+      // wait out is exactly what this is for.
+      m_voices.stop_pad(event.pad);
+      continue;
     }
 
     if (event.kind == rt::PadEventKind::kNoteOff) {

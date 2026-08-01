@@ -384,6 +384,34 @@ TEST_CASE("metro flips, or is told which way", "[command]") {
   CHECK(wrong.message.find("loud") != std::string::npos);
 }
 
+TEST_CASE("stop takes a pad, or everything", "[command]") {
+  // Bare `stop` is the panic: everything, and the transport with it. A pad
+  // number is the surgical version and leaves the transport alone -- the
+  // asymmetry is deliberate and app.cpp is where it happens, so all the parser
+  // carries is which of the two was asked for.
+  const Command all = parse_command("stop");
+  REQUIRE(all.kind == CommandKind::kStop);
+  CHECK(all.pad == 0);
+
+  const Command one = parse_command("stop 3");
+  REQUIRE(one.kind == CommandKind::kStop);
+  CHECK(one.pad == 3);  // 1-based, as typed
+
+  CHECK(parse_command("stop 16").pad == 16);
+}
+
+TEST_CASE("stop refuses a pad it cannot mean", "[command]") {
+  // 0 is a mistake even though "no number" means all of them -- the same rule
+  // `pad gate 0` follows, and for the same reason: the two must stay
+  // distinguishable or a typed `stop 0` silences the room.
+  CHECK(parse_command("stop 0").kind == CommandKind::kError);
+  CHECK(parse_command("stop x").kind == CommandKind::kError);
+
+  const Command high = parse_command("stop 17");
+  REQUIRE(high.kind == CommandKind::kError);
+  CHECK(high.message.find("16") != std::string::npos);
+}
+
 TEST_CASE("edit, with the slice number optional", "[command]") {
   // No number means "the slice already selected", which is what you want after
   // stepping to it; with one, it jumps.

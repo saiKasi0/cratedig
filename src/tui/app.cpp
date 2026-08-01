@@ -507,10 +507,30 @@ int run_app(const AppOptions& options) {
   // separate kinds precisely so that seeking cannot start playback by accident
   // (rt::sequencer.hpp), and the ring drains in order.
   auto set_transport = [&](bool play) {
+    // Nothing drains the transport ring without a stream, for the same reason
+    // nothing drains the sequencer handoff (see edit_sequencer above). Two
+    // commands per keystroke would fill thirty-two slots in sixteen presses --
+    // harmless, since a transport with nothing rendering does nothing either
+    // way, but it is a queue of orders to a thread that does not exist.
+    if (!audio_running) {
+      return;
+    }
     static_cast<void>(engine.send_transport(
         rt::TransportCommand{.kind = rt::TransportCommandKind::kSeek, .position_frames = 0}));
     static_cast<void>(engine.send_transport(rt::TransportCommand{
         .kind = play ? rt::TransportCommandKind::kPlay : rt::TransportCommandKind::kStop}));
+  };
+
+  // Stop everything that is sounding, and the transport with it.
+  //
+  // BOTH, because voices alone would not produce silence: a running sequencer
+  // retriggers the pads within a step, so the panic would last a fraction of a
+  // beat and read as not having worked. `:stop N` is the surgical version and
+  // deliberately leaves the transport alone.
+  auto panic = [&] {
+    static_cast<void>(engine.trigger_pad(rt::PadEvent{.kind = rt::PadEventKind::kStopAll}));
+    transport_asked = false;
+    set_transport(false);
   };
 
   // The last width the interface was drawn at.
@@ -911,6 +931,17 @@ int run_app(const AppOptions& options) {
         break;
       }
 
+      case CommandKind::kStop:
+        if (command.pad == 0) {
+          panic();
+          set_message("stopped everything", false);
+          break;
+        }
+        static_cast<void>(engine.trigger_pad(rt::PadEvent{
+            .pad = static_cast<std::uint8_t>(command.pad - 1), .kind = rt::PadEventKind::kStop}));
+        set_message("stopped pad " + std::to_string(command.pad), false);
+        break;
+
       case CommandKind::kQuit:
         quit();
         break;
@@ -1226,6 +1257,17 @@ int run_app(const AppOptions& options) {
       if (!audio_running) {
         set_message("transport: no audio device, so nothing renders and nothing runs", true);
       }
+      return true;
+    }
+
+    // THE PANIC. `.` reads as a full stop, is under the right hand, and is one
+    // of the few keys the pad map does not claim on either screen.
+    //
+    // Press only, like the transport: holding it would re-panic at the repeat
+    // rate, which is harmless and pointless.
+    if (code == '.' && press) {
+      panic();
+      set_message("stopped everything", false);
       return true;
     }
 

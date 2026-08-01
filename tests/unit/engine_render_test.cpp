@@ -1223,3 +1223,147 @@ TEST_CASE("a MIDI note-off releases a gate pad", "[unit]") {
   released.render_in_blocks(eng, blocks);
   CHECK(eng.active_voices() == 0);  // the release ran to silence and freed it
 }
+
+TEST_CASE("a panic stops a one-shot that a note-off would not", "[unit]") {
+  // THE COMPLAINT THIS ANSWERS: a long one-shot could not be stopped once it was
+  // playing -- you waited for it. A note-off is not the answer, because ignoring
+  // one is the definition of one-shot, so kStop is a separate kind rather than a
+  // flag on the existing one.
+  engine::Engine eng{test_config()};
+  auto config = std::make_shared<const rt::PadConfig>(
+      rt::PadConfig{.sample = make_test_sample(48'000, 1, 48'000), .pad = 3});
+  REQUIRE(eng.publish_pad_config(config));
+
+  const std::array<std::size_t, 1> blocks{256};
+
+  // A note-off leaves it running, which is what makes the panic necessary.
+  REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 3, .velocity = 1.0F}));
+  RenderCapture sounding{2'048, kChannels};
+  sounding.render_in_blocks(eng, blocks);
+  REQUIRE(eng.active_voices() == 1);
+
+  REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 3, .kind = rt::PadEventKind::kNoteOff}));
+  RenderCapture ignored{2'048, kChannels};
+  ignored.render_in_blocks(eng, blocks);
+  CHECK(eng.active_voices() == 1);
+
+  // kStop is not ignored, and the voice is gone within the declick floor rather
+  // than cut in a single frame.
+  REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 3, .kind = rt::PadEventKind::kStop}));
+  RenderCapture stopped{2'048, kChannels};
+  stopped.render_in_blocks(eng, blocks);
+  CHECK(eng.active_voices() == 0);
+}
+
+TEST_CASE("a panic stops every pad, and does not need a pad number", "[unit]") {
+  engine::Engine eng{test_config()};
+  for (std::uint8_t pad = 0; pad < 4; ++pad) {
+    REQUIRE(eng.publish_pad_config(std::make_shared<const rt::PadConfig>(
+        rt::PadConfig{.sample = make_test_sample(48'000, 1, 48'000), .pad = pad})));
+    REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = pad, .velocity = 1.0F}));
+  }
+
+  const std::array<std::size_t, 1> blocks{256};
+  RenderCapture sounding{2'048, kChannels};
+  sounding.render_in_blocks(eng, blocks);
+  REQUIRE(eng.active_voices() == 4);
+
+  // `pad` is deliberately a value no pad has: kStopAll must not read it, or a
+  // panic would depend on a field nobody sets.
+  REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 200, .kind = rt::PadEventKind::kStopAll}));
+  RenderCapture silent{2'048, kChannels};
+  silent.render_in_blocks(eng, blocks);
+  CHECK(eng.active_voices() == 0);
+}
+
+TEST_CASE("a panic does not silence the sequencer on its own", "[unit]") {
+  // The reason the `.` key stops the TRANSPORT as well as the voices. Stopping
+  // what is sounding is not stopping the machine: the next step arrives a
+  // fraction of a beat later and starts it all again, so a panic that only
+  // released voices would read as not having worked.
+  //
+  // This is the engine half of that -- kStopAll alone leaves the transport
+  // running, on purpose, because it is src/tui/app.cpp that decides the key
+  // means both.
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.publish_pad_config(std::make_shared<const rt::PadConfig>(
+      rt::PadConfig{.sample = make_test_sample(48'000, 1, 48'000), .pad = 0})));
+
+  auto state = std::make_shared<rt::SequencerState>();
+  state->bpm_x100 = 12'000;  // 6000 frames a step at 48 kHz
+  state->patterns[0].length = 16;
+  for (std::size_t step = 0; step < 16; ++step) {
+    state->patterns[0].steps[step][0].on = true;
+    state->patterns[0].steps[step][0].velocity = 127;
+  }
+  REQUIRE(eng.publish_sequencer(state));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  const std::array<std::size_t, 1> blocks{256};
+  RenderCapture running{2'048, kChannels};
+  running.render_in_blocks(eng, blocks);
+  REQUIRE(eng.active_voices() >= 1);
+
+  REQUIRE(eng.trigger_pad(rt::PadEvent{.kind = rt::PadEventKind::kStopAll}));
+
+  // A whole step later the sequencer has fired again -- silence did not last.
+  RenderCapture after{8'192, kChannels};
+  after.render_in_blocks(eng, blocks);
+  CHECK(eng.active_voices() >= 1);
+  CHECK(eng.telemetry().transport_playing);
+}
+
+TEST_CASE("a panic plus a transport stop stays silent", "[unit]") {
+  // The other half of the case above, and together they are why the `.` key
+  // sends both: kStopAll alone is retriggered by the next step, and this is what
+  // actually produces silence.
+  //
+  // WHAT THIS DOES NOT COVER, said plainly: that src/tui/app.cpp's `.` really
+  // sends both. That wiring has no test. Under --no-audio nothing renders, so
+  // the transport cannot be observed to have stopped, and app.cpp is not
+  // reachable from a unit test -- the PTY session can only check that the key
+  // reaches the program and reports. Removing the transport half is a change
+  // these two cases would not catch; they are here so that the reason it is
+  // needed is written down where the code is.
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.publish_pad_config(std::make_shared<const rt::PadConfig>(
+      rt::PadConfig{.sample = make_test_sample(48'000, 1, 48'000), .pad = 0})));
+
+  auto state = std::make_shared<rt::SequencerState>();
+  state->bpm_x100 = 12'000;
+  state->patterns[0].length = 16;
+  for (std::size_t step = 0; step < 16; ++step) {
+    state->patterns[0].steps[step][0].on = true;
+    state->patterns[0].steps[step][0].velocity = 127;
+  }
+  REQUIRE(eng.publish_sequencer(state));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kPlay}));
+
+  const std::array<std::size_t, 1> blocks{256};
+  RenderCapture running{2'048, kChannels};
+  running.render_in_blocks(eng, blocks);
+  REQUIRE(eng.active_voices() >= 1);
+
+  REQUIRE(eng.trigger_pad(rt::PadEvent{.kind = rt::PadEventKind::kStopAll}));
+  REQUIRE(eng.send_transport(rt::TransportCommand{.kind = rt::TransportCommandKind::kStop}));
+
+  RenderCapture after{8'192, kChannels};
+  after.render_in_blocks(eng, blocks);
+  CHECK(eng.active_voices() == 0);
+  CHECK_FALSE(eng.telemetry().transport_playing);
+  // Silent from the end of the declick floor onward. Not from frame 0: the
+  // panic RELEASES rather than cuts, so the first ~0.7 ms is the ramp down --
+  // which is the whole point of the floor, and asserting silence there would be
+  // asserting the click back in.
+  // Per CHANNEL, because samples() is channel-major: frame 0 of the second
+  // plane is another ramp, and walking the buffer as one run reports it as a
+  // failure eight thousand frames in.
+  constexpr std::size_t kCaptured = 8'192;
+  const std::span<const float> tail = after.samples();
+  for (std::size_t channel = 0; channel < kChannels; ++channel) {
+    for (std::size_t frame = rt::kDefaultFadeFrames; frame < kCaptured; ++frame) {
+      INFO("channel " << channel << ", frame " << frame);
+      REQUIRE(tail[(channel * kCaptured) + frame] == 0.0F);
+    }
+  }
+}
