@@ -386,6 +386,69 @@ namespace {
   return error("metro: " + std::string{words[1]} + " is not on or off");
 }
 
+// -- the crate ---------------------------------------------------------------
+
+// Everything after the first word, trimmed.
+//
+// For arguments that are TEXT rather than words. A path is the case that forces
+// it: `~/Music/my breaks/loop 3.wav` is ordinary and splitting it on spaces
+// turns one argument into four and a useful error into a baffling one.
+[[nodiscard]] std::string_view rest_of_line(std::string_view line) {
+  std::size_t index = 0;
+  while (index < line.size() && (line[index] == ' ' || line[index] == '\t')) {
+    ++index;
+  }
+  while (index < line.size() && line[index] != ' ' && line[index] != '\t') {
+    ++index;  // the verb
+  }
+  while (index < line.size() && (line[index] == ' ' || line[index] == '\t')) {
+    ++index;
+  }
+  std::string_view rest = line.substr(index);
+  while (!rest.empty() && (rest.back() == ' ' || rest.back() == '\t')) {
+    rest.remove_suffix(1);
+  }
+  return rest;
+}
+
+[[nodiscard]] Command parse_load(std::string_view line) {
+  const std::string_view path = rest_of_line(line);
+  if (path.empty()) {
+    return error("load needs a path, e.g. load ~/breaks/amen.wav");
+  }
+  Command out = command_of(CommandKind::kLoadFile);
+  out.text = std::string{path};
+  return out;
+}
+
+[[nodiscard]] Command parse_file(const std::vector<std::string_view>& words) {
+  if (words.size() < 2) {
+    return error("file needs a number, e.g. file 2 — or :files to see them");
+  }
+  std::size_t which = 0;
+  if (!parse_number(words[1], which) || which == 0) {
+    return error("file: " + std::string{words[1]} + " is not a file number");
+  }
+  Command out = command_of(CommandKind::kSelectFile);
+  out.file = which;
+  return out;
+}
+
+// `unload` with no number drops whichever file is showing, which is what you
+// want after looking at the wrong one; with a number it drops that one.
+[[nodiscard]] Command parse_unload(const std::vector<std::string_view>& words) {
+  Command out = command_of(CommandKind::kUnloadFile);
+  if (words.size() < 2) {
+    return out;
+  }
+  std::size_t which = 0;
+  if (!parse_number(words[1], which) || which == 0) {
+    return error("unload: " + std::string{words[1]} + " is not a file number");
+  }
+  out.file = which;
+  return out;
+}
+
 // -- the mixer ---------------------------------------------------------------
 
 // A signed decimal, for the values a mixer is denominated in: "-6", "3.5",
@@ -775,6 +838,18 @@ Command parse_command(std::string_view line) {
   }
   if (verb == "perform") {
     return command_of(CommandKind::kPerform);
+  }
+  if (verb == "load") {
+    return parse_load(line);
+  }
+  if (verb == "file") {
+    return parse_file(words);
+  }
+  if (verb == "files" || verb == "pool") {
+    return command_of(CommandKind::kListFiles);
+  }
+  if (verb == "unload") {
+    return parse_unload(words);
   }
   if (verb == "mix") {
     return parse_mix(words);

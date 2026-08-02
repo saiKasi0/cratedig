@@ -162,6 +162,13 @@ if(Python3_FOUND)
   # M5's mixer, same split again: the DSP is proved where the audio is, and this
   # is the half that can say the verbs and the MIX keymap reach the ENGINE's
   # strip configs rather than a copy of them in the interface.
+  # M5.5's acceptance, typed: two files loaded at once, a pad from each, and the
+  # crate surviving an unload. The half that can say a PERSON can get there.
+  add_test(NAME crate_pty_e2e
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_crate_session.py
+                   $<TARGET_FILE:cratedig>)
+  set_tests_properties(crate_pty_e2e PROPERTIES LABELS e2e TIMEOUT ${CRATEDIG_PTY_TIMEOUT})
+
   add_test(NAME mix_pty_e2e
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_mix_session.py
                    $<TARGET_FILE:cratedig>)

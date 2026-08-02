@@ -685,3 +685,66 @@ TEST_CASE("the mixer verbs do not collide with what was already there", "[comman
   CHECK(parse_command("mixer").kind == CommandKind::kError);
   CHECK(parse_command("gains 3 -6").kind == CommandKind::kError);
 }
+
+// -- the crate ---------------------------------------------------------------
+
+TEST_CASE("load takes the rest of the line, spaces and all", "[command]") {
+  const Command simple = parse_command("load /crate/amen.wav");
+  REQUIRE(simple.kind == CommandKind::kLoadFile);
+  CHECK(simple.text == "/crate/amen.wav");
+
+  // A PATH IS NOT A WORD. `~/Music/my breaks/loop 3.wav` is perfectly ordinary,
+  // and a parser that split it on spaces would turn one argument into four and a
+  // useful error into a baffling one.
+  const Command spaced = parse_command("load ~/Music/my breaks/loop 3.wav");
+  REQUIRE(spaced.kind == CommandKind::kLoadFile);
+  CHECK(spaced.text == "~/Music/my breaks/loop 3.wav");
+
+  // Trailing whitespace is trimmed -- typing a space before Enter is not a
+  // request for a different file.
+  CHECK(parse_command("load  /crate/a.wav   ").text == "/crate/a.wav");
+
+  // Nothing else is interpreted. The parser has no filesystem, so expanding `~`
+  // or a glob here would be guessing on behalf of a caller that can look.
+  CHECK(parse_command("load ~/a.wav").text == "~/a.wav");
+  CHECK(parse_command("load *.wav").text == "*.wav");
+
+  CHECK(parse_command("load").kind == CommandKind::kError);
+  CHECK(parse_command("load   ").kind == CommandKind::kError);
+}
+
+TEST_CASE("the crate can be listed, switched and unloaded", "[command]") {
+  CHECK(parse_command("files").kind == CommandKind::kListFiles);
+  CHECK(parse_command("pool").kind == CommandKind::kListFiles);
+
+  const Command pick = parse_command("file 2");
+  REQUIRE(pick.kind == CommandKind::kSelectFile);
+  CHECK(pick.file == 2);
+
+  CHECK(parse_command("file").kind == CommandKind::kError);
+  CHECK(parse_command("file 0").kind == CommandKind::kError);
+  CHECK(parse_command("file x").kind == CommandKind::kError);
+
+  // Bare `unload` drops whichever file is showing, which is what you want after
+  // looking at the wrong one. Zero is the sentinel for that and cannot be typed.
+  const Command showing = parse_command("unload");
+  REQUIRE(showing.kind == CommandKind::kUnloadFile);
+  CHECK(showing.file == 0);
+
+  CHECK(parse_command("unload 3").file == 3);
+  CHECK(parse_command("unload 0").kind == CommandKind::kError);
+  CHECK(parse_command("unload x").kind == CommandKind::kError);
+}
+
+TEST_CASE("the crate verbs do not collide with what was already there", "[command]") {
+  // `file` is a new word next to `files`, and a parser that matched a prefix
+  // would break one of them silently.
+  CHECK(parse_command("files").kind == CommandKind::kListFiles);
+  CHECK(parse_command("file 1").kind == CommandKind::kSelectFile);
+  CHECK(parse_command("fil 1").kind == CommandKind::kError);
+
+  // And the verbs M5 added still parse.
+  CHECK(parse_command("mix").kind == CommandKind::kMix);
+  CHECK(parse_command("limit off").kind == CommandKind::kLimiter);
+  CHECK(parse_command("chop transient").kind == CommandKind::kChopTransient);
+}

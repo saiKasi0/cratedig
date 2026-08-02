@@ -150,11 +150,25 @@ struct Layout {
   return (steps > 0.0 ? "+" : "") + with_precision(steps, 2) + " st";
 }
 
-// Which pad key plays a slice, or empty. Scanned rather than stored, because
-// the pads already know and a second copy would be a second thing to keep true.
+// Which pad key plays a slice OF THE FILE BEING SHOWN, or empty. Scanned rather
+// than stored, because the pads already know and a second copy would be a second
+// thing to keep true.
+//
+// THE FILE COMPARISON IS NOT DECORATION, and this function is where the crate
+// first bit. It matched on the slice index alone, which was correct for as long
+// as a session held one file: slice 3 meant one thing. With a crate, pad 1 might
+// hold slice 3 of the vocal while EDIT is drawing slice 3 of the break, and this
+// answered "pad 1" -- naming a key that plays different material from the
+// waveform on screen, which is worse than naming none.
+//
+// M5.5 T2 made app.cpp's pad_for_slice() file-aware and missed this one. Two
+// copies of a lookup, one fixed: the PTY session that created a real two-file
+// arrangement is what caught it, and no unit test could have, because the
+// renderer is only reachable through a UiState somebody has to build.
 [[nodiscard]] std::string key_for_slice(const UiState& state, std::size_t slice) {
   for (std::size_t pad = 0; pad < state.pads.size(); ++pad) {
-    if (state.pads[pad].has_slice && state.pads[pad].slice_index == slice) {
+    if (state.pads[pad].has_slice && state.pads[pad].file == state.current_file &&
+        state.pads[pad].slice_index == slice) {
       return std::string{kPadKeys[pad]};
     }
   }

@@ -809,6 +809,39 @@ int run_app(const AppOptions& options) {
     return static_cast<std::size_t>(frames < 0.0 ? 0.0 : frames);
   };
 
+  // Points the interface at whatever `current` now names.
+  //
+  // One place, because "which file am I looking at" changes for three different
+  // reasons -- a load, a switch, an unload -- and three copies of this would be
+  // three chances to leave the wave panel drawing one file and EDIT editing
+  // another.
+  auto show_current = [&](std::size_t columns) {
+    const ingest::PoolEntry* file = entry();
+    state.current_file = current;
+    if (file == nullptr) {
+      state.sample_name.clear();
+      state.sample_rate = 0;
+      state.sample_channels = 0;
+      state.sample_frames = 0;
+      state.slices.clear();
+      state.bins.clear();
+      state.view = WaveView{};
+      state.edit.slice = 0;
+      return;
+    }
+    state.sample_name = file->name;
+    state.sample_rate = file->sample->sample_rate();
+    state.sample_channels = file->sample->num_channels();
+    state.sample_frames = file->sample->num_frames();
+
+    // The view is reset to the whole file rather than carried across. Two files
+    // rarely share a length, and a window from a five-minute break landing on a
+    // one-bar loop would open on nothing at all.
+    state.view.fit(file->sample->num_frames());
+    show_slices(file->slices, state);
+    refresh_edit(columns);
+  };
+
   // Runs a parsed command. Everything it touches -- the engine's handoff ring,
   // the slice set, the UiState -- belongs to this thread, which is what makes a
   // command a plain function call rather than a message.
@@ -975,12 +1008,12 @@ int run_app(const AppOptions& options) {
         const std::size_t last = command.pad > 0 ? command.pad : rt::kNumPads;
         std::size_t changed = 0;
         for (std::size_t pad = first; pad < last; ++pad) {
-          const std::shared_ptr<const rt::PadConfig> current =
+          const std::shared_ptr<const rt::PadConfig> held =
               engine.pad_config(static_cast<std::uint8_t>(pad));
-          if (current == nullptr || current->sample == nullptr) {
+          if (held == nullptr || held->sample == nullptr) {
             continue;
           }
-          rt::PadConfig next = *current;
+          rt::PadConfig next = *held;
           next.trigger = mode;
           if (engine.publish_pad_config(std::make_shared<const rt::PadConfig>(std::move(next)))) {
             ++changed;
@@ -1238,6 +1271,112 @@ int run_app(const AppOptions& options) {
                          tui::detail::with_precision(static_cast<double>(command.decibels), 1) +
                          " dB"
                    : "limiter off");
+        break;
+      }
+
+      case CommandKind::kLoadFile: {
+        const std::filesystem::path path{command.text};
+
+        // Already in the crate: bring it up rather than decoding a second copy.
+        // The pool would return the same id anyway; saying so is the difference
+        // between "nothing happened" and "that one is already here".
+        if (const ingest::FileId known = pool.find_path(path); known != ingest::kNoFile) {
+          current = known;
+          show_current(last_columns);
+          set_message(path.filename().string() + " is already loaded", false);
+          break;
+        }
+
+        // Decode on this thread, which is where it belongs and where it blocks:
+        // about 4 s for a five-minute file, single-digit milliseconds for a
+        // loop. The worker lane stays in M6 -- docs/ROADMAP.md records the
+        // measurement rather than the intuition.
+        const ingest::SampleLoad load = ingest::load_sample(path, options.sample_rate);
+        if (!load.ok()) {
+          std::string said = "load: ";
+          said += ingest::describe(load.error);
+          if (!load.detail.empty()) {
+            said += " (" + load.detail + ")";
+          }
+          set_message(said, true);
+          break;
+        }
+
+        ingest::PeakPyramid built = ingest::PeakPyramid::build(*load.sample);
+        const ingest::FileId id = pool.add(load.sample, path, ingest::SliceSet{}, std::move(built));
+        if (id == ingest::kNoFile) {
+          set_message("load: could not add " + path.filename().string(), true);
+          break;
+        }
+
+        // ADDS RATHER THAN REPLACES: the pads are not touched. Whatever was on
+        // them keeps playing, from whichever file it came -- which is the whole
+        // reason a pad names a file.
+        current = id;
+        show_current(last_columns);
+        set_message("loaded " + path.filename().string() + " (" + std::to_string(pool.size()) +
+                        " in the crate)",
+                    false);
+        break;
+      }
+
+      case CommandKind::kSelectFile: {
+        if (command.file > pool.size()) {
+          set_message("no file " + std::to_string(command.file) + " (have " +
+                          std::to_string(pool.size()) + ")",
+                      true);
+          break;
+        }
+        current = pool.entries()[command.file - 1].id;
+        show_current(last_columns);
+        set_message("showing " + state.sample_name, false);
+        break;
+      }
+
+      case CommandKind::kUnloadFile: {
+        const ingest::FileId target =
+            command.file == 0 ? current
+                              : (command.file <= pool.size() ? pool.entries()[command.file - 1].id
+                                                             : ingest::kNoFile);
+        const ingest::PoolEntry* going = pool.find(target);
+        if (going == nullptr) {
+          set_message(pool.empty() ? "nothing loaded" : "no such file", true);
+          break;
+        }
+        const std::string name = going->name;
+
+        // PADS PLAYING IT KEEP PLAYING, and voices sounding from it keep
+        // sounding: each holds its own shared_ptr through its PadConfig, so this
+        // drops the crate's reference and no more. Nothing is published and
+        // nothing is stopped.
+        static_cast<void>(pool.remove(target));
+        if (current == target) {
+          current = pool.empty() ? ingest::kNoFile : pool.entries().front().id;
+        }
+        show_current(last_columns);
+        set_message("unloaded " + name + " (pads holding it still play)", false);
+        break;
+      }
+
+      case CommandKind::kListFiles: {
+        if (pool.empty()) {
+          set_message("the crate is empty — :load <path>", false);
+          break;
+        }
+        std::string said;
+        std::size_t index = 1;
+        for (const ingest::PoolEntry& file : pool.entries()) {
+          if (!said.empty()) {
+            said += " · ";
+          }
+          said += std::to_string(index) + " " + file.name;
+          if (file.id == current) {
+            said += "*";
+          }
+          said += " (" + std::to_string(file.slices.size()) + ")";
+          ++index;
+        }
+        set_message(said, false);
         break;
       }
 

@@ -63,6 +63,13 @@ enum class CommandKind : std::uint8_t {
   kStripComp,  // `pad`, and either `toggle == kOff` or the four values
   kLimiter,    // `toggle`, and `decibels` as the ceiling when turning it on
 
+  // The crate, M5.5. `:load` ADDS rather than replaces, which is the whole
+  // point: a session can hold several records at once.
+  kLoadFile,    // `text` is the path, exactly as typed
+  kSelectFile,  // `file`, 1-based as listed
+  kUnloadFile,  // `file`, or 0 meaning whichever is showing
+  kListFiles,
+
   kQuit,
 };
 
@@ -142,6 +149,20 @@ struct Command {
   float makeup_db = 0.0F;
   float attack_ms = 0.0F;
   float release_ms = 0.0F;
+
+  // Which loaded file, 1-based as the crate lists them. Zero means "the one
+  // showing", which is the only sensible default for `unload`.
+  std::size_t file = 0;
+
+  // A path, or any other argument that is text rather than a number.
+  //
+  // TAKEN AS THE REST OF THE LINE, not as a word: `~/Music/my breaks/loop 3.wav`
+  // is a perfectly ordinary path and splitting it on spaces would make it four
+  // arguments and one confusing error. Trailing whitespace is trimmed; nothing
+  // else is interpreted, because the parser has no filesystem and expanding `~`
+  // or a glob here would be guessing on behalf of a caller that can actually
+  // look.
+  std::string text;
 
   // For kError, what was wrong -- phrased for the mode line, so it names the
   // correct spelling rather than just refusing.
