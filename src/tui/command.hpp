@@ -27,7 +27,7 @@ enum class CommandKind : std::uint8_t {
   kChopTransient,
   kChopGrid,  // `count` parts
   kChopReset,
-  kSlotAssign,  // `slice` -> `pad`, both 1-based as typed
+  kSlotAssign,  // `slice`..`slice_last` -> `pad`.., all 1-based as typed
   kPadGate,     // `pad` 1-based, or 0 meaning every pad
   kPadOneShot,  // ditto
   kEdit,        // open EDIT on `slice`, 1-based, or 0 meaning the current one
@@ -71,6 +71,11 @@ struct Command {
 
   std::size_t count = 0;  // chop grid, pattern length
   std::size_t slice = 0;  // slot assign, 1-based as the user typed it
+
+  // The last slice of a `slot assign` range, 1-based and INCLUSIVE. Equal to
+  // `slice` for a single assignment, so every consumer walks a range and there
+  // is no second code path for the one-slice case.
+  std::size_t slice_last = 0;
 
   // slot assign and pad gate/oneshot, 1-based as the user typed it. Zero means
   // "every pad", which is only reachable by leaving the number off -- see the

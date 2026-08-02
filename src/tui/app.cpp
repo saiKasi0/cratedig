@@ -749,36 +749,65 @@ int run_app(const AppOptions& options) {
           set_message("nothing chopped yet — try :chop transient", true);
           break;
         }
-        if (command.slice > slices.size()) {
-          set_message("no slice " + std::to_string(command.slice) + " (have " +
+
+        // A RANGE, always -- a single assignment is the one-element case, so
+        // there is no second code path for it to disagree with. The parser has
+        // already refused a reversed range and a length mismatch; what is left
+        // is what only this thread can know, which is how many slices and pads
+        // actually exist.
+        const std::size_t count = command.slice_last - command.slice + 1;
+        if (command.slice_last > slices.size()) {
+          set_message("no slice " + std::to_string(command.slice_last) + " (have " +
                           std::to_string(slices.size()) + ")",
                       true);
           break;
         }
-        if (command.pad > rt::kNumPads) {
-          set_message("no pad " + std::to_string(command.pad) + " (have " +
-                          std::to_string(rt::kNumPads) + ")",
+        if (command.pad + count - 1 > rt::kNumPads) {
+          set_message(std::to_string(count) + " slices from pad " + std::to_string(command.pad) +
+                          " runs past pad " + std::to_string(rt::kNumPads),
                       true);
           break;
         }
-        const ingest::Slice& slice = slices.slices[command.slice - 1];
-        const auto pad = static_cast<std::uint8_t>(command.pad - 1);
-        rt::PadConfig config{};
-        config.sample = sample;
-        config.pad = pad;
-        config.start_frame = slice.start_frame;
-        config.end_frame = slice.end_frame;
-        if (!engine.publish_pad_config(std::make_shared<const rt::PadConfig>(std::move(config)))) {
-          set_message("pad " + std::to_string(command.pad) + " is busy, try again", true);
+
+        // Published one pad at a time, and a refusal stops the run rather than
+        // carrying on: the handoff ring being full means the rest would be
+        // refused too, and reporting how far it got is more use than sixteen
+        // identical failures.
+        std::size_t done = 0;
+        for (; done < count; ++done) {
+          const ingest::Slice& slice = slices.slices[command.slice - 1 + done];
+          const auto pad = static_cast<std::uint8_t>(command.pad - 1 + done);
+          rt::PadConfig config{};
+          config.sample = sample;
+          config.pad = pad;
+          config.start_frame = slice.start_frame;
+          config.end_frame = slice.end_frame;
+          if (!engine.publish_pad_config(
+                  std::make_shared<const rt::PadConfig>(std::move(config)))) {
+            break;
+          }
+          state.pads[pad].loaded = true;
+          state.pads[pad].has_slice = true;
+          state.pads[pad].slice_index = command.slice - 1 + done;
+          state.pads[pad].name = slice_pad_name(command.slice + done);
+        }
+
+        if (done < count) {
+          set_message("pads are busy — " + std::to_string(done) + " of " + std::to_string(count) +
+                          " assigned, try again",
+                      true);
           break;
         }
-        state.pads[pad].loaded = true;
-        state.pads[pad].has_slice = true;
-        state.pads[pad].slice_index = command.slice - 1;
-        state.pads[pad].name = slice_pad_name(command.slice);
-        set_message(
-            "slice " + std::to_string(command.slice) + " → pad " + std::to_string(command.pad),
-            false);
+        if (count == 1) {
+          set_message(
+              "slice " + std::to_string(command.slice) + " → pad " + std::to_string(command.pad),
+              false);
+          break;
+        }
+        set_message("slices " + std::to_string(command.slice) + "-" +
+                        std::to_string(command.slice_last) + " → pads " +
+                        std::to_string(command.pad) + "-" + std::to_string(command.pad + count - 1),
+                    false);
         break;
       }
 

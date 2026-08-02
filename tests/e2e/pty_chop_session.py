@@ -206,6 +206,28 @@ def main() -> int:
         if "esc quit" not in played:
             failures.append("the keymap did not come back after the message went")
 
+        # A RANGE ASSIGN, on the real binary. Eight transients onto pads 9-16 in
+        # one line -- the thing that took eight `:slot assign` lines before.
+        #
+        # Pads 9-16 rather than 1-8 so the result is distinguishable from what
+        # the chop already did: the chop fills 1-8, and asserting on those would
+        # pass whether the command ran or not.
+        alive = send(":slot assign 1-8 9\r")
+        assigned = screen_now()
+        if "slices 1-8 → pads 9-16" not in assigned:
+            failures.append("`:slot assign 1-8 9` was not acknowledged as a range")
+
+        alive = send("1")  # clear the message; `1` is pad 1
+        banked = screen_now()
+        for expect in ("09 s01", "16 s08"):
+            if expect not in banked:
+                failures.append(f"after the range assign the pad grid has no {expect!r}")
+
+        # And a range that runs off the end is refused rather than truncated.
+        alive = send(":slot assign 1-8 12\r")
+        if "runs past pad 16" not in screen_now():
+            failures.append("a range running past pad 16 was not refused")
+
         alive = send("e")
 
         # Into EDIT on the played slice and back out, so the analysis-produced

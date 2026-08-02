@@ -96,23 +96,70 @@ namespace {
   return error("unknown chop: " + std::string{what});
 }
 
+// `N` or `N-M`, 1-based and inclusive. A single number is the one-element range,
+// so callers never need to tell the two apart.
+//
+// Reversed ranges are refused rather than normalised: `8-1` is much more likely
+// to be a typo than a request to assign backwards, and silently reversing it
+// would put slice 8 on pad 1 while the line says the opposite.
+[[nodiscard]] bool parse_range(std::string_view text, std::size_t& first, std::size_t& last) {
+  const std::size_t dash = text.find('-');
+  if (dash == std::string_view::npos) {
+    if (!parse_number(text, first) || first == 0) {
+      return false;
+    }
+    last = first;
+    return true;
+  }
+  if (!parse_number(text.substr(0, dash), first) || first == 0) {
+    return false;
+  }
+  if (!parse_number(text.substr(dash + 1), last) || last == 0) {
+    return false;
+  }
+  return last >= first;
+}
+
+// `slot assign S P`, where either side may be a range.
+//
+// `1-8 1` fills upward from a starting pad, which is the form that makes a chop
+// land on a bank in one line. `1-8 1-8` says the same thing explicitly, and a
+// length mismatch is refused with BOTH counts named -- silently truncating would
+// leave pads holding whatever they held before, which looks like the command
+// half-worked rather than like it was wrong.
 [[nodiscard]] Command parse_slot(const std::vector<std::string_view>& words) {
   if (words.size() < 2 || words[1] != "assign") {
-    return error("slot what? try: slot assign 5 3");
+    return error("slot what? try: slot assign 5 3, or slot assign 1-8 1");
   }
   if (words.size() < 4) {
     return error("slot assign needs a slice and a pad, e.g. slot assign 5 3");
   }
+
   std::size_t slice = 0;
+  std::size_t slice_last = 0;
+  if (!parse_range(words[2], slice, slice_last)) {
+    return error("slot assign: " + std::string{words[2]} + " is not a slice or a range");
+  }
+
   std::size_t pad = 0;
-  if (!parse_number(words[2], slice) || slice == 0) {
-    return error("slot assign: " + std::string{words[2]} + " is not a slice number");
+  std::size_t pad_last = 0;
+  if (!parse_range(words[3], pad, pad_last)) {
+    return error("slot assign: " + std::string{words[3]} + " is not a pad or a range");
   }
-  if (!parse_number(words[3], pad) || pad == 0) {
-    return error("slot assign: " + std::string{words[3]} + " is not a pad number");
+
+  // A single pad is a STARTING pad when the slices are a range: `1-8 1` fills
+  // pads 1 to 8. That is why the pad range is not carried in the Command -- it
+  // is always as long as the slice range, and app.cpp walks from `pad`.
+  const std::size_t slices = slice_last - slice + 1;
+  const std::size_t pads = pad_last - pad + 1;
+  if (pads != 1 && pads != slices) {
+    return error("slot assign: " + std::to_string(slices) + " slices into " + std::to_string(pads) +
+                 " pads");
   }
+
   Command out = command_of(CommandKind::kSlotAssign);
   out.slice = slice;
+  out.slice_last = slice_last;
   out.pad = pad;
   return out;
 }

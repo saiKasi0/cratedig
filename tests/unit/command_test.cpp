@@ -68,6 +68,64 @@ TEST_CASE("slot assign carries both numbers, as typed", "[command]") {
   CHECK(command.pad == 3);
 }
 
+TEST_CASE("slot assign takes ranges on either side", "[command]") {
+  // `1-8 1` is the form that makes a chop land on a bank in one line. The pad is
+  // a STARTING pad, so the range on the right is implied by the one on the left.
+  const Command up = parse_command("slot assign 1-8 1");
+  REQUIRE(up.kind == CommandKind::kSlotAssign);
+  CHECK(up.slice == 1);
+  CHECK(up.slice_last == 8);
+  CHECK(up.pad == 1);
+
+  CHECK(parse_command("slot assign 1-8 9").pad == 9);
+
+  // Both sides stated explicitly means the same thing.
+  const Command both = parse_command("slot assign 1-8 1-8");
+  REQUIRE(both.kind == CommandKind::kSlotAssign);
+  CHECK(both.slice == 1);
+  CHECK(both.slice_last == 8);
+  CHECK(both.pad == 1);
+
+  // A single assignment is the ONE-ELEMENT RANGE, not a separate shape -- which
+  // is what stops app.cpp needing a second code path that could disagree.
+  const Command one = parse_command("slot assign 5 3");
+  REQUIRE(one.kind == CommandKind::kSlotAssign);
+  CHECK(one.slice == 5);
+  CHECK(one.slice_last == 5);
+  CHECK(one.pad == 3);
+}
+
+TEST_CASE("slot assign refuses a range it cannot carry out", "[command]") {
+  // A length mismatch names BOTH counts. Truncating silently would leave the
+  // rest of the pads holding whatever they held, which reads as the command
+  // half-working rather than as it being wrong.
+  const Command mismatch = parse_command("slot assign 1-8 1-4");
+  REQUIRE(mismatch.kind == CommandKind::kError);
+  CHECK(mismatch.message.find("8") != std::string::npos);
+  CHECK(mismatch.message.find("4") != std::string::npos);
+
+  // Reversed is refused rather than normalised: `8-1` is far more likely to be a
+  // typo than a request to assign backwards, and quietly reversing it would put
+  // slice 8 on pad 1 while the line says the opposite.
+  CHECK(parse_command("slot assign 8-1 1").kind == CommandKind::kError);
+
+  for (const std::string_view line :
+       {"slot assign 0-8 1", "slot assign 1-0 1", "slot assign 1- 1", "slot assign -8 1",
+        "slot assign 1-x 1", "slot assign 1-8 0", "slot assign 1-8 2-x"}) {
+    INFO("line: " << line);
+    CHECK(parse_command(line).kind == CommandKind::kError);
+  }
+}
+
+TEST_CASE("a slot range is left to the caller to bound", "[command]") {
+  // Same split `slot assign 900 5` already documents: how many slices exist is
+  // program state the parser must not need, so this is well-formed and app.cpp
+  // is what refuses it -- naming how many there actually are when it does.
+  const Command command = parse_command("slot assign 1-99 1");
+  REQUIRE(command.kind == CommandKind::kSlotAssign);
+  CHECK(command.slice_last == 99);
+}
+
 TEST_CASE("pad gate and pad oneshot, with the number optional", "[command]") {
   // The number is optional and absent means ALL, because gate is a way of
   // playing rather than a property of one chop: someone who wants held pads
