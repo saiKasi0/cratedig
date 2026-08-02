@@ -482,17 +482,48 @@ ceiling, default -0.3 dBFS.
 
 Same detector and one-pole release as the compressor, with the ratio fixed at infinity — the
 output never exceeds the ceiling — and a **lookahead** of `lookahead_frames`, default 64
-(about 1.3 ms at 48 kHz). The lookahead is a delay line on the audio and an equal delay on
-nothing else: the detector reads ahead, so gain reduction is already applied when the peak
-arrives rather than after it.
+(about 1.3 ms at 48 kHz). Release defaults to 2400 frames (50 ms). The lookahead is a delay
+line on the audio and an equal delay on nothing else.
 
 That delay is why this is off by default. It is inaudible and it is still a delay, and a delay
 that is always on would move every committed hash in the project for a feature nobody asked to
 enable.
 
-Tested as: with the limiter engaged, **no output sample exceeds the ceiling** for any input,
-including a full-scale step — the case a feed-forward limiter without lookahead fails.
-Disengaged, the path is bit-exact.
+### Why the bound holds — and what lookahead is really for
+
+```
+  output[n] = g[n] * x[n - L]
+  g[n]     <= ceiling / max(|x[n - L]| .. |x[n]|)
+```
+
+The detector's window is the same window the delay line holds, **including the sample about to
+be emitted**. So the sample leaving the delay line is one the detector has already accounted
+for. Two things carry the guarantee, and removing either lets samples through:
+
+- **Attack is instant.** The gain jumps straight to the target rather than being smoothed
+  toward it.
+- **The released gain is clamped to the target every frame.** A one-pole approaching from
+  below cannot mathematically overshoot; the clamp is what makes that true in float as well.
+
+**Lookahead is not what makes the bound possible.** This section used to say the full-scale
+step is "the case a feed-forward limiter without lookahead fails". That is false: with instant
+attack on a detector that includes the current sample, `|g·x| <= ceiling` holds at `L = 0` too.
+Deleting the lookahead and re-running the acceptance passes it — which is how the claim was
+caught.
+
+What lookahead moves is **where the gain step lands**. Reduction is instantaneous, so at
+`L = 0` the step falls exactly on the transient that caused it: a discontinuity applied to a
+loud sample, which is a step in the waveform and audible as distortion. At `L > 0` the same
+step is applied `L` frames earlier, to the quiet material in front of the peak, and by the time
+the peak emerges the gain has been settled for `L` frames. That is the property the test
+measures — how many frames before the peak the output stops being the input — and it is exactly
+`L`.
+
+Tested as: with the limiter engaged, **no output sample exceeds the ceiling** for any input —
+a full-scale step, a lone impulse, +32 dBFS material, a burst train that exercises the release,
+and noise that crosses the ceiling constantly. The worst overshoot measured across all of them
+is **one ULP** (1.000000119× the ceiling), which is the rounding in `(ceiling/peak) · peak` and
+nothing else. Disengaged, the path is bit-exact.
 
 ## Metering
 

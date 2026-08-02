@@ -64,6 +64,11 @@ Engine::Engine(const Config& config) noexcept : m_config(config) {
   // arbitrary limit to discover later. 16 x 4 x 2 = 128 sections at the
   // defaults, about 2 KB.
   m_eq_state.assign(rt::kNumPads * rt::kEqBands * channels, rt::Biquad{});
+
+  // The limiter's lookahead delay line, sized for the longest lookahead it will
+  // ever be asked for rather than for the current setting -- so changing the
+  // lookahead is a different read offset rather than a reallocation.
+  m_limiter.prepare(channels);
 }
 
 std::span<float* const> Engine::node_channels(std::size_t node) noexcept {
@@ -371,6 +376,18 @@ std::shared_ptr<const rt::SequencerState> Engine::sequencer_state() const noexce
 
 bool Engine::send_transport(const rt::TransportCommand& command) noexcept {
   return m_transport_commands.try_push(command);
+}
+
+bool Engine::set_limiter(const rt::LimiterConfig& limiter) noexcept {
+  if (!m_limiter_commands.try_push(limiter)) {
+    return false;
+  }
+  m_published_limiter = limiter;
+  return true;
+}
+
+rt::LimiterConfig Engine::limiter() const noexcept {
+  return m_published_limiter;
 }
 
 void Engine::adopt_sequencer() noexcept {
@@ -717,6 +734,15 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
   adopt_pad_configs();
   adopt_sequencer();
 
+  // The master limiter's settings, drained to the LAST one published. A value
+  // ring, so there is nothing to retire and no ordering to preserve: only the
+  // newest setting matters, and any earlier ones in the same block were
+  // superseded before a sample was rendered with them.
+  rt::LimiterConfig limiter_update;
+  while (m_limiter_commands.try_pop(limiter_update)) {
+    m_limiter_config = limiter_update;
+  }
+
   // Before the position advances, so a seek lands on this block rather than one
   // block late -- which for "play from the top" is the difference between the
   // first step sounding and being skipped.
@@ -757,6 +783,23 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
   // that belongs to the machine rather than to the music: giving it a strip
   // would give it a fader, a mute and an EQ it has no business having.
   mix_metronome(channels, num_frames);
+
+  // LAST AT MASTER, after the metronome, because it is the one thing that must
+  // be able to catch everything -- including the click. Putting the metronome
+  // after it would make the click the only signal able to clip the output
+  // (docs/MIXER.md).
+  //
+  // Bypassed entirely when disabled, not run with a unity gain: the lookahead is
+  // a DELAY, so a disabled limiter that still ran would shift every sample by
+  // 64 frames and move every committed hash in the project.
+  if (m_limiter_config.enabled) {
+    m_limiter.process(m_limiter_config, channels, num_frames);
+  } else {
+    // Reset rather than left holding old audio, so enabling it starts from
+    // silence in the delay line instead of replaying 64 frames from whenever it
+    // was last on. Same rule as a bypassed EQ band.
+    m_limiter.reset();
+  }
 
   // The transport advances by exactly the block it just rendered, whatever that
   // block was. Nothing else tracks time: every step boundary is derived from
@@ -872,6 +915,8 @@ void Engine::publish_telemetry(std::span<float* const> channels, std::size_t num
   for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
     m_published.strip_reduction[pad].store(m_strip_reduction[pad], std::memory_order_relaxed);
   }
+  m_published.limiter_gain.store(m_limiter_config.enabled ? m_limiter.gain() : 1.0F,
+                                 std::memory_order_relaxed);
 
   // relaxed everywhere: the UI wants a recent value, not a synchronised one, and
   // an acquire/release pair here would put a barrier in the audio thread's hot
@@ -901,6 +946,7 @@ Telemetry Engine::telemetry() const noexcept {
       static_cast<std::uint8_t>((step >> kTransportPatternShift) & kTransportFieldMask);
 
   snapshot.master_peak = m_published.master_peak.load(std::memory_order_relaxed);
+  snapshot.limiter_gain = m_published.limiter_gain.load(std::memory_order_relaxed);
   for (std::size_t bus = 0; bus < rt::kNumBuses; ++bus) {
     snapshot.bus_peak[bus] = m_published.bus_peak[bus].load(std::memory_order_relaxed);
   }

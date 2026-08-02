@@ -7,6 +7,7 @@
 #include "rt/compressor.hpp"
 #include "rt/garbage_ring.hpp"
 #include "rt/handoff_ring.hpp"
+#include "rt/limiter.hpp"
 #include "rt/pad_config.hpp"
 #include "rt/pad_event.hpp"
 #include "rt/sample.hpp"
@@ -93,6 +94,10 @@ struct Telemetry {
 
   // Per-bus level, after every strip routed to it has summed in.
   std::array<float, rt::kNumBuses> bus_peak{};
+
+  // The master limiter's gain, LINEAR. 1.0 is none. Reported whether or not the
+  // limiter is engaged -- a disengaged limiter reads 1.0, which is the truth.
+  float limiter_gain = 1.0F;
 
   // Worst compressor gain reduction on each strip, LINEAR, with the makeup gain
   // divided back out. 1.0 is none. Linear rather than dB for the reason
@@ -183,6 +188,15 @@ class Engine {
   // Deep enough for a dense chord plus pedal traffic between two audio blocks.
   static constexpr std::size_t kMidiRingCapacity = 256;
 
+  // Master limiter settings in flight, control -> audio.
+  //
+  // A VALUE RING, not the shared_ptr handoff the pads use, and the difference is
+  // the reason the one-pointer rule exists at all: a PadConfig owns a Sample and
+  // cannot be copied atomically, so it must be swapped by pointer. A
+  // LimiterConfig owns nothing -- it is a handful of floats -- so it travels the
+  // same way a PadEvent does, by value, with no garbage to retire afterwards.
+  static constexpr std::size_t kLimiterRingCapacity = 8;
+
   // Transport commands in flight. Play, stop and seek arrive at human speed; the
   // depth is here so a burst during a stalled stream is dropped visibly rather
   // than blocking the UI.
@@ -272,6 +286,14 @@ class Engine {
   // CONTROL THREAD. What this thread last published for that pad's strip, with
   // the same one-block-ahead caveat as pad_config().
   [[nodiscard]] rt::StripConfig strip(std::uint8_t pad) const noexcept;
+
+  // CONTROL THREAD. Replaces the master limiter's settings.
+  //
+  // Returns false if the ring is full, in which case nothing changed.
+  [[nodiscard]] bool set_limiter(const rt::LimiterConfig& limiter) noexcept;
+
+  // CONTROL THREAD. What this thread last published.
+  [[nodiscard]] rt::LimiterConfig limiter() const noexcept;
 
   // CONTROL THREAD. Queues a pad hit for the next block.
   //
@@ -448,6 +470,7 @@ class Engine {
     std::array<std::atomic<float>, rt::kNumPads> strip_peak{};
     std::array<std::atomic<float>, rt::kNumBuses> bus_peak{};
     std::array<std::atomic<float>, rt::kNumPads> strip_reduction{};  // filled with 1.0 in the ctor
+    std::atomic<float> limiter_gain{1.0F};
 
     // Written on trigger and aged once per block. Initialised in the Engine
     // constructor rather than here, because a default-constructed
@@ -604,6 +627,7 @@ class Engine {
   rt::SpscRing<rt::PadEvent, kEventRingCapacity> m_events;
   rt::SpscRing<rt::PadEvent, kMidiRingCapacity> m_midi_events;
   rt::SpscRing<rt::TransportCommand, kTransportRingCapacity> m_transport_commands;
+  rt::SpscRing<rt::LimiterConfig, kLimiterRingCapacity> m_limiter_commands;
   rt::HandoffRing<rt::PadConfig, kPadHandoffCapacity> m_pad_handoff;
   rt::HandoffRing<rt::SequencerState, kSequencerHandoffCapacity> m_sequencer_handoff;
   rt::VoicePool<kMaxVoices> m_voices;
@@ -650,6 +674,11 @@ class Engine {
   // depend on the channel count.
   std::array<rt::Compressor, rt::kNumPads> m_strip_compressor{};
 
+  // AUDIO THREAD ONLY. The master limiter, and the settings it is running with.
+  // The delay line is allocated in the constructor.
+  rt::Limiter m_limiter;
+  rt::LimiterConfig m_limiter_config{};
+
   // This block's worst gain reduction per strip, as a LINEAR gain with the
   // makeup divided back out. 1.0 means none. Converted to dB at the interface
   // boundary like every other level in the program.
@@ -660,6 +689,10 @@ class Engine {
   // is deliberately one block *ahead* of it.
   std::array<std::shared_ptr<const rt::PadConfig>, rt::kNumPads> m_published_pads{};
   std::shared_ptr<const rt::SequencerState> m_published_sequencer;
+
+  // CONTROL THREAD ONLY: what this thread has published, so limiter() can answer
+  // without reading the audio thread's copy.
+  rt::LimiterConfig m_published_limiter{};
 
   // Written by the control thread only, and read by it -- no cross-thread access,
   // so no atomic.
