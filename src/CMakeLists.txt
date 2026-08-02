@@ -60,7 +60,7 @@ target_compile_options(cratedig_engine PRIVATE -fno-exceptions -fno-rtti)
 # src/engine/ (CLAUDE.md), and this module uses std::string and std::filesystem
 # freely. It depends on rt:: types only, never on the engine.
 add_library(cratedig_ingest STATIC ingest/decoder.cpp ingest/fft.cpp ingest/onset.cpp ingest/slices.cpp
-                                   ingest/peak_pyramid.cpp
+                                   ingest/peak_pyramid.cpp ingest/pool.cpp
                                    ingest/resampler.cpp)
 target_link_libraries(cratedig_ingest PUBLIC cratedig_rt)
 target_link_libraries(cratedig_ingest PRIVATE cratedig_ffmpeg SampleRate::samplerate pffft
