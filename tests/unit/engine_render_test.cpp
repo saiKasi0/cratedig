@@ -1630,3 +1630,218 @@ TEST_CASE("two pads can play slices of two different files at once", "[unit]") {
   // and the voice is already running.
   CHECK(break_loop.use_count() > 1);
 }
+
+// ---------------------------------------------------------------------------
+// The audition path (M5.5): sound that is not a pad.
+// ---------------------------------------------------------------------------
+//
+// Every route to sound before this was a pad trigger, so nothing could address
+// material no pad held: a chop of more than sixteen left the rest editable,
+// drawable and silent, and a browser previewing a file it had not loaded was the
+// same problem. This is the one mechanism both need.
+//
+// The exclusions below are STRUCTURAL rather than checked. An audition plays out
+// of its own rt::VoicePool, so it cannot light a pad, cannot appear in a strip
+// meter, cannot choke anything and cannot be stolen by a pad hit -- not because
+// each of those is guarded, but because none of them can see it. These tests
+// exist to prove that the separation is real, not to make it so.
+
+TEST_CASE("an audition sounds without a pad", "[unit]") {
+  engine::Engine eng{test_config()};
+
+  // NOTHING IS ON ANY PAD. Before the audition path this render is silence and
+  // there is no way to make it anything else.
+  auto config = std::make_shared<const rt::PadConfig>(
+      rt::PadConfig{.sample = make_test_sample(), .pad = 0, .start_frame = 0, .end_frame = 900});
+
+  RenderCapture before{512, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  engine::Engine silent{test_config()};
+  before.render_in_blocks(silent, blocks);
+
+  REQUIRE(eng.audition(config));
+  RenderCapture after{512, kChannels};
+  after.render_in_blocks(eng, blocks);
+
+  float quiet = 0.0F;
+  float heard = 0.0F;
+  for (const float value : before.samples()) {
+    quiet = std::max(quiet, std::abs(value));
+  }
+  for (const float value : after.samples()) {
+    heard = std::max(heard, std::abs(value));
+  }
+  CHECK(quiet == 0.0F);
+  CHECK(heard > 0.1F);
+  CHECK(eng.active_auditions() == 1);
+
+  // And no pad is playing: active_voices() counts the PAD pool.
+  CHECK(eng.active_voices() == 0);
+}
+
+TEST_CASE("an audition lights no pad and moves no strip meter", "[unit]") {
+  // The exclusions, which are what makes it an audition rather than a
+  // seventeenth pad.
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.audition(std::make_shared<const rt::PadConfig>(
+      rt::PadConfig{.sample = make_test_sample(), .pad = 3, .start_frame = 0, .end_frame = 900})));
+
+  RenderCapture out{512, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  out.render_in_blocks(eng, blocks);
+
+  const engine::Telemetry telemetry = eng.telemetry();
+
+  // The config named pad 3 -- deliberately, because a real caller builds one out
+  // of a pad's config and the field comes along. It must be IGNORED: pad 3 was
+  // not hit, so its glow must not say it was.
+  CHECK_FALSE(telemetry.pad_glow[3].triggered);
+  for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+    INFO("pad " << pad);
+    CHECK(telemetry.pad_peak[pad] == 0.0F);
+    CHECK(telemetry.strip_peak[pad] == 0.0F);
+    CHECK_FALSE(telemetry.pad_glow[pad].triggered);
+  }
+
+  // Nor did it go through any bus, because it does not go through a strip.
+  for (std::size_t bus = 0; bus < rt::kNumBuses; ++bus) {
+    CHECK(telemetry.bus_peak[bus] == 0.0F);
+  }
+
+  // But it did reach the output, which is the whole point.
+  CHECK(telemetry.master_peak > 0.0F);
+}
+
+TEST_CASE("a muted strip does not silence an audition", "[unit]") {
+  // The consequence that matters for the browser: previewing a file has nothing
+  // to do with where any pad is routed. Running an audition through strip 1
+  // would give it that strip's fader, EQ and mute -- so a muted pad would
+  // silence the browser, which is a bug nobody would think to look for.
+  engine::Engine eng{test_config()};
+  for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+    REQUIRE(eng.set_strip(static_cast<std::uint8_t>(pad), rt::StripConfig{.mute = true}));
+  }
+  REQUIRE(eng.audition(std::make_shared<const rt::PadConfig>(
+      rt::PadConfig{.sample = make_test_sample(), .pad = 0, .start_frame = 0, .end_frame = 900})));
+
+  RenderCapture out{512, kChannels};
+  const std::array<std::size_t, 1> blocks{256};
+  out.render_in_blocks(eng, blocks);
+
+  float heard = 0.0F;
+  for (const float value : out.samples()) {
+    heard = std::max(heard, std::abs(value));
+  }
+  CHECK(heard > 0.1F);
+}
+
+TEST_CASE("an audition neither steals a pad voice nor chokes one", "[unit]") {
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.set_pad_sample(0, make_test_sample()));
+
+  // A pad in a choke group, sounding.
+  auto choked = std::make_shared<const rt::PadConfig>(rt::PadConfig{.sample = make_test_sample(),
+                                                                    .pad = 0,
+                                                                    .start_frame = 0,
+                                                                    .end_frame = 2'000,
+                                                                    .choke_group = 1});
+  REQUIRE(eng.publish_pad_config(choked));
+  REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 0, .velocity = 1.0F}));
+
+  const std::array<std::size_t, 1> blocks{256};
+  RenderCapture first{256, kChannels};
+  first.render_in_blocks(eng, blocks);
+  REQUIRE(eng.active_voices() == 1);
+
+  // An audition IN THE SAME CHOKE GROUP. A pad would cut the other off; this
+  // must not, because it is not in the pad pool and choke_group() never sees it.
+  REQUIRE(
+      eng.audition(std::make_shared<const rt::PadConfig>(rt::PadConfig{.sample = make_test_sample(),
+                                                                       .pad = 0,
+                                                                       .start_frame = 0,
+                                                                       .end_frame = 2'000,
+                                                                       .choke_group = 1})));
+
+  RenderCapture second{256, kChannels};
+  second.render_in_blocks(eng, blocks);
+
+  CHECK(eng.active_voices() == 1);     // the pad is still sounding
+  CHECK(eng.active_auditions() == 1);  // and so is the audition
+}
+
+TEST_CASE("auditions can be stopped, and stopping them leaves the pads alone", "[unit]") {
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.set_pad_sample(0, make_test_sample()));
+  REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 0, .velocity = 1.0F}));
+  REQUIRE(eng.audition(std::make_shared<const rt::PadConfig>(rt::PadConfig{
+      .sample = make_test_sample(), .pad = 0, .start_frame = 0, .end_frame = 4'000})));
+
+  const std::array<std::size_t, 1> blocks{128};
+  RenderCapture running{128, kChannels};
+  running.render_in_blocks(eng, blocks);
+  REQUIRE(eng.active_voices() == 1);
+  REQUIRE(eng.active_auditions() == 1);
+
+  REQUIRE(eng.stop_audition());
+
+  // Long enough for the release floor to run out.
+  RenderCapture after{2'048, kChannels};
+  const std::array<std::size_t, 1> longer{512};
+  after.render_in_blocks(eng, longer);
+
+  CHECK(eng.active_auditions() == 0);
+  CHECK(eng.active_voices() == 1);  // the pad kept playing
+}
+
+TEST_CASE("the audition ring is bounded, and says so", "[unit]") {
+  // A bound is only observable by exceeding it -- the lesson the pad handoff
+  // ring taught in M4.5, applied before it can be learned again here.
+  engine::Engine eng{test_config()};
+  std::size_t taken = 0;
+  for (std::size_t attempt = 0; attempt < 200; ++attempt) {
+    if (!eng.audition(std::make_shared<const rt::PadConfig>(rt::PadConfig{
+            .sample = make_test_sample(), .pad = 0, .start_frame = 0, .end_frame = 900}))) {
+      break;
+    }
+    ++taken;
+  }
+  CHECK(taken == engine::Engine::kAuditionHandoffCapacity);
+
+  // And it drains: after a render there is room again.
+  const std::array<std::size_t, 1> blocks{64};
+  RenderCapture out{64, kChannels};
+  out.render_in_blocks(eng, blocks);
+  CHECK(eng.audition(std::make_shared<const rt::PadConfig>(
+      rt::PadConfig{.sample = make_test_sample(), .pad = 0, .start_frame = 0, .end_frame = 900})));
+}
+
+TEST_CASE("an audition with no sample is refused", "[unit]") {
+  engine::Engine eng{test_config()};
+  CHECK_FALSE(eng.audition(nullptr));
+  CHECK_FALSE(eng.audition(std::make_shared<const rt::PadConfig>(rt::PadConfig{})));
+  CHECK(eng.active_auditions() == 0);
+}
+
+TEST_CASE("the audition ring drains with no device, like the others", "[unit]") {
+  // The trap M4.5 paid for twice: a ring with a producer and no consumer fills,
+  // and the feature stops working several minutes into a session for reasons
+  // nobody can see. adopt_offline() exists for exactly this, and every ring it
+  // forgets is the same bug again -- so the test is written at the same time as
+  // the ring rather than after somebody hits it.
+  engine::Engine eng{test_config()};
+  const std::shared_ptr<const rt::Sample> sample = make_test_sample();
+
+  std::size_t published = 0;
+  for (std::size_t attempt = 0; attempt < 200; ++attempt) {
+    if (!eng.audition(std::make_shared<const rt::PadConfig>(
+            rt::PadConfig{.sample = sample, .pad = 0, .start_frame = 0, .end_frame = 900}))) {
+      break;
+    }
+    ++published;
+    eng.adopt_offline();
+    static_cast<void>(eng.collect_garbage());
+  }
+
+  // Far past the ring's depth: with a drain it never fills.
+  CHECK(published == 200);
+}

@@ -44,6 +44,16 @@ enum class PadEventKind : std::uint8_t {
   // because "all" is not a pad number and encoding it as one is how a stray
   // 255 turns into a silent room.
   kStopAll,
+
+  // Stop whatever is being AUDITIONED. `pad` is ignored.
+  //
+  // An audition is not a pad -- it is played on its own voices, out of its own
+  // pool, so that it cannot light a pad, appear in a strip meter or choke
+  // anything (docs/ARCHITECTURE.md). It therefore needs its own way to be
+  // stopped, and it rides this ring rather than growing a second one: the ring
+  // already exists, already has a producer on each of the two threads that would
+  // want it, and carries "stop making that sound" messages already.
+  kStopAudition,
 };
 
 // A pad hit, sent control -> audio through an SpscRing.

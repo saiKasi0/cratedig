@@ -379,6 +379,21 @@ std::shared_ptr<const rt::SequencerState> Engine::sequencer_state() const noexce
   return m_published_sequencer;
 }
 
+bool Engine::audition(std::shared_ptr<const rt::PadConfig> config) noexcept {
+  if (config == nullptr || config->sample == nullptr) {
+    return false;
+  }
+  return m_audition_handoff.try_publish(std::move(config));
+}
+
+bool Engine::stop_audition() noexcept {
+  return m_events.try_push(rt::PadEvent{.kind = rt::PadEventKind::kStopAudition});
+}
+
+std::size_t Engine::active_auditions() const noexcept {
+  return m_audition_voices.active_count();
+}
+
 bool Engine::send_transport(const rt::TransportCommand& command) noexcept {
   return m_transport_commands.try_push(command);
 }
@@ -412,6 +427,33 @@ rt::LimiterConfig Engine::limiter() const noexcept {
 
 float Engine::bus_gain(std::uint8_t bus) const noexcept {
   return bus < rt::kNumBuses ? m_published_master.bus_gain[bus] : 1.0F;
+}
+
+void Engine::adopt_auditions() noexcept {
+  // The same retire-then-take shape adopt_pad_configs() uses, and a MEMBER for
+  // the retiring pointer for the same reason: a displaced config the garbage
+  // ring refuses has to survive to the next block rather than dying on the audio
+  // thread's stack.
+  if (m_retiring_audition != nullptr && !m_garbage.retire(std::move(m_retiring_audition))) {
+    return;
+  }
+
+  while (m_audition_handoff.try_take(m_retiring_audition)) {
+    // ARRIVING IS PLAYING. There is no second message: an audition is "let me
+    // hear this now", and a config that had landed but not yet sounded would be
+    // a state with nothing to do and everything to handle.
+    //
+    // At frame_offset 0. A preview is not placed inside the block the way a hit
+    // is -- nobody is playing it in time with anything.
+    static_cast<void>(
+        m_audition_voices.trigger(m_retiring_audition, 1.0F, m_config.sample_rate, m_garbage, 0));
+
+    // The pool took its own reference, so ours is now the displaced one and goes
+    // to the janitor like any other.
+    if (!m_garbage.retire(std::move(m_retiring_audition))) {
+      return;  // hold it and try again next block
+    }
+  }
 }
 
 void Engine::adopt_sequencer() noexcept {
@@ -524,6 +566,13 @@ void Engine::drain_pad_events(Ring& ring, std::size_t num_frames) noexcept {
   while (ring.try_pop(event)) {
     // BEFORE the pad range check, because this one does not name a pad. Reading
     // its `pad` at all would make a panic depend on a field nobody sets.
+    // Before the pad range check too, and for the same reason: an audition has
+    // no pad, so reading one would make stopping it depend on a field nobody
+    // sets.
+    if (event.kind == rt::PadEventKind::kStopAudition) {
+      m_audition_voices.stop_all();
+      continue;
+    }
     if (event.kind == rt::PadEventKind::kStopAll) {
       m_voices.stop_all();
       continue;
@@ -731,6 +780,17 @@ bool Engine::submit_midi_event(const rt::PadEvent& event) noexcept {
 void Engine::adopt_offline() noexcept {
   adopt_pad_configs();
   adopt_sequencer();
+
+  // THE AUDITION RING TOO, and this is exactly the trap M4.5 paid for twice: a
+  // ring with a producer and no consumer fills, and then the feature stops
+  // working several minutes into a session for reasons nobody can see. With
+  // --no-audio nothing renders, so render() never drains this, and EDIT's space
+  // publishes to it every time somebody presses it.
+  //
+  // The voices it starts will never advance, because nothing renders them. That
+  // is fine and self-limiting: there are two, and the third audition steals the
+  // oldest and retires its config through the garbage ring like any other steal.
+  adopt_auditions();
 }
 
 void Engine::render(std::span<float* const> channels, std::size_t num_frames) noexcept {
@@ -757,6 +817,7 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
   // UI frame sounds the new material rather than one block of the old.
   adopt_pad_configs();
   adopt_sequencer();
+  adopt_auditions();
 
   // The master limiter's settings, drained to the LAST one published. A value
   // ring, so there is nothing to retire and no ordering to preserve: only the
@@ -800,6 +861,18 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
   }
   mix_graph(channels, num_frames);
 
+  // AUDITION, straight into master.
+  //
+  // Not through a strip, deliberately: previewing a file has nothing to do with
+  // where any pad is routed, and running it through strip 1 would give it that
+  // strip's EQ, its fader and its mute -- so a muted pad would silence the
+  // browser. It enters where the metronome does, for the same reason the
+  // metronome does: it is monitoring rather than music (docs/MIXER.md).
+  //
+  // It IS inside the limiter, which is the one thing that must catch everything
+  // on its way out.
+  m_audition_voices.render_add(channels, num_frames);
+
   // After the voices and before the position advances: the click is placed by
   // the same block_start the steps were, so it lands on the beat it marks.
   //
@@ -840,6 +913,7 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
   // the same block it finished. Failure here is not an error: the voice keeps
   // its reference and we retry next block (see VoicePool::reclaim).
   static_cast<void>(m_voices.reclaim(m_garbage));
+  static_cast<void>(m_audition_voices.reclaim(m_garbage));
 
   // relaxed: publishes progress to the UI's poll loop; nothing else is ordered
   // by it, and the audio thread is the only writer.

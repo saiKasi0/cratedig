@@ -156,6 +156,24 @@ class Engine {
   // the janitor may be a whole UI frame behind.
   static constexpr std::size_t kGarbageRingCapacity = 64;
 
+  // Voices reserved for AUDITION -- previewing material that is on no pad.
+  //
+  // ITS OWN POOL, and that is the design rather than a convenience. An audition
+  // voice must not light a pad, must not appear in a strip meter, must not choke
+  // anything and must not be stolen by a pad hit. Every one of those exclusions
+  // is free if the voice simply is not in the pad pool, and every one would be a
+  // flag somebody has to remember to check if it were. rt::VoicePool::render_pad
+  // even asserts that every voice it walks belongs to a strip, so a padless voice
+  // in that pool would be silently never rendered.
+  //
+  // Two, so auditioning a second thing while the first is still ringing does not
+  // cut it off mid-note. Not sixteen: this is a preview, not an instrument.
+  static constexpr std::size_t kAuditionVoices = 2;
+
+  // Audition configs in flight, control -> audio. Small: a person clicking
+  // through a directory cannot outrun a 5 ms block by more than a couple.
+  static constexpr std::size_t kAuditionHandoffCapacity = 8;
+
   // Pad reconfigurations in flight, control -> audio. `:chop transient`
   // publishes one config per pad in a single burst, so a full grid of sixteen
   // is the unit to size for -- and twice that, because the burst can land on
@@ -269,6 +287,30 @@ class Engine {
   [[nodiscard]] std::shared_ptr<const rt::PadConfig> pad_config(std::uint8_t pad) const noexcept;
 
   [[nodiscard]] std::shared_ptr<const rt::Sample> pad_sample(std::uint8_t pad) const noexcept;
+
+  // CONTROL THREAD, AT ANY TIME. Plays something that is on no pad.
+  //
+  // THE ARRIVAL OF THE CONFIG IS THE TRIGGER. One message rather than a publish
+  // and then a play: an audition is inherently "let me hear this now", and a
+  // two-message version would have a window in which the config is loaded and
+  // silent, which is a state nobody wants and everybody would have to handle.
+  //
+  // The config is an ordinary rt::PadConfig -- same slice range, same envelope,
+  // same fades -- because previewing a slice is playing a slice. Its `pad` field
+  // is ignored, and it is played on the audition pool, so nothing it does
+  // reaches the pad grid or the mixer's strips.
+  //
+  // Returns false if the handoff ring is full, in which case THE CALLER STILL
+  // OWNS `config` and nothing was auditioned.
+  [[nodiscard]] bool audition(std::shared_ptr<const rt::PadConfig> config) noexcept;
+
+  // CONTROL THREAD. Silences whatever is being auditioned, through the pad event
+  // ring. Released rather than cut, like every other stop.
+  [[nodiscard]] bool stop_audition() noexcept;
+
+  // How many audition voices are sounding. For tests and for the interface;
+  // deliberately separate from active_voices(), which counts pads.
+  [[nodiscard]] std::size_t active_auditions() const noexcept;
 
   // CONTROL THREAD. Replaces one pad's mixer settings, keeping everything else
   // about the pad.
@@ -527,6 +569,10 @@ class Engine {
   void start_voice(std::uint8_t pad, float velocity, std::size_t frame_offset,
                    bool sequenced) noexcept;
 
+  // AUDIO THREAD, at the top of every block. Takes whatever has been published
+  // for audition and starts it.
+  void adopt_auditions() noexcept;
+
   // AUDIO THREAD, once per block, per ring. Turns queued PadEvents into voices.
   //
   // Templated on the ring so the keyboard's and MIDI's differ only in capacity
@@ -639,6 +685,13 @@ class Engine {
   rt::HandoffRing<rt::PadConfig, kPadHandoffCapacity> m_pad_handoff;
   rt::HandoffRing<rt::SequencerState, kSequencerHandoffCapacity> m_sequencer_handoff;
   rt::VoicePool<kMaxVoices> m_voices;
+
+  // The audition lane: its own ring, its own voices, its own retiring slot.
+  // Nothing here is reachable from the pad path and that is the point.
+  rt::HandoffRing<rt::PadConfig, kAuditionHandoffCapacity> m_audition_handoff;
+  rt::VoicePool<kAuditionVoices> m_audition_voices;
+  std::shared_ptr<const rt::PadConfig> m_retiring_audition;
+
   rt::GarbageRing<kGarbageRingCapacity> m_garbage;
 
   // AUDIO THREAD ONLY after construction. The mixer graph's sample storage:
