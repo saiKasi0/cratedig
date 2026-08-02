@@ -1,0 +1,326 @@
+# Mixer & DSP specification
+
+Signal flow and the definition of every processor, precise enough to test against.
+
+This file exists because M5's acceptance is *"EQ ±0.1 dB vs analytic"*, and a test cannot
+compare a filter to an analytic response without being told which response. Everything here
+is a decision the tests cite; if an implementation and this file disagree, one of them is a
+bug and the same PR fixes both (CLAUDE.md).
+
+**Scope.** M5 builds the graph, the strip essentials, the EQ, the compressor and the master
+limiter. Saturation, sends, reverb and delay are M5.2 and are specified here only far enough
+to say where they attach, so that the graph is not re-cut when they land.
+
+## Signal flow
+
+```
+  pad 1..16          strip 1..16                bus a..d            master
+  ─────────          ───────────                ────────            ──────
+  voices ──► [ gain ► EQ ► comp ► balance ] ──► [ sum ► gain ] ──► [ sum ► gain ► limiter ] ──► out
+                                    │                                  ▲
+                          (M5.2: sends tap here) ──► [ reverb ]────────►│
+                                                     [ delay  ]────────►│
+                                                                        │
+                                      metronome ────────────────────────┘
+```
+
+Sixteen strips, four buses, one master. The shape is **fixed**: no node is created or
+destroyed while running, so there is no graph topology to allocate, branch on, or get wrong
+at 3 a.m. Every buffer is preallocated at `Engine` construction against
+`Config::max_block_frames`.
+
+**Order within a strip is gain → EQ → compressor → balance, and it does not move.** Gain
+first so the compressor sees what the fader is actually sending it; balance last so it cannot
+change what the compressor detected. The mockup draws two free-form insert slots per strip;
+this is fixed instead, and `docs/design/README.md` records the departure. Arbitrary
+processors in arbitrary order is M8's per-pad plugin chain, which has a swap protocol this
+does not need.
+
+**The metronome enters at master, after the bus sum and before the limiter.** It is a
+monitoring signal that belongs to the machine rather than to the music: routing it through a
+strip would give it a fader, a mute and an EQ it has no business having, and putting it after
+the limiter would let it be the one thing that can clip the output.
+
+### Where the pad's own gain lives, and why it is not the fader
+
+`PadConfig::gain` is multiplied into `voice.gain` **at trigger time** (`rt::VoicePool::trigger`),
+along with the note's velocity. It is a property of the material — how loud this chop is —
+and changing it deliberately does not disturb voices already sounding.
+
+`StripConfig::gain` is the fader, applied per block on the strip. It moves what is sounding,
+because that is what a fader is. Two numbers, two meanings, and the reason they are not one:
+a mixer whose fader only affected the next hit would be broken in a way that is very hard to
+describe and very easy to ship.
+
+## Levels, units and conventions
+
+- **Linear gain everywhere in the audio path.** dB appears only at the interface boundary and
+  in this document. A dB field in an RT struct means a `pow()` on the audio thread or a
+  conversion somebody forgets.
+- **dBFS is `20·log10(|x|)`**, matching `tui::detail::format_dbfs`. 0 dBFS is a sample
+  magnitude of 1.0. There is no headroom convention above that: the format is float, so 1.0
+  is a reference rather than a ceiling, and only the limiter and the output device care.
+- **Frequencies in Hz, times in frames.** Times are in frames for the reason
+  `rt::AdsrFrames` gives: the device's block size must not be able to change the shape of
+  anything, and a frame count cannot be affected by it.
+- **Sample rate** is `Engine::Config::sample_rate`. Coefficients are derived from it once, on
+  the control thread, and published — never recomputed per block.
+
+### Transparency is a requirement, not a happy accident
+
+**A default strip must be bit-transparent.** Gain 1.0, balance centre, EQ bypassed,
+compressor bypassed, limiter disabled: every sample must reach the output exactly as the
+voice produced it.
+
+This is load-bearing. The M3 and M4 e2e goldens are committed hashes of the existing signal
+path, and anything that multiplies by a not-quite-one number moves them for no musical
+reason. Two specific traps it rules out:
+
+- **Balance, not a constant-power pan law.** An equal-power law is `cos/sin` of the pan angle
+  and gives 0.7071 on both sides at centre — 3 dB down. For a stereo source that is simply
+  wrong, and it would have made the whole program quieter the day the mixer landed. Balance
+  attenuates only the side being panned away from and is exactly 1.0 on both at centre.
+- **The limiter is off by default.** Lookahead is a delay, and a delay moves every golden
+  while changing nothing anybody asked to change.
+
+The one hash movement M5 permits is the summation regrouping described next, which is
+arithmetic rather than gain.
+
+### Summation is regrouped, and that is visible
+
+Before M5, every voice summed into one output buffer in voice-slot order. Now each pad's
+voices sum into their own strip, strips into buses, buses into master. The same numbers,
+added in a different order — and **float addition is not associative**, so the result differs
+in the last bits.
+
+Measured, not assumed: over 2000 random six-voice sums, regrouping changed the result in
+**993 of them (49.6%)**.
+
+Both M4 goldens have deliberately overlapping voices, so both move. The justification is
+evidence: `tests/unit/engine_render_test.cpp` asserts the per-strip sum and the flat sum agree
+to within a ULP-scale bound (below −120 dBFS), which is what separates "the sum was regrouped"
+from "the graph is wrong". Nothing else in M5 may move a hash.
+
+## The strip
+
+### Gain
+
+Linear, applied to both channels. Default 1.0.
+
+### Balance
+
+One control in [−1, +1], 0 at centre.
+
+```
+  left  gain = pan <= 0 ? 1 : 1 - pan
+  right gain = pan >= 0 ? 1 : 1 + pan
+```
+
+Exactly 1.0 on both channels at centre; a hard pan silences the other side. Linear rather than
+`cos/sin` for the transparency reason above — this is a balance control on a stereo signal,
+not a panner placing a mono source in a field.
+
+### Mute and solo
+
+Mute is per strip. **Solo is a property of the set, not of a strip**: if any strip is soloed,
+every strip that is not soloed is silent. It is derived per block from all sixteen rather
+than stored, so there is no "solo count" to leak when a strip is reconfigured.
+
+Solo overrides mute — a soloed strip that is also muted is audible, because solo is a
+statement about what you want to hear now and mute is a statement about the mix.
+
+## The EQ
+
+Four bands per strip, each independently bypassable, in fixed order:
+
+| Band | Type | Parameters |
+|---|---|---|
+| 1 | Low shelf | frequency, gain, S (shelf slope; S = 1 is the steepest without a peak) |
+| 2 | Peaking | frequency, gain, Q |
+| 3 | Peaking | frequency, gain, Q |
+| 4 | High shelf | frequency, gain, S |
+
+Each band is one **Direct Form I biquad**, coefficients from the RBJ Audio EQ Cookbook. Direct
+Form I because its state is the input and output history rather than an internal accumulator,
+which is the form that behaves best when coefficients change between blocks — and coefficients
+do change, because the control thread republishes them.
+
+### Coefficients
+
+With `A = 10^(gain_db/40)`, `w0 = 2*pi*f0/Fs`, and `alpha` as given per type:
+
+**Peaking**, `alpha = sin(w0)/(2Q)`:
+
+```
+  b0 = 1 + alpha*A     b1 = -2*cos(w0)     b2 = 1 - alpha*A
+  a0 = 1 + alpha/A     a1 = -2*cos(w0)     a2 = 1 - alpha/A
+```
+
+**Low shelf**, `alpha = sin(w0)/2 * sqrt((A + 1/A)(1/S - 1) + 2)`:
+
+```
+  b0 =    A((A+1) - (A-1)cos(w0) + 2*sqrt(A)*alpha)
+  b1 =  2A((A-1) - (A+1)cos(w0))
+  b2 =    A((A+1) - (A-1)cos(w0) - 2*sqrt(A)*alpha)
+  a0 =      (A+1) + (A-1)cos(w0) + 2*sqrt(A)*alpha
+  a1 =   -2((A-1) + (A+1)cos(w0))
+  a2 =      (A+1) + (A-1)cos(w0) - 2*sqrt(A)*alpha
+```
+
+**High shelf**, same `alpha`:
+
+```
+  b0 =    A((A+1) + (A-1)cos(w0) + 2*sqrt(A)*alpha)
+  b1 = -2A((A-1) + (A+1)cos(w0))
+  b2 =    A((A+1) + (A-1)cos(w0) - 2*sqrt(A)*alpha)
+  a0 =      (A+1) - (A-1)cos(w0) + 2*sqrt(A)*alpha
+  a1 =    2((A-1) - (A+1)cos(w0))
+  a2 =      (A+1) - (A-1)cos(w0) - 2*sqrt(A)*alpha
+```
+
+All six are normalised by `a0` before use, so the difference equation is:
+
+```
+  y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
+```
+
+**Q is the classical definition** — bandwidth in octaves is *not* the parameter, and a caller
+that wants octaves converts. **Gain is in dB and applies to the band's peak or shelf**, not to
+the whole filter: `A` is `10^(dB/40)` rather than `10^(dB/20)` precisely because the amplitude
+response reaches `A^2` at the peak.
+
+### Ranges
+
+Frequency is clamped to `[10 Hz, min(20000, 0.45*Fs)]`. The upper bound is below Nyquist on
+purpose: RBJ coefficients degenerate as `w0` approaches pi, and a UI that allows 20 kHz at a
+44.1 kHz rate is a UI that allows a filter which is no longer the filter it claims to be. Q is
+clamped to `[0.1, 18]`, S to `[0.1, 2]`, gain to `[-24, +24] dB`.
+
+### How it is tested (the acceptance)
+
+`|H(e^jw)|` is evaluated **directly from the same coefficients**:
+
+```
+  H(e^jw) = (b0 + b1*e^-jw + b2*e^-2jw) / (1 + a1*e^-jw + a2*e^-2jw)
+```
+
+and compared against the magnitude measured by driving a sine through the implementation.
+**Within ±0.1 dB**, across the band, for each type.
+
+**The measured amplitude is taken by correlation, not by the peak sample, and that is part of
+the acceptance rather than an implementation detail of the test.** Project the steady-state
+output onto `sin` and `cos` at the test frequency and take the magnitude:
+
+```
+  amplitude = 2/N * |sum( y[n]*cos(w*n) ) + j*sum( y[n]*sin(w*n) )|
+```
+
+The reason is measured, not assumed. Peak-of-samples underestimates whenever there are few
+samples per cycle, because the sampling instants straddle the true peak rather than landing on
+it — against a correct high-shelf at 48 kHz it reads:
+
+| Probe | peak-of-samples error | correlation error |
+|---|---|---|
+| 8 kHz | −0.008 dB | 0.000 dB |
+| 15 kHz | **−0.141 dB** | 0.000 dB |
+| 18 kHz | −0.067 dB | 0.000 dB |
+| 21 kHz | −0.014 dB | 0.000 dB |
+
+A peak-based test would therefore fail the ±0.1 dB acceptance on a filter that is exactly
+right, and the tempting repair — widening the tolerance — would be widening it to accommodate
+the yardstick. `docs/TESTING.md` already names that failure for the interpolator: "a test that
+has to allow slop is a test that has stopped pinning anything down."
+
+No FFT is involved either, and deliberately: an FFT brings its own windowing error to the
+measurement, and the thing under test is the filter. Reference arithmetic is `double`, for the
+same reason `tests/unit/interpolator_test.cpp` uses it.
+
+Also asserted: **bypass is bit-exact passthrough** — not "within a tolerance", exactly equal,
+because a bypassed band must not touch the sample at all. And a settled filter fed silence
+decays to zero rather than being cut, which is what makes skipping silent strips a determinism
+bug rather than an optimisation.
+
+## The compressor
+
+One per strip, feed-forward, **peak-detecting**, operating on the maximum of the two channels
+so the stereo image cannot be pulled sideways by gain reduction.
+
+### Detector
+
+```
+  d[n]   = max(|left[n]|, |right[n]|)
+  env[n] = d[n] > env[n-1] ? attack_coeff *(env[n-1] - d[n]) + d[n]
+                           : release_coeff*(env[n-1] - d[n]) + d[n]
+```
+
+with `coeff = exp(-1 / time_frames)`. That is the standard one-pole; the consequence worth
+stating is that **the envelope reaches 1 - 1/e (about 63.2%) of a step after exactly
+`time_frames` frames**, and that is what the time-constant test measures. "Attack time" means
+that here, and not "time to full gain reduction" — a definition that varies between
+manufacturers and cannot be tested against.
+
+Peak rather than RMS: this is a drum machine, and an RMS detector on a kick transient is late
+by design. RMS is not offered, rather than offered and wrong.
+
+### Curve
+
+In dB, with `x` the detector level, `T` the threshold, `R` the ratio and `W` the knee width:
+
+```
+  x - T < -W/2      ->  y = x                                       (below the knee)
+  |x - T| <= W/2    ->  y = x + (1/R - 1)*(x - T + W/2)^2 / (2W)    (in the knee)
+  x - T > W/2       ->  y = T + (x - T)/R                           (above the knee)
+```
+
+The gain applied is `10^((y - x)/20)`, multiplied by the makeup gain.
+
+The quadratic knee is **continuous in value and in first derivative** at both boundaries,
+which is the property the test checks — a knee that is merely continuous still produces an
+audible edge, and the derivative is where that lives.
+
+Ratio is clamped to `[1, 20]`. `R = 1` is unity gain at every level and is what "bypassed"
+means arithmetically, so the bypass flag is an optimisation rather than a second code path.
+Threshold `[-60, 0] dB`, knee `[0, 24] dB`, makeup `[0, +24] dB`.
+
+## The master limiter
+
+**Off by default** (see transparency above). When enabled: a brick wall at a configurable
+ceiling, default -0.3 dBFS.
+
+Same detector and one-pole release as the compressor, with the ratio fixed at infinity — the
+output never exceeds the ceiling — and a **lookahead** of `lookahead_frames`, default 64
+(about 1.3 ms at 48 kHz). The lookahead is a delay line on the audio and an equal delay on
+nothing else: the detector reads ahead, so gain reduction is already applied when the peak
+arrives rather than after it.
+
+That delay is why this is off by default. It is inaudible and it is still a delay, and a delay
+that is always on would move every committed hash in the project for a feature nobody asked to
+enable.
+
+Tested as: with the limiter engaged, **no output sample exceeds the ceiling** for any input,
+including a full-scale step — the case a feed-forward limiter without lookahead fails.
+Disengaged, the path is bit-exact.
+
+## Metering
+
+Per strip, per bus and at master, published through `engine::Telemetry` with the same
+discipline as the existing meters: written by the audio thread, read by the interface, and
+explicitly **not part of the determinism contract** — the fall rate depends on the block size,
+which depends on the device, while `render()`'s output does not.
+
+Peak with a fall time of `Engine::kPeakFallSeconds` (0.4 s), reusing the existing constant so
+every meter in the program falls at the same rate. Gain reduction is metered separately, as a
+linear gain rather than a dB value, converted at the boundary like everything else.
+
+## M5.2, and where it attaches
+
+Specified only far enough that the graph does not get re-cut:
+
+- **Saturation** is a strip processor, after the compressor and before balance, oversampled to
+  keep its harmonics below Nyquist. The alias-floor acceptance belongs to it.
+- **Sends** tap the strip post-fader, sum into two send buses, and return to master alongside
+  the four mix buses.
+- **Reverb and delay** live on those send buses.
+
+None of that changes the shape above: it adds processors to a strip that already has a chain,
+and buses to a master that already sums several.
