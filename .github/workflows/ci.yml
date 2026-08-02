@@ -27,8 +27,21 @@ jobs:
         preset: [dev, asan, tsan, ubsan]
     steps:
       - uses: actions/checkout@v4
-      - name: Install ninja
-        run: brew install ninja
+      # FFmpeg is the project's ONE system dependency: cmake/ffmpeg.cmake finds
+      # libavformat/avcodec/avutil/swresample through pkg-config, because
+      # docs/LICENSING.md requires dynamic linking against a shared build we do
+      # not ship. Without it every preset dies at CONFIGURE time with
+      # "Package 'libswresample' not found", which looks like four separate
+      # build failures and is one missing package.
+      #
+      # The Linux container has installed it since M1 (docker/Dockerfile); this
+      # job never did, so the macOS matrix had never passed.
+      - name: Install build dependencies
+        run: |
+          brew install --quiet ninja pkgconf ffmpeg
+          # Fail HERE, naming the package, rather than sixty lines into a CMake
+          # backtrace that says "Package 'libswresample' not found" four times.
+          pkg-config --modversion libavformat libavcodec libavutil libswresample
       - name: Cache FetchContent
         uses: actions/cache@v4
         with:
