@@ -2,6 +2,7 @@
 #define CRATEDIG_ENGINE_ENGINE_HPP
 
 #include "rt/arch.hpp"
+#include "rt/biquad.hpp"
 #include "rt/click.hpp"
 #include "rt/garbage_ring.hpp"
 #include "rt/handoff_ring.hpp"
@@ -529,6 +530,13 @@ class Engine {
   // `channels`, at unity.
   void mix_graph(std::span<float* const> channels, std::size_t num_frames) noexcept;
 
+  // AUDIO THREAD, once per strip per block. Runs the four EQ bands in order.
+  //
+  // `pad` selects the filter state, which lives here rather than in the config:
+  // a PadConfig is immutable and shared, and filter history is neither.
+  void apply_eq(std::span<float* const> buffer, const rt::EqConfig& eq, std::size_t pad,
+                std::size_t num_frames) noexcept;
+
   // AUDIO THREAD. This pad's mixer settings, or the defaults if nothing has been
   // published to it. An unloaded pad has a strip like any other -- it is simply
   // one with nothing running through it.
@@ -611,6 +619,16 @@ class Engine {
   // them, so an atomic would buy nothing.
   std::array<float, rt::kNumPads> m_strip_peak{};
   std::array<float, rt::kNumBuses> m_bus_peak{};
+
+  // AUDIO THREAD ONLY. EQ filter state, one biquad per pad per band per channel,
+  // laid out as ((pad * kEqBands) + band) * num_channels + channel and allocated
+  // once in the constructor.
+  //
+  // Here rather than in rt::StripConfig on purpose: a published config is
+  // immutable and shared, and filter history belongs to one strip in one engine.
+  // Putting state in the config would mean two engines rendering the same
+  // project shared a filter, which is not a thing filters can do.
+  std::vector<rt::Biquad> m_eq_state;
 
   // CONTROL THREAD ONLY: what this thread has published, so pad_config() can
   // answer without reading the audio thread's table. Not a cache of m_pads — it

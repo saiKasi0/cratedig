@@ -39,6 +39,16 @@ Engine::Engine(const Config& config) noexcept : m_config(config) {
   for (std::size_t index = 0; index < m_graph_channels.size(); ++index) {
     m_graph_channels[index] = m_graph_samples.data() + (index * frames);
   }
+
+  // Filter state: one biquad per pad, per band, per channel. Here rather than in
+  // StripConfig because a config is immutable and shared -- two voices holding
+  // the same config would be sharing filter history, which is not a thing
+  // filters can do.
+  //
+  // Sized from the real channel count rather than capped at two, so there is no
+  // arbitrary limit to discover later. 16 x 4 x 2 = 128 sections at the
+  // defaults, about 2 KB.
+  m_eq_state.assign(rt::kNumPads * rt::kEqBands * channels, rt::Biquad{});
 }
 
 std::span<float* const> Engine::node_channels(std::size_t node) noexcept {
@@ -124,6 +134,43 @@ void apply_balance(std::span<float* const> channels, float balance,
 
 }  // namespace
 
+void Engine::apply_eq(std::span<float* const> buffer, const rt::EqConfig& eq, std::size_t pad,
+                      std::size_t num_frames) noexcept {
+  if (m_eq_state.empty()) {
+    return;
+  }
+  const auto channels = static_cast<std::size_t>(m_config.num_channels);
+
+  // Bands in fixed order, every block, for every strip. Bands are cascaded, so
+  // the order is part of the result -- two peaking bands overlapping do not
+  // commute exactly in floating point even though they do in algebra.
+  for (std::size_t band = 0; band < rt::kEqBands; ++band) {
+    const rt::EqBand& settings = eq.bands[band];
+    const std::size_t base = ((pad * rt::kEqBands) + band) * channels;
+
+    if (!settings.enabled) {
+      // BYPASS IS BIT-EXACT: the samples are not touched at all. Not multiplied
+      // by a coefficient set that happens to be passthrough, not run through a
+      // section with b0 = 1 -- untouched, because that is the only version of
+      // "bypassed" a hash can confirm.
+      //
+      // The state is RESET rather than frozen. Frozen state would make the first
+      // block after re-enabling depend on how long ago the band was switched
+      // off, which is both a click and a determinism bug: the same session
+      // played twice would differ if the toggles landed on different blocks.
+      for (std::size_t channel = 0; channel < channels; ++channel) {
+        m_eq_state[base + channel].reset();
+      }
+      continue;
+    }
+
+    for (std::size_t channel = 0; channel < channels && channel < buffer.size(); ++channel) {
+      m_eq_state[base + channel].process_block(settings.coeffs,
+                                               std::span<float>{buffer[channel], num_frames});
+    }
+  }
+}
+
 rt::StripConfig Engine::strip_config(std::size_t pad) const noexcept {
   const std::shared_ptr<const rt::PadConfig>& config = m_pads[pad];
   return config == nullptr ? rt::StripConfig{} : config->strip;
@@ -165,6 +212,7 @@ void Engine::mix_graph(std::span<float* const> channels, std::size_t num_frames)
     // Only the mix below is skipped, because that is the part that means
     // "audible".
     apply_gain(buffer, rt::clamp_strip_gain(strip.gain), num_frames);
+    apply_eq(buffer, strip.eq, pad, num_frames);
     apply_balance(buffer, rt::clamp_strip_balance(strip.balance), num_frames);
 
     // POST-FADER, and zero when the strip is not reaching the mix. This meter

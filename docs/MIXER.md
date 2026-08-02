@@ -253,7 +253,30 @@ response reaches `A^2` at the peak.
 Frequency is clamped to `[10 Hz, min(20000, 0.45*Fs)]`. The upper bound is below Nyquist on
 purpose: RBJ coefficients degenerate as `w0` approaches pi, and a UI that allows 20 kHz at a
 44.1 kHz rate is a UI that allows a filter which is no longer the filter it claims to be. Q is
-clamped to `[0.1, 18]`, S to `[0.1, 2]`, gain to `[-24, +24] dB`.
+clamped to `[0.1, 18]`, **S to `[0.1, 1]`**, gain to `[-24, +24] dB`.
+
+Finite values out of range are clamped; **non-finite ones fall back to the default** rather
+than to the nearest bound, for the reason the Gain section gives.
+
+#### Why S stops at 1
+
+This range said `[0.1, 2]` when it was first written, and that was a bug — the band table
+above already said the right thing ("S = 1 is the steepest without a peak") and the two
+disagreed.
+
+The shelf `alpha` contains `sqrt((A + 1/A)(1/S - 1) + 2)`. For `S > 1` the `(1/S - 1)` term is
+negative, and at high gain it drags the radicand below zero: **at +24 dB with S = 2 it is
+−0.116**, so `sqrt` returns NaN, every coefficient is NaN, and the strip fills with NaN for the
+rest of the session. That combination was *inside* the permitted range.
+
+Clamping the radicand at zero keeps the arithmetic finite and was rejected: the result is not a
+shelf. A "+24 dB" low shelf built that way measures **+69.8 dB at 100 Hz** with a −45 dB notch
+above it, peaking at +47.4 dB overall. Finite is not the same as correct.
+
+Capping S at 1 makes `(1/S - 1)` non-negative, so the radicand is at least 2 for **every** gain
+and the degenerate case cannot arise at all. It also happens to be the boundary the band table
+names: measured overshoot above the shelf plateau is 0.000 dB at S = 1, +0.116 dB at S = 1.2
+and +1.383 dB at S = 2.
 
 ### How it is tested (the acceptance)
 
@@ -276,19 +299,49 @@ output onto `sin` and `cos` at the test frequency and take the magnitude:
 
 The reason is measured, not assumed. Peak-of-samples underestimates whenever there are few
 samples per cycle, because the sampling instants straddle the true peak rather than landing on
-it — against a correct high-shelf at 48 kHz it reads:
+it — against a correct high shelf (8 kHz, +9 dB, S = 1, 48 kHz) it reads:
 
 | Probe | peak-of-samples error | correlation error |
 |---|---|---|
-| 8 kHz | −0.008 dB | 0.000 dB |
-| 15 kHz | **−0.141 dB** | 0.000 dB |
-| 18 kHz | −0.067 dB | 0.000 dB |
-| 21 kHz | −0.014 dB | 0.000 dB |
+| 1 kHz | −0.009 dB | 0.000 dB |
+| 8 kHz | **−0.151 dB** | 0.000 dB |
+| 15 kHz | −0.021 dB | 0.000 dB |
+| 18 kHz | **−0.153 dB** | 0.000 dB |
+| 21 kHz | −0.032 dB | 0.000 dB |
 
 A peak-based test would therefore fail the ±0.1 dB acceptance on a filter that is exactly
 right, and the tempting repair — widening the tolerance — would be widening it to accommodate
 the yardstick. `docs/TESTING.md` already names that failure for the interpolator: "a test that
 has to allow slop is a test that has stopped pinning anything down."
+
+`tests/unit/biquad_test.cpp` asserts both halves of this: the correlation is inside the budget
+by two orders of magnitude *and* the peak is outside it, on the same filter, from the same
+samples. So nobody can quietly simplify the measurement back to the obvious thing.
+
+#### The settle time is derived, not chosen
+
+The measurement must not begin until the transient has gone, and how long that takes depends on
+the filter. The poles are the roots of `z^2 + a1*z + a2`; the transient decays as `r^n` where
+`r` is the magnitude of the **slower** one.
+
+Two traps, both paid for. A flat settle of 2000 frames is wrong by a factor of thirty for a
+narrow low band — 120 Hz at Q = 8 with +24 dB needs **65363 frames**, 1.36 s. And
+`r = sqrt(a2)`, true for a conjugate pair, is wrong whenever the discriminant is non-negative
+and the poles are **real and split**: at 120 Hz, −24 dB, Q = 0.5 it gives 0.9393 and asks for
+257 frames while the dominant pole is 0.9980 and needs 8039. In both cases the filter was
+right and the measurement was reading a transient and calling it the response.
+
+#### What this acceptance cannot check
+
+It compares the measured response against `|H|` evaluated **from the same coefficients**, so it
+judges whether the implementation realises its coefficients — and is blind to coefficients that
+are self-consistent and wrong. Deriving `A` as `10^(dB/20)` instead of `10^(dB/40)` passes it
+completely.
+
+So there is a second test, and it is not optional: a band asked for +6 dB must *produce* +6 dB
+where it acts — at `f0` for a peak, at DC for a low shelf, at Nyquist for a high shelf. Those
+three points are exact rather than sampled, since `H(1) = (b0+b1+b2)/(1+a1+a2)` and
+`H(-1) = (b0-b1+b2)/(1-a1+a2)`.
 
 No FFT is involved either, and deliberately: an FFT brings its own windowing error to the
 measurement, and the thing under test is the filter. Reference arithmetic is `double`, for the
@@ -298,6 +351,39 @@ Also asserted: **bypass is bit-exact passthrough** — not "within a tolerance",
 because a bypassed band must not touch the sample at all. And a settled filter fed silence
 decays to zero rather than being cut, which is what makes skipping silent strips a determinism
 bug rather than an optimisation.
+
+Bypass is a *real* bypass, not "set the gain to 0 dB". At `A = 1` the numerator and denominator
+become the same polynomial, so `H(z)` is identically 1 in algebra — and not in floating point,
+where the recursion still accumulates rounding the algebra says is zero. An enabled 0 dB band
+is measurably not bit-transparent, and the committed hashes are safe only because a default
+band is switched **off**.
+
+### State, and where it lives
+
+Filter state is **not** in `rt::StripConfig`. A published config is immutable and shared
+between the pad and every voice holding it; filter history belongs to one strip in one engine.
+The `rt::Biquad` instances live in `Engine`, indexed by pad, band and channel, allocated once.
+
+A bypassed band has its state **reset** rather than frozen. Frozen state would make the first
+block after re-enabling depend on how long ago the band was switched off — a click, and a
+determinism bug: the same session played twice would differ if the toggles landed on different
+blocks.
+
+The property that catches a mistake here is **block-size invariance**, not a level comparison.
+Pointing every strip at one shared set of filters looks like it would corrupt a neighbouring
+strip and does not — the strips with no EQ reset the shared state on their way past, so the
+filtered strip merely restarts from silence at the top of each block, and two renders that are
+equally wrong compare equal. What it destroys is history across block boundaries, which is
+exactly what rendering the same material at 2048 frames and at 64 will catch.
+
+### Denormals
+
+The biquad flushes state below `1e-30` (−600 dBFS) to zero **itself**, rather than relying on
+the FTZ/DAZ that `rt::ScopedDenormalDisable` sets. The offline renderer never opens a device
+and so never sets them: leaving it to the FPU mode would make a live render and a bounce of the
+same material disagree in the far tail, and "same input, same bytes" is a promise this project
+makes. NaN is deliberately *not* flushed — a NaN in the audio is a bug to find, not one to hide
+by turning it into silence.
 
 ## The compressor
 
