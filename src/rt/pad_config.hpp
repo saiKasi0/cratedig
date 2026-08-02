@@ -62,7 +62,15 @@ inline constexpr std::size_t kDefaultFadeFrames = 32;
 struct PadConfig {
   // What plays. Null is legal and means an unloaded pad, which is silent rather
   // than an error -- a 4x4 grid is mostly empty when you start.
-  std::shared_ptr<const Sample> sample;
+  //
+  // EXPLICITLY nullptr, though a shared_ptr default-constructs to null anyway.
+  // Every other member here has a default member initialiser, and a designated
+  // initialiser that omits a field WITHOUT one is a -Wmissing-field-initializers
+  // warning under clang -- so `PadConfig{.pad = n}`, which is the natural way to
+  // say "an unloaded pad", failed the build on Linux while compiling cleanly on
+  // AppleClang. The default is the fix rather than naming the field at every
+  // call site, because the next call site would have the same problem.
+  std::shared_ptr<const Sample> sample = nullptr;
 
   // Which pad this config is for.
   //
