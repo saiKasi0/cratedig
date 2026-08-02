@@ -10,9 +10,10 @@ assets/starter-pack/*
 !assets/starter-pack/*.onsets.txt
 
 *.md
-docs/design/*
 !docs/ARCHITECTURE.md
 !docs/LUA_API.md
 !docs/MIXER.md
 !docs/TESTING.md
 !docs/LICENSING.md
+!/README.md
+docs/design/*
