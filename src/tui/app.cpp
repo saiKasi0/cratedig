@@ -1131,11 +1131,27 @@ int run_app(const AppOptions& options) {
       }
       if (code == kSpace) {
         const std::uint8_t pad = pad_for_slice(state, state.edit.slice);
-        if (pad < rt::kNumPads) {
-          static_cast<void>(
-              engine.trigger_pad(rt::PadEvent{.pad = pad, .velocity = 1.0F, .frame_offset = 0}));
-          state.selected_pad = pad;
+        if (pad >= rt::kNumPads) {
+          // A SLICE NOT ON A PAD CANNOT BE HEARD, because every route to sound
+          // here is a pad trigger: the audio thread plays m_pads[N], so there is
+          // nothing to address a slice that no pad holds. A chop of more than
+          // sixteen leaves the rest exactly there -- editable, drawable, and
+          // silent.
+          //
+          // Said rather than ignored. The key did nothing at all before, which
+          // reads as EDIT being broken on those slices rather than as the slice
+          // being unreachable. Auditioning without a pad is M5.5's, alongside
+          // the browser that needs the same mechanism to preview a file it has
+          // not loaded.
+          set_message("slice " + std::to_string(state.edit.slice + 1) +
+                          " is not on a pad — :slot assign " +
+                          std::to_string(state.edit.slice + 1) + " <pad> to hear it",
+                      true);
+          return true;
         }
+        static_cast<void>(
+            engine.trigger_pad(rt::PadEvent{.pad = pad, .velocity = 1.0F, .frame_offset = 0}));
+        state.selected_pad = pad;
         return true;
       }
       if (code == kEscape) {

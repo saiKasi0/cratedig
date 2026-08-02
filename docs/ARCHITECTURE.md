@@ -699,8 +699,14 @@ These are deliberate scope boundaries, not oversights:
 - **Reverse and loop mode do not exist.** They are `PadConfig` fields in M5, when
   the DSP for them lands — a field nothing honours is worse than no field.
 - **A chop assigns slices to pads positionally**: slice *n* to pad *n*, and
-  anything past sixteen is not on a pad at all. `:slot assign 9-16 1` reaches the
-  rest in one line. Banks are M6.
+  anything past sixteen is not on a pad at all. `:slot assign 17-24 1` reaches
+  the rest in one line, and banks are M6.
+- **A slice that is not on a pad cannot be played, including in EDIT.** Every
+  route to sound is a pad trigger, so there is nothing to address material no pad
+  holds — a chop of more than sixteen leaves the rest editable, drawable and
+  silent. EDIT's `space` says so rather than doing nothing, which is as far as it
+  can go without an audition path; that is M5.5's, alongside the browser that
+  needs the same mechanism to preview a file it has not loaded.
 - **`--no-audio` never drains the handoff rings**, because nothing renders.
   Enough chops in one session will fill the pad ring, and `publish_pad_config()`
   then refuses rather than dropping silently. That is what that mode is, not a

@@ -556,6 +556,41 @@ def main() -> int:
             command_failures.append("`:stop 99` was not refused")
 
     if alive:
+        # A SLICE THAT IS NOT ON A PAD. Twenty chops onto sixteen pads leaves
+        # four that nothing can play: every route to sound is a pad trigger, so
+        # a slice no pad holds is editable, drawable and silent.
+        #
+        # That is a real limit until M5.5 gives auditioning its own path. What is
+        # checked here is that EDIT SAYS SO -- the key did nothing at all before,
+        # which reads as EDIT being broken on those slices rather than as the
+        # slice being unreachable.
+        alive = send(":chop grid 20\r")
+        if "20 slices" not in screen_now():
+            command_failures.append(":chop grid 20 did not report twenty slices")
+
+        alive = send(":edit 20\r")
+        if "slice 20/20" not in screen_now():
+            command_failures.append("`:edit 20` did not open EDIT on slice 20")
+
+        alive = send(" ")
+        unreachable = screen_now()
+        if "not on a pad" not in unreachable:
+            command_failures.append("auditioning a slice with no pad said nothing")
+        if ":slot assign 20" not in unreachable:
+            command_failures.append("the message does not say how to reach the slice")
+
+        # And a slice that IS on a pad still auditions silently -- no message,
+        # because nothing went wrong. Without this the check above would pass on
+        # a build that had simply broken auditioning altogether.
+        alive = send("\x1b")
+        alive = send(":edit 3\r")
+        alive = send(" ")
+        if "not on a pad" in screen_now():
+            command_failures.append("auditioning slice 3, which is on pad 3, was refused")
+
+        alive = send("\x1b")  # out of EDIT before the quit below
+
+    if alive:
         # ESCAPE, not "q" -- the pad map claims every letter it uses, and a
         # session that sent one here would trigger a pad and then hang.
         os.write(fd, b"\x1b")
