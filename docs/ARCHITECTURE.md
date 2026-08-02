@@ -602,7 +602,7 @@ care:
   from itself thirty times a second.
 - `--legacy-keys` never asks, which keeps the old path exercised on demand.
 
-## Current state (M4)
+## Current state (M4.5)
 
 CRATEDIG chops and sequences. `cratedig <file>` decodes it, resamples it to the
 engine rate, builds a peak pyramid, puts it on pad 1 and draws the PERFORM screen
@@ -621,6 +621,14 @@ metronome and a tempo held as hundredths so 89.5 bpm survives the trip exactly.
 A MIDI controller plays the same pads at real velocity through a ring of its own.
 Sequenced hits light their pads differently from live ones, scheduled in listener
 time against a latency figure M9 will measure and which is zero until it does.
+
+M4.5 was the round of fixes that came from playing it rather than from the
+roadmap. The pad map runs in pad order now -- `1234 / qwer / asdf / zxcv`, number
+row on top where it is on the keyboard -- from **one table**, in `src/tui/keys.hpp`,
+because there were two and nothing checked they agreed. Space is the transport
+and `p` is its alias. `.` stops every sounding voice and the transport with it,
+because a long one-shot could not otherwise be stopped once it started; `:stop N`
+is the surgical version. And `:slot assign 1-8 1` fills a bank in one line.
 
 Implemented:
 
@@ -644,15 +652,22 @@ Implemented:
 - `src/tui/` — FTXUI. `waveform.cpp` (braille, no FTXUI dependency),
   `ui_state.cpp` (the view model), `render.cpp` and `render_edit.cpp` (two pure
   layout functions over one `UiState`), `render_detail.cpp` (what they share),
-  `keys.cpp` (the CSI-u decoder), `command.cpp` (the `:` grammar), `theme.hpp`,
+  `keys.{hpp,cpp}` (the CSI-u decoder, and the one pad map -- a keyboard fact
+  rather than a layout one), `command.cpp` (the `:` grammar), `theme.hpp`,
   `app.cpp`, `cli.cpp`.
 
-Not yet built: the small playability batch (M4.5), the mixer graph (M5), the
-sample pool and browser (M5.5), recording and the project file (M6). See
-`docs/ROADMAP.md`.
+Not yet built: the mixer graph (M5), the sample pool and browser (M5.5),
+recording and the project file (M6). See `docs/ROADMAP.md`.
 
 ### What M5 inherits
 
+- **A release has a declick floor**, `PadConfig::release_floor_frames`, defaulting
+  to the same `kDefaultFadeFrames` the boundary fades use. `AdsrFrames::release`
+  defaults to zero, so before M4.5 a default pad released from full scale fell to
+  silence in one frame -- a step discontinuity, and a click that choke groups and
+  gate note-offs had both made since M3. `Envelope::release()` takes the floor as
+  a required argument rather than a defaulted one, so every call site states its
+  policy; that is what turned up the third caller.
 - **The reconfiguration protocol has now carried a second payload** — the
   sequencer state, alongside pad configs — with no change to `HandoffRing` for
   either. M5's channel strips are the third, and the strip *is* the mixer half of
@@ -677,8 +692,8 @@ These are deliberate scope boundaries, not oversights:
 - **Reverse and loop mode do not exist.** They are `PadConfig` fields in M5, when
   the DSP for them lands — a field nothing honours is worse than no field.
 - **A chop assigns slices to pads positionally**: slice *n* to pad *n*, and
-  anything past sixteen is not on a pad at all. `:slot assign` reaches the rest
-  one at a time, and range assignment is M4.5. Banks are M6.
+  anything past sixteen is not on a pad at all. `:slot assign 9-16 1` reaches the
+  rest in one line. Banks are M6.
 - **`--no-audio` never drains the handoff rings**, because nothing renders.
   Enough chops in one session will fill the pad ring, and `publish_pad_config()`
   then refuses rather than dropping silently. That is what that mode is, not a
@@ -687,7 +702,16 @@ These are deliberate scope boundaries, not oversights:
   all. The pad path is the same bug with a longer fuse.
 - **The transport does not run under `--no-audio`.** Nothing calls `render()`, so
   the sequencer never advances; pressing play says so rather than lighting up a
-  transport that cannot move.
+  transport that cannot move. Neither the transport ring nor the sequencer
+  handoff is written to in that mode, for the same reason: there is no consumer,
+  and a queue of orders for a thread that does not exist eventually fills.
+- **That the panic key stops the transport is not covered by a test.** The two
+  halves are: `tests/unit/engine_render_test.cpp` shows `kStopAll` alone gets
+  retriggered by the next step, and that `kStopAll` plus a transport stop stays
+  silent. What is unasserted is that `src/tui/app.cpp` sends both — under
+  `--no-audio` the transport cannot be observed to have stopped, and app.cpp is
+  not reachable from a unit test. Removing the transport half passes every test
+  in the suite; it was tried.
 - **The sequencer has no MIDI clock and no CC mapping.** Clock sync would make
   tempo a value arriving from a third thread, against the determinism story the
   offline acceptance rests on. Both stay available for a later milestone.

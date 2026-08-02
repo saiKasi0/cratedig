@@ -512,6 +512,37 @@ which is `127/127.0f == 1.0f` exactly, so the product in `amplitude * value` is
 exact and an FMA cannot round it differently. The file says it at length, and the
 rule it follows is the next section.
 
+### M4.5, and what a test can and cannot claim
+
+Three of the M4.5 changes are worth recording for the shape of their coverage
+rather than for what they do.
+
+**The pad map** is asserted twice, deliberately differently.
+`tests/unit/keys_test.cpp` checks the lookup reads the table and that the order
+is the rotated one — and says in the test that it *cannot* assert nobody adds a
+second table, because one inside an anonymous namespace is unreachable from a
+test. The end-to-end version is in `tests/e2e/pty_sequencer_session.py`: it reads
+the key groups off the caption row **as painted**, presses the first key of the
+first and last groups, and checks which lane row lights up. That is the only
+place "the legend and the keyboard agree" is a claim about the program rather
+than about a header.
+
+**The panic key's transport half has no test, and the comment beside it says so.**
+Two engine cases pin why it is needed — `kStopAll` alone is retriggered by the
+next step, and `kStopAll` plus a transport stop stays silent — but that
+`src/tui/app.cpp` sends both is unasserted. Under `--no-audio` the transport
+cannot be observed to have stopped and app.cpp is not reachable from a unit test.
+Removing the transport half passes the whole suite; it was tried. Writing that
+down is worth more than a test that would have to fake the thing it checks.
+
+**The release floor** broke three existing tests, which was the point: they
+asserted a choked voice was gone at frame 0, and *that* was the click. They now
+ask for a hard cut explicitly (`release_floor_frames = 0`) and go on testing
+whether the release happened at all, while a new case covers the default. A
+second envelope case asserts the floor is a MINIMUM and not an override — the
+inverted version would turn every deliberate 200 ms release into a 0.7 ms
+declick, which is a worse bug than the click and one nobody would look for here.
+
 ### The PTY harness reconstructs a screen from a byte stream, and that is a measurement
 
 Worth writing down because it produced a convincing false positive. The sessions

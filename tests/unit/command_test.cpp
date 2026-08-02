@@ -101,8 +101,8 @@ TEST_CASE("slot assign refuses a range it cannot carry out", "[command]") {
   // half-working rather than as it being wrong.
   const Command mismatch = parse_command("slot assign 1-8 1-4");
   REQUIRE(mismatch.kind == CommandKind::kError);
-  CHECK(mismatch.message.find("8") != std::string::npos);
-  CHECK(mismatch.message.find("4") != std::string::npos);
+  CHECK(mismatch.message.find('8') != std::string::npos);
+  CHECK(mismatch.message.find('4') != std::string::npos);
 
   // Reversed is refused rather than normalised: `8-1` is far more likely to be a
   // typo than a request to assign backwards, and quietly reversing it would put
