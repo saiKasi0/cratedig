@@ -748,3 +748,37 @@ TEST_CASE("the crate verbs do not collide with what was already there", "[comman
   CHECK(parse_command("limit off").kind == CommandKind::kLimiter);
   CHECK(parse_command("chop transient").kind == CommandKind::kChopTransient);
 }
+
+TEST_CASE("env sets one segment of a pad's envelope", "[command]") {
+  // The engine has honoured PadConfig::env since M3 and nothing could set it:
+  // EDIT drew four segments and every one was the default. This is the verb that
+  // was missing.
+  const Command attack = parse_command("env 3 a 12");
+  REQUIRE(attack.kind == CommandKind::kPadEnvelope);
+  CHECK(attack.pad == 3);
+  CHECK(attack.text == "a");
+  CHECK(attack.attack_ms == 12.0F);
+
+  CHECK(parse_command("env 3 d 80").text == "d");
+  CHECK(parse_command("env 3 r 250").attack_ms == 250.0F);
+
+  // ONE SEGMENT AT A TIME rather than four numbers in a row: `env 3 r 120` is
+  // what a person means, and a positional form makes the common case a lookup of
+  // which slot is which.
+  CHECK(parse_command("env 3 12 80 -6 250").kind == CommandKind::kError);
+
+  // Sustain is DECIBELS, because that is what EDIT shows. A verb taking a linear
+  // 0..1 would set a number the screen then reported differently.
+  const Command sustain = parse_command("env 3 s -6");
+  REQUIRE(sustain.kind == CommandKind::kPadEnvelope);
+  CHECK(sustain.text == "s");
+  CHECK(sustain.decibels == -6.0F);
+  CHECK(parse_command("env 3 s 3").kind == CommandKind::kError);  // above 0 dBFS
+  CHECK(parse_command("env 3 s -90").kind == CommandKind::kError);
+
+  CHECK(parse_command("env 3 x 5").kind == CommandKind::kError);
+  CHECK(parse_command("env 0 a 5").kind == CommandKind::kError);
+  CHECK(parse_command("env 3 a").kind == CommandKind::kError);
+  CHECK(parse_command("env 3 a -5").kind == CommandKind::kError);
+  CHECK(parse_command("env 3 a 90000").kind == CommandKind::kError);
+}

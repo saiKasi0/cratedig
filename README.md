@@ -133,6 +133,7 @@ preview cannot light a pad or be silenced by one's mute.
 | `:pad gate [N]` | pad N (or all of them) sustaings while held |
 | `:pad oneshot [N]` | pad N (or all of them) plays to the end of its slice |
 | `:edit [S]` | open EDIT, on slice S or on the current one |
+| `:env P a`/`d`/`s`/`r` `V` | pad P's envelope: attack, decay and release in ms, sustain in dB |
 | `:load <path>` | add a file to the crate — the rest of the line is the path, spaces and all |
 | `:files` · `:pool` | list the crate |
 | `:file N` | look at another loaded file |

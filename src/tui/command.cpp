@@ -778,6 +778,56 @@ namespace {
   return out;
 }
 
+// `env <pad> <a|d|s|r> <value>`.
+//
+// ONE SEGMENT AT A TIME, not four numbers in a row. `env 3 r 120` is what a
+// person means -- "make that one ring out" -- and a four-positional form makes
+// the common case a lookup of which slot is which. The compressor takes its
+// times positionally because they arrive together as a setting; an envelope is
+// adjusted one segment at a time by ear.
+//
+// Attack, decay and release are milliseconds. Sustain is DECIBELS, because that
+// is what EDIT shows: the panel reads `s 0.0 dB`, and a verb that took a linear
+// 0..1 would set a number the screen then reported differently.
+[[nodiscard]] Command parse_env(const std::vector<std::string_view>& words) {
+  if (words.size() < 4) {
+    return error("env needs a pad, a segment and a value, e.g. env 3 r 120");
+  }
+  Command out = command_of(CommandKind::kPadEnvelope);
+  std::size_t pad = 0;
+  if (!parse_pad_number(words[1], pad)) {
+    return error("env: " + std::string{words[1]} + " is not a pad, 1 to 16");
+  }
+  out.pad = pad;
+
+  const std::string_view segment = words[2];
+  if (segment != "a" && segment != "d" && segment != "s" && segment != "r") {
+    return error("env: " + std::string{segment} + " is not a, d, s or r");
+  }
+  out.text = std::string{segment};
+
+  float value = 0.0F;
+  if (!parse_decimal(words[3], value)) {
+    return error("env: " + std::string{words[3]} + " is not a number");
+  }
+
+  if (segment == "s") {
+    if (value > 0.0F || value < -60.0F) {
+      return error("env: sustain is in dB, -60 to 0");
+    }
+    out.decibels = value;
+    return out;
+  }
+
+  // A time. Bounded well above anything musical so a typo is refused rather
+  // than turning into a pad that appears to have stopped working.
+  if (value < 0.0F || value > 60'000.0F) {
+    return error("env: " + std::string{words[3]} + " is outside 0 to 60000 ms");
+  }
+  out.attack_ms = value;
+  return out;
+}
+
 }  // namespace
 
 std::string format_bpm(std::uint32_t bpm_x100) {
@@ -838,6 +888,9 @@ Command parse_command(std::string_view line) {
   }
   if (verb == "perform") {
     return command_of(CommandKind::kPerform);
+  }
+  if (verb == "env") {
+    return parse_env(words);
   }
   if (verb == "load") {
     return parse_load(line);

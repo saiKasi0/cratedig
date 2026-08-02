@@ -70,6 +70,11 @@ enum class CommandKind : std::uint8_t {
   kUnloadFile,  // `file`, or 0 meaning whichever is showing
   kListFiles,
 
+  // The pad envelope, which the engine has honoured since M3 and nothing could
+  // set. `pad`, `text` naming the segment, and `decibels` or `attack_ms`
+  // carrying the value.
+  kPadEnvelope,
+
   kQuit,
 };
 

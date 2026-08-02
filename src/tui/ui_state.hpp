@@ -200,6 +200,48 @@ enum class Screen : std::uint8_t {
   kPerform = 0,
   kEdit,
   kMix,
+  kBrowse,
+};
+
+// One line of the browser's directory listing.
+struct BrowserEntry {
+  std::string name;
+  bool is_directory = false;
+
+  // Size on disk. Shown because it is the one fact available without decoding,
+  // and it is enough to tell a loop from an album.
+  std::uint64_t bytes = 0;
+
+  // Already in the crate. Marked rather than hidden: seeing that a file is
+  // loaded is the answer to "did I already do this", and hiding it would make
+  // the directory look different from what is actually in it.
+  bool loaded = false;
+};
+
+// What the browser is showing.
+//
+// A SCREEN RATHER THAN A PANEL, and that is a departure the mockups do not cover
+// -- they draw no browser at all. A path plus a listing plus the crate beside it
+// does not fit in the right-hand panel PERFORM already spends on the sample and
+// the pattern, and shrinking it far enough to fit would leave a file browser
+// that cannot show a filename.
+struct BrowserState {
+  // The directory being listed, as text. The renderer never touches the
+  // filesystem -- everything here was read on the control thread, which is where
+  // I/O belongs and what keeps render() a pure function.
+  std::string path;
+
+  std::vector<BrowserEntry> entries;
+  std::size_t cursor = 0;
+
+  // First row drawn, for a listing longer than the panel. Kept here rather than
+  // recomputed in the renderer so that moving the cursor and scrolling to follow
+  // it are one decision made in one place.
+  std::size_t first_visible = 0;
+
+  // Why the listing is empty, when it is: an unreadable directory and an empty
+  // one look identical otherwise.
+  std::string note;
 };
 
 // Which page of strips the MIX row is showing.
@@ -347,6 +389,7 @@ struct UiState {
   Screen screen = Screen::kPerform;
   EditState edit;
   MixState mix;
+  BrowserState browser;
 
   // WHAT THE WAVE PANEL AND EDIT ARE LOOKING AT -- one file out of the pool,
   // not "the" file. Every field below describes that one; the crate as a whole

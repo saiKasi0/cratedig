@@ -228,6 +228,24 @@ def write_fixture_wav(path: Path) -> None:
         out.writeframes(bytes(samples))
 
 
+def envelope_release_on(painted: str) -> str:
+    """The EDIT envelope panel's `r` row, or "" if it is not up.
+
+    The panel rows sit BETWEEN the waveform and the slice table, so they are in
+    the middle of a screen line rather than at the end of one -- an end-anchored
+    match finds nothing, which is how the first version of this silently returned
+    "" for both readings and compared equal.
+
+    Taken from the grid ABOVE the mode line, because the mode line quotes the
+    value back after the command that set it.
+    """
+    for line in painted.splitlines()[:-1]:
+        match = re.search(r"\sr\s{2,}([\d.]+)", line)
+        if match:
+            return match.group(1)
+    return ""
+
+
 def start_frame_on(painted: str) -> str:
     """The EDIT screen's `start N` frame readout, or "" if it is not up.
 
@@ -609,6 +627,26 @@ def main() -> int:
         alive = send(" ")
         if "auditioning" in screen_now():
             command_failures.append("slice 3 is on a pad but was auditioned instead of triggered")
+
+        # THE ENVELOPE, which EDIT drew for three milestones without anything
+        # being able to change it. Reported as "the ADSR in edit view aren't
+        # doing anything", and it was true: every segment was the default and no
+        # verb and no key set one.
+        #
+        # HERE rather than a few lines earlier, because the panel shows the
+        # envelope of the pad holding the slice on screen -- and a few lines
+        # earlier EDIT was on slice 20, which is on no pad, so `:env 3` changed
+        # something the panel was not showing.
+        #
+        # Read off the PANEL, not the whole screen: the mode line quotes the
+        # value back -- "pad 3 release 250.00 ms" -- so a check that looked
+        # anywhere would find the program's own answer and pass with the edit
+        # never applied. That control was run and it did pass, which is how this
+        # ended up bounded. Third time in this milestone.
+        before_env = envelope_release_on(screen_now())
+        alive = send(":env 3 r 250\r")
+        if envelope_release_on(screen_now()) == before_env:
+            command_failures.append(":env did not reach the envelope panel")
 
         alive = send("\x1b")  # out of EDIT before the quit below
 

@@ -1376,6 +1376,52 @@ int run_app(const AppOptions& options) {
         break;
       }
 
+      case CommandKind::kPadEnvelope: {
+        // THE ENGINE HAS HONOURED PadConfig::env SINCE M3 and nothing could set
+        // it: EDIT drew the four segments and every one of them was the default,
+        // so the panel promised a control that did not exist. Reported as "the
+        // ADSR in edit view aren't doing anything", which was exactly right.
+        const auto pad = static_cast<std::uint8_t>(command.pad - 1);
+        const std::shared_ptr<const rt::PadConfig> held = engine.pad_config(pad);
+        if (held == nullptr || held->sample == nullptr) {
+          set_message("pad " + std::to_string(command.pad) + " has nothing on it", true);
+          break;
+        }
+
+        rt::PadConfig next = *held;
+        const auto frames = [&](float milliseconds) {
+          return static_cast<std::size_t>(static_cast<double>(milliseconds) *
+                                          static_cast<double>(options.sample_rate) / 1000.0);
+        };
+
+        std::string said = "pad " + std::to_string(command.pad) + " ";
+        if (command.text == "a") {
+          next.env.attack = frames(command.attack_ms);
+          said += "attack " +
+                  tui::detail::with_precision(static_cast<double>(command.attack_ms), 2) + " ms";
+        } else if (command.text == "d") {
+          next.env.decay = frames(command.attack_ms);
+          said += "decay " +
+                  tui::detail::with_precision(static_cast<double>(command.attack_ms), 2) + " ms";
+        } else if (command.text == "r") {
+          next.env.release = frames(command.attack_ms);
+          said += "release " +
+                  tui::detail::with_precision(static_cast<double>(command.attack_ms), 2) + " ms";
+        } else {
+          next.env.sustain = tui::detail::db_to_linear(command.decibels);
+          said += "sustain " +
+                  tui::detail::with_precision(static_cast<double>(command.decibels), 1) + " dB";
+        }
+
+        if (!engine.publish_pad_config(std::make_shared<const rt::PadConfig>(std::move(next)))) {
+          set_message("pads are busy — the edit did not happen, try again", true);
+          break;
+        }
+        refresh_edit(last_columns);
+        set_message(said, false);
+        break;
+      }
+
       case CommandKind::kQuit:
         quit();
         break;
