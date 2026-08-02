@@ -169,6 +169,15 @@ if(Python3_FOUND)
                    $<TARGET_FILE:cratedig>)
   set_tests_properties(crate_pty_e2e PROPERTIES LABELS e2e TIMEOUT ${CRATEDIG_PTY_TIMEOUT})
 
+  # The browser's keymap and its directory reader, which the snapshots cannot
+  # reach: a snapshot renders a BrowserState a test built by hand, so every one
+  # of them would still pass if no key produced one and nothing was read from
+  # disk.
+  add_test(NAME browse_pty_e2e
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_browse_session.py
+                   $<TARGET_FILE:cratedig>)
+  set_tests_properties(browse_pty_e2e PROPERTIES LABELS e2e TIMEOUT ${CRATEDIG_PTY_TIMEOUT})
+
   add_test(NAME mix_pty_e2e
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_mix_session.py
                    $<TARGET_FILE:cratedig>)

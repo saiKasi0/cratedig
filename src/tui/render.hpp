@@ -39,6 +39,12 @@ inline constexpr std::size_t kMinRows = 20;
 [[nodiscard]] ftxui::Element render_edit(const UiState& state, std::size_t terminal_columns,
                                          std::size_t terminal_rows);
 
+// BROWSE: the file listing and the crate. A fourth pure function of the same
+// UiState -- a screen rather than a panel, for the reason render_browse.cpp
+// gives.
+[[nodiscard]] ftxui::Element render_browse(const UiState& state, std::size_t terminal_columns,
+                                           std::size_t terminal_rows);
+
 // MIX, likewise. A third pure function of the same UiState.
 [[nodiscard]] ftxui::Element render_mix(const UiState& state, std::size_t terminal_columns,
                                         std::size_t terminal_rows);

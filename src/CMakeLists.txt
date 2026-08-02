@@ -84,7 +84,7 @@ target_link_libraries(cratedig_io PRIVATE rtaudio rtmidi cratedig_warnings crate
 # are used freely on the control thread.
 add_library(cratedig_tui STATIC tui/app.cpp tui/cli.cpp tui/command.cpp tui/keys.cpp
                                 tui/render.cpp tui/render_detail.cpp tui/render_edit.cpp
-                                tui/render_mix.cpp
+                                tui/render_browse.cpp tui/render_mix.cpp
                                 tui/ui_state.cpp tui/waveform.cpp)
 target_link_libraries(cratedig_tui PUBLIC cratedig_engine cratedig_ingest cratedig_io
                                           ftxui::ftxui)

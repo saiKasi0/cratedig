@@ -69,6 +69,7 @@ enum class CommandKind : std::uint8_t {
   kSelectFile,  // `file`, 1-based as listed
   kUnloadFile,  // `file`, or 0 meaning whichever is showing
   kListFiles,
+  kBrowse,  // open BROWSE; `text` is a directory to start in, or empty
 
   // The pad envelope, which the engine has honoured since M3 and nothing could
   // set. `pad`, `text` naming the segment, and `decibels` or `attack_ms`

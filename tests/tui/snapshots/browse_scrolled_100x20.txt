@@ -1,0 +1,20 @@
+cratedig 0.0.1  browse                                                                 /crate/breaks
+                                                                                                    
+╭───────────────────────────────────────────────────────────────╮ ╭────────────────────────────────╮
+│   take_23.wav                                           47 KB │ │ 1 amen_brother.wav      8 cuts │
+│   take_24.wav                                           47 KB │ │ 2 vocal.wav              1 cut │
+│   take_25.wav                                           47 KB │ │                                │
+│   take_26.wav                                           47 KB │ │                                │
+│   take_27.wav                                           47 KB │ │                                │
+│   take_28.wav                                           47 KB │ │                                │
+│   take_29.wav                                           47 KB │ │                                │
+│   take_30.wav                                           47 KB │ │                                │
+│   take_31.wav                                           47 KB │ │                                │
+│   take_32.wav                                           47 KB │ │                                │
+│   take_33.wav                                           47 KB │ │                                │
+│   take_34.wav                                           47 KB │ │                                │
+│   take_35.wav                                           47 KB │ │                                │
+│   take_36.wav                                           47 KB │ │                                │
+│ ▸ take_37.wav                                           47 KB │ │                                │
+╰───────────────────────────────────────────────────────────────╯ ╰────────────────────────────────╯
+  browse    40 here                 jk move · l open · h up · space audition · enter load · esc back

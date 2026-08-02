@@ -1399,3 +1399,67 @@ TEST_CASE("the MIX mode line keeps its facts and picks a hint tier that fits", "
     CHECK(wide.find(key) != std::string::npos);
   }
 }
+
+// -- BROWSE ------------------------------------------------------------------
+
+namespace {
+
+[[nodiscard]] tui::UiState browse_state(int columns) {
+  tui::UiState state = chopped_state(columns);
+  state.screen = tui::Screen::kBrowse;
+  state.browser.path = "/crate/breaks";
+  state.browser.entries = {
+      tui::BrowserEntry{.name = "..", .is_directory = true},
+      tui::BrowserEntry{.name = "kits", .is_directory = true},
+      tui::BrowserEntry{.name = "amen_brother.wav", .bytes = 1'482'000, .loaded = true},
+      tui::BrowserEntry{.name = "think_break.wav", .bytes = 806'400},
+      tui::BrowserEntry{.name = "a_very_long_filename_that_will_not_fit_in_the_panel.wav",
+                        .bytes = 12'700'000},
+      tui::BrowserEntry{.name = "vocal_take.wav", .bytes = 240},
+  };
+  state.browser.cursor = 2;
+
+  state.files = {
+      tui::UiState::FileEntry{
+          .id = static_cast<ingest::FileId>(1), .name = "amen_brother.wav", .slices = 8},
+      tui::UiState::FileEntry{
+          .id = static_cast<ingest::FileId>(2), .name = "vocal.wav", .slices = 1},
+  };
+  state.current_file = static_cast<ingest::FileId>(1);
+  return state;
+}
+
+}  // namespace
+
+TEST_CASE("BROWSE lists a directory beside the crate", "[tui]") {
+  check_snapshot("browse_100x30", browse_state(100), 100, 30);
+}
+
+TEST_CASE("BROWSE drops the crate panel before it squeezes the listing", "[tui]") {
+  // The listing is what BROWSE is for: a browser that cannot show a filename has
+  // stopped being one, so the crate is what gives way.
+  check_snapshot("browse_72x24", browse_state(72), 72, 24);
+}
+
+TEST_CASE("BROWSE says why a listing is empty", "[tui]") {
+  // An unreadable directory and an empty one look identical otherwise, and only
+  // one of them is a mistake to fix.
+  tui::UiState state = browse_state(100);
+  state.browser.entries.clear();
+  state.browser.note = "cannot read breaks — permission denied";
+  check_snapshot("browse_empty_100x30", state, 100, 30);
+}
+
+TEST_CASE("BROWSE scrolls to keep the cursor on screen", "[tui]") {
+  // A listing longer than the panel. The window follows the cursor rather than
+  // the cursor being clamped to the window -- a browser that stopped at the
+  // bottom of the first page is one nobody can reach the end of.
+  tui::UiState state = browse_state(100);
+  state.browser.entries.clear();
+  for (int index = 0; index < 40; ++index) {
+    state.browser.entries.push_back(
+        tui::BrowserEntry{.name = "take_" + std::to_string(index) + ".wav", .bytes = 48'000});
+  }
+  state.browser.cursor = 37;
+  check_snapshot("browse_scrolled_100x20", state, 100, 20);
+}

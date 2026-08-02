@@ -892,6 +892,11 @@ Command parse_command(std::string_view line) {
   if (verb == "env") {
     return parse_env(words);
   }
+  if (verb == "browse") {
+    Command out = command_of(CommandKind::kBrowse);
+    out.text = std::string{rest_of_line(line)};
+    return out;
+  }
   if (verb == "load") {
     return parse_load(line);
   }

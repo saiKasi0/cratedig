@@ -27,21 +27,41 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 
 namespace tui {
 namespace {
+
+// What the browser lists.
+//
+// FILTERED, and the list is deliberately broad rather than exact. FFmpeg decodes
+// far more than this and `:load` will happily try anything, so the filter is
+// about keeping a music directory readable -- not about what the decoder can
+// manage. A file it refuses is reported when the load fails, which is the honest
+// place to find out.
+[[nodiscard]] bool looks_like_audio(const std::filesystem::path& path) {
+  static constexpr std::array<std::string_view, 10> kExtensions{
+      ".wav", ".flac", ".mp3", ".aif", ".aiff", ".ogg", ".opus", ".m4a", ".aac", ".wv"};
+  std::string extension = path.extension().string();
+  for (char& letter : extension) {
+    letter = static_cast<char>(std::tolower(static_cast<unsigned char>(letter)));
+  }
+  return std::find(kExtensions.begin(), kExtensions.end(), extension) != kExtensions.end();
+}
 
 // What the strip's chain rows say. Short enough for eight columns, and naming
 // the BAND COUNT rather than a type, because "2bd" answers "is anything on" at a
@@ -838,6 +858,95 @@ int run_app(const AppOptions& options) {
     refresh_edit(columns);
   };
 
+  // Reads a directory into the browser's listing.
+  //
+  // ON THE CONTROL THREAD, which is where I/O belongs -- the renderer never
+  // touches the filesystem, so render() stays a pure function of UiState and
+  // every snapshot test can build a listing by hand.
+  //
+  // Directories first, then files, each sorted by name: a listing whose order
+  // depended on the filesystem's would be a different screen on every machine,
+  // and the snapshots would be untestable.
+  auto read_directory = [&](const std::filesystem::path& where) {
+    BrowserState& browser = state.browser;
+    browser.path = where.string();
+    browser.entries.clear();
+    browser.note.clear();
+    browser.cursor = 0;
+    browser.first_visible = 0;
+
+    std::error_code failed;
+    const std::filesystem::directory_iterator listing{where, failed};
+    if (failed) {
+      // Said rather than shown as empty: an unreadable directory and an empty
+      // one look identical, and only one of them is a mistake to fix.
+      browser.note = "cannot read " + where.filename().string() + " — " + failed.message();
+      return;
+    }
+
+    std::vector<BrowserEntry> directories;
+    std::vector<BrowserEntry> files;
+    for (const std::filesystem::directory_entry& item :
+         std::filesystem::directory_iterator{where, failed}) {
+      std::error_code ignored;
+      const std::string name = item.path().filename().string();
+      if (name.empty() || name.front() == '.') {
+        continue;  // dotfiles are noise in a music directory
+      }
+      if (item.is_directory(ignored)) {
+        directories.push_back(BrowserEntry{.name = name, .is_directory = true});
+        continue;
+      }
+      if (!looks_like_audio(item.path())) {
+        continue;
+      }
+      files.push_back(BrowserEntry{
+          .name = name,
+          .is_directory = false,
+          .bytes = static_cast<std::uint64_t>(std::filesystem::file_size(item.path(), ignored)),
+          .loaded = pool.find_path(item.path()) != ingest::kNoFile,
+      });
+    }
+
+    const auto by_name = [](const BrowserEntry& left, const BrowserEntry& right) {
+      return left.name < right.name;
+    };
+    std::sort(directories.begin(), directories.end(), by_name);
+    std::sort(files.begin(), files.end(), by_name);
+
+    // `..` first, always, and only when there is somewhere to go. A browser you
+    // cannot climb out of is one you have to restart to escape.
+    if (where.has_parent_path() && where.parent_path() != where) {
+      browser.entries.push_back(BrowserEntry{.name = "..", .is_directory = true});
+    }
+    browser.entries.insert(browser.entries.end(), directories.begin(), directories.end());
+    browser.entries.insert(browser.entries.end(), files.begin(), files.end());
+
+    if (browser.entries.empty()) {
+      browser.note = "no audio files here";
+    }
+  };
+
+  // Puts the cursor on a named entry after a re-read, or leaves it at the top.
+  //
+  // WHY RE-READING NEEDS THIS AT ALL: read_directory() resets the cursor, which
+  // is right when you have arrived somewhere new and wrong in the two cases that
+  // are not new. Loading a file re-reads so the `loaded` marker updates, and
+  // without this you would be thrown back to the top of the listing every time
+  // -- which is precisely while you are working down a directory loading
+  // several. Climbing out with `h` is the other: landing on `..` rather than on
+  // the directory you just left makes `l` then `h` a round trip that does not
+  // come back.
+  auto focus_entry = [&state](std::string_view name) {
+    BrowserState& browser = state.browser;
+    for (std::size_t index = 0; index < browser.entries.size(); ++index) {
+      if (browser.entries[index].name == name) {
+        browser.cursor = index;
+        return;
+      }
+    }
+  };
+
   // Runs a parsed command. Everything it touches -- the engine's handoff ring,
   // the slice set, the UiState -- belongs to this thread, which is what makes a
   // command a plain function call rather than a message.
@@ -1422,6 +1531,20 @@ int run_app(const AppOptions& options) {
         break;
       }
 
+      case CommandKind::kBrowse: {
+        // Starts where the last load came from when nowhere is named, which is
+        // almost always where the next one is too.
+        std::filesystem::path where{command.text};
+        if (command.text.empty()) {
+          const ingest::PoolEntry* file = entry();
+          where = file != nullptr && file->path.has_parent_path() ? file->path.parent_path()
+                                                                  : std::filesystem::current_path();
+        }
+        read_directory(where);
+        state.screen = Screen::kBrowse;
+        break;
+      }
+
       case CommandKind::kQuit:
         quit();
         break;
@@ -1636,6 +1759,114 @@ int run_app(const AppOptions& options) {
       // a keystroke aimed at the prompt.
       if (const std::string typed = printable(code); !typed.empty()) {
         state.command_text += typed;
+      }
+      return true;
+    }
+
+    // BROWSE HAS ITS OWN KEYMAP, for the reason EDIT and MIX do: `a`, `s`, `d`,
+    // `f` and `z` are pad keys, and a browser that played a drum every time you
+    // moved down a listing would be unusable. Pads are off; space auditions
+    // whatever is under the cursor, which is the one thing they were wanted for
+    // here.
+    if (state.screen == Screen::kBrowse) {
+      if (!typing) {
+        return true;
+      }
+      if (code == kEscape) {
+        state.screen = Screen::kPerform;
+        return true;
+      }
+      if (code == ':') {
+        state.command_active = true;
+        state.command_text.clear();
+        return true;
+      }
+
+      BrowserState& browser = state.browser;
+      const auto* under =
+          browser.cursor < browser.entries.size() ? &browser.entries[browser.cursor] : nullptr;
+
+      switch (code) {
+        case 'j':
+        case kKeyArrowDown:
+          if (browser.cursor + 1 < browser.entries.size()) {
+            browser.cursor++;
+          }
+          return true;
+
+        case 'k':
+        case kKeyArrowUp:
+          if (browser.cursor > 0) {
+            browser.cursor--;
+          }
+          return true;
+
+        case 'h':
+        case kKeyArrowLeft: {
+          const std::filesystem::path here{browser.path};
+          if (here.has_parent_path() && here.parent_path() != here) {
+            const std::string leaving = here.filename().string();
+            read_directory(here.parent_path());
+            focus_entry(leaving);
+          }
+          return true;
+        }
+
+        case 'l':
+        case kKeyArrowRight:
+        case kReturn: {
+          if (under == nullptr) {
+            return true;
+          }
+          const std::filesystem::path here{browser.path};
+          if (under->is_directory) {
+            if (under->name == "..") {
+              const std::string leaving = here.filename().string();
+              read_directory(here.parent_path());
+              focus_entry(leaving);
+            } else {
+              read_directory(here / under->name);
+            }
+            return true;
+          }
+          // A file: load it. `l` and Enter both, because one of them is what
+          // every terminal browser uses and it is never the same one.
+          const std::string loaded = under->name;
+          execute(parse_command(std::string{"load "} + (here / loaded).string()));
+          read_directory(here);  // the listing now says which are loaded
+          focus_entry(loaded);   // ...and you are still standing where you were
+          return true;
+        }
+
+        case kSpace: {
+          // AUDITION BEFORE LOAD, which is the reason this screen needed the
+          // audition path built first. Previewing a file you have not loaded is
+          // the same problem as playing a slice that is on no pad, and it is the
+          // same mechanism.
+          if (under == nullptr || under->is_directory) {
+            return true;
+          }
+          const std::filesystem::path here{browser.path};
+          const ingest::SampleLoad load =
+              ingest::load_sample(here / under->name, options.sample_rate);
+          if (!load.ok()) {
+            set_message(
+                "cannot play " + under->name + " — " + std::string{ingest::describe(load.error)},
+                true);
+            return true;
+          }
+          auto preview =
+              std::make_shared<const rt::PadConfig>(rt::PadConfig{.sample = load.sample, .pad = 0});
+          if (!engine.audition(std::move(preview))) {
+            set_message("audition is busy — try again", true);
+            return true;
+          }
+          set_message("playing " + under->name, false);
+          return true;
+        }
+
+        default:
+          break;
       }
       return true;
     }
