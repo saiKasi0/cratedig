@@ -148,13 +148,20 @@ accident:
 | `m_sequencer_handoff` | control → audio | one owning `SequencerState` handle |
 
 **The handoff rings only drain when something renders**, which is the trap
-`--no-audio` sets. It is sized around on the pad ring and *avoided* on the
-sequencer's: a chop publishes sixteen configs at once and three chops exhaust
-thirty-two slots, but every step toggle publishes a sequencer state, so eight
-keystrokes exhausted eight slots and every later edit was refused for the rest of
-the session. With no stream there is no consumer, so `src/tui/app.cpp` does not
-publish at all in that mode and its own copy is the state. Found by
-`tests/e2e/pty_sequencer_session.py`; the TUI session was making exactly seven.
+`--no-audio` sets: nothing calls `render()`, so nothing adopts what is published,
+the rings fill, and every later edit is refused for the rest of the session.
+
+It was hit twice. First on the sequencer, where every step toggle publishes, so
+eight keystrokes exhausted eight slots. Then on the pads, where `:chop` publishes
+sixteen configs at once and `:slot assign 1-8 1` publishes eight — four commands,
+and pad assignment stopped working entirely. The second was reported as "slot
+assign is not working", which it was.
+
+The answer is `Engine::adopt_offline()`, called from the frame tick when no
+device is open: it does what the top of `render()` does, and it is safe
+*because* there is no audio thread in that mode. One place has to know, rather
+than every publisher guarding itself — which is what the first fix did, and why
+the same bug was still waiting one ring over.
 
 ## Determinism contract
 

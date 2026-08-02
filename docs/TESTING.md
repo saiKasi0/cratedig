@@ -535,6 +535,14 @@ cannot be observed to have stopped and app.cpp is not reachable from a unit test
 Removing the transport half passes the whole suite; it was tried. Writing that
 down is worth more than a test that would have to fake the thing it checks.
 
+**The handoff-ring trap was found twice, by a test that could not have found it
+the first time.** `tests/e2e/pty_chop_session.py` assigned once and stayed under
+the ring's depth, so it passed on a build where the fifth command would have been
+refused. It now runs six rounds of eight assignments on top of a chop's sixteen —
+48 publishes against a ring of 32 — which fails outright without a drain. The
+lesson generalises: a test that exercises a bounded resource once proves the
+first use works, and a bound is only observable by exceeding it.
+
 **The release floor** broke three existing tests, which was the point: they
 asserted a choked voice was gone at frame 0, and *that* was the click. They now
 ask for a hard cut explicitly (`release_floor_frames = 0`) and go on testing

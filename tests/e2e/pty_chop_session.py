@@ -223,10 +223,30 @@ def main() -> int:
             if expect not in banked:
                 failures.append(f"after the range assign the pad grid has no {expect!r}")
 
+        # ENOUGH ASSIGNS TO OUTLAST THE HANDOFF RING, which is the regression
+        # this session did not catch the first time. With no device nothing calls
+        # render(), so nothing adopts what is published; the ring holds 32 and
+        # `:chop transient` alone spends 16, so four more range assigns used to
+        # exhaust it and every pad edit after that was refused for the rest of
+        # the session. The interface said "pads are busy" and meant it.
+        #
+        # Six rounds of eight is 48 publishes on top of the chop's 16 -- well
+        # past 32, so this fails outright on a build that does not drain.
+        for round_number in range(6):
+            alive = send(":slot assign 1-8 9\r")
+            answer = screen_now()
+            if "slices 1-8 → pads 9-16" not in answer:
+                failures.append(
+                    f"round {round_number + 1} of range assign was refused: "
+                    "the handoff ring is not being drained"
+                )
+                break
+            alive = send("1")
+
         # And a range that runs off the end is refused rather than truncated.
         alive = send(":slot assign 1-8 12\r")
-        if "runs past pad 16" not in screen_now():
-            failures.append("a range running past pad 16 was not refused")
+        if "but there are only 16 pads" not in screen_now():
+            failures.append("a range needing more than 16 pads was not refused")
 
         alive = send("e")
 

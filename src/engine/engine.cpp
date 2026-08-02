@@ -396,6 +396,11 @@ bool Engine::submit_midi_event(const rt::PadEvent& event) noexcept {
   return false;
 }
 
+void Engine::adopt_offline() noexcept {
+  adopt_pad_configs();
+  adopt_sequencer();
+}
+
 void Engine::render(std::span<float* const> channels, std::size_t num_frames) noexcept {
   // Opened first, so everything below is held to the real-time rules — including
   // anything added here later.

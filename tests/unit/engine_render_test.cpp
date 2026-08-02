@@ -1367,3 +1367,54 @@ TEST_CASE("a panic plus a transport stop stays silent", "[unit]") {
     }
   }
 }
+
+TEST_CASE("adopt_offline drains what nothing is rendering", "[unit]") {
+  // With no device open nothing calls render(), so nothing adopts what has been
+  // published and the handoff ring fills. It holds 32; `:chop` publishes sixteen
+  // configs at once and `:slot assign 1-8 1` publishes eight, so four commands
+  // exhausted it and every pad edit after that was refused for the rest of the
+  // session. Reported as "slot assign is not working", which it was.
+  engine::Engine eng{test_config()};
+
+  const auto publish = [&](std::uint8_t pad) {
+    return eng.publish_pad_config(std::make_shared<const rt::PadConfig>(
+        rt::PadConfig{.sample = make_test_sample(1'024, 1, 48'000), .pad = pad}));
+  };
+
+  // Well past the ring's depth, and in the pattern a session actually produces:
+  // rounds of sixteen, with a drain between them.
+  for (std::size_t round = 0; round < 8; ++round) {
+    for (std::uint8_t pad = 0; pad < rt::kNumPads; ++pad) {
+      INFO("round " << round << ", pad " << static_cast<int>(pad));
+      REQUIRE(publish(pad));
+    }
+    eng.adopt_offline();
+    static_cast<void>(eng.collect_garbage());
+  }
+  CHECK(eng.rejected_pad_configs() == 0);
+
+  // And it really adopted rather than merely emptied: the pad plays, which it
+  // could not if m_pads were still null.
+  REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 0, .velocity = 1.0F}));
+  const std::array<std::size_t, 1> blocks{256};
+  RenderCapture out{512, kChannels};
+  out.render_in_blocks(eng, blocks);
+  CHECK(eng.active_voices() == 1);
+}
+
+TEST_CASE("without a drain the handoff ring fills, which is why adopt_offline exists", "[unit]") {
+  // The other half, so the test above cannot pass for the wrong reason. Nothing
+  // drains here, and the ring is finite -- publishing without bound must start
+  // refusing rather than silently succeeding.
+  engine::Engine eng{test_config()};
+  std::size_t published = 0;
+  for (std::size_t attempt = 0; attempt < 200; ++attempt) {
+    if (!eng.publish_pad_config(std::make_shared<const rt::PadConfig>(
+            rt::PadConfig{.sample = make_test_sample(1'024, 1, 48'000), .pad = 0}))) {
+      break;
+    }
+    ++published;
+  }
+  CHECK(published == engine::Engine::kPadHandoffCapacity);
+  CHECK(eng.rejected_pad_configs() > 0);
+}

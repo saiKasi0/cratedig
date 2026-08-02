@@ -452,22 +452,12 @@ int run_app(const AppOptions& options) {
     rt::SequencerState next = sequencer;
     mutate(next);
 
-    // WITH NO DEVICE THERE IS NO CONSUMER, so there is nothing to publish to.
-    //
-    // Nothing calls render() without a stream, so nothing ever drains the
-    // handoff ring: publishing into it anyway fills it after a few keystrokes
-    // and then refuses every sequencer edit for the rest of the session. Every
-    // step toggle publishes, so "a few" is eight -- found by
-    // tests/e2e/pty_sequencer_session.py, which ran out partway through writing
-    // a bar. The interface said "sequencer busy" and meant it, which is the
-    // honest report of a state that should not have been reachable.
-    //
-    // In that mode the control-side copy IS the state, which is what --no-audio
-    // means. The same trap is sized around rather than avoided on the pad ring
-    // (see Engine::kPadHandoffCapacity); a chop publishes sixteen at once and
-    // three chops exhaust it. That is the same bug with a longer fuse.
-    if (audio_running &&
-        !engine.publish_sequencer(std::make_shared<const rt::SequencerState>(next))) {
+    // Published unconditionally, including with no device open. Nothing drains
+    // the handoff rings without a stream, so this used to fill them and then
+    // refuse every later edit for the rest of the session -- the frame tick now
+    // calls Engine::adopt_offline() in that mode, which is the one place that
+    // has to know, rather than every publisher guarding itself.
+    if (!engine.publish_sequencer(std::make_shared<const rt::SequencerState>(next))) {
       set_message("sequencer busy — the edit did not happen, try again", true);
       return;
     }
@@ -763,8 +753,14 @@ int run_app(const AppOptions& options) {
           break;
         }
         if (command.pad + count - 1 > rt::kNumPads) {
-          set_message(std::to_string(count) + " slices from pad " + std::to_string(command.pad) +
-                          " runs past pad " + std::to_string(rt::kNumPads),
+          // Named as PADS, because pads are what ran out. The first phrasing
+          // said "runs past pad 16" and was read as a limit on CHOPS -- which it
+          // is not: there can be any number of slices, and only sixteen pads to
+          // hold them at once. Banks are M6; until then the answer is a
+          // different destination range, so the message names the one asked for.
+          set_message("needs pads " + std::to_string(command.pad) + "-" +
+                          std::to_string(command.pad + count - 1) + ", but there are only " +
+                          std::to_string(rt::kNumPads) + " pads",
                       true);
           break;
         }
@@ -1416,6 +1412,14 @@ int run_app(const AppOptions& options) {
     // to call collect_garbage(); doing it on the frame tick keeps the whole
     // design single-writer and costs nothing when there is nothing to collect.
     if (event == ftxui::Event::Custom) {
+      // With no device nothing calls render(), so nothing adopts what has been
+      // published and the handoff rings fill until every edit is refused. Four
+      // commands were enough: `:chop` publishes sixteen configs and
+      // `:slot assign 1-8 1` publishes eight. Safe here because in that mode
+      // there is no audio thread to race with -- see Engine::adopt_offline().
+      if (!audio_running) {
+        engine.adopt_offline();
+      }
       static_cast<void>(engine.collect_garbage());
 
       // The capability query goes out on the first tick rather than before

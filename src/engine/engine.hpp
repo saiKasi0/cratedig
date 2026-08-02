@@ -282,6 +282,27 @@ class Engine {
   // returns how many references were released.
   std::size_t collect_garbage() noexcept;
 
+  // CONTROL THREAD, and ONLY when no audio thread exists.
+  //
+  // Adopts whatever has been published, as the top of render() would. With no
+  // device open nothing calls render(), so nothing ever drains the handoff
+  // rings -- they fill, and every later edit is refused for the rest of the
+  // session. That is not a theoretical leak: `:chop` publishes sixteen configs
+  // at once and `:slot assign 1-8 1` publishes eight, so four commands exhaust
+  // thirty-two slots and pad assignment stops working entirely.
+  //
+  // Safe precisely BECAUSE there is no second thread in that mode, which is why
+  // this names the condition instead of being called "flush". Calling it while a
+  // stream is running is a data race with the audio thread, and the same
+  // discipline collect_garbage() already relies on is what keeps it honest.
+  //
+  // Deliberately NOT the transport or the event rings. Those carry state and
+  // moments that only mean something while frames are being produced -- adopting
+  // a play command with nothing to advance would light `play` on the mode line
+  // for a transport that cannot move. Reconfigurations are edits, and an edit
+  // must land whether or not anything is listening.
+  void adopt_offline() noexcept;
+
   // Atomic because the audio thread writes it and the UI reads it live. Relaxed
   // on both sides: it orders nothing, it is a progress counter. Making it a
   // plain uint64_t was a real data race, and it did not present as a torn value
