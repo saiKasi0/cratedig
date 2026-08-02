@@ -110,10 +110,28 @@ endif()
 # a build dependency via scripts/verify_fixtures.py.
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_FOUND)
+  # THE PTY SESSIONS GET THEIR OWN TIMEOUT, and it is not tidiness.
+  #
+  # CMakePresets.json sets 120 s for every test, which is generous for anything
+  # compute-bound and wrong for these: a session's time is almost all wall clock,
+  # waiting a fixed settle after each keystroke so the program has redrawn before
+  # the screen is read. That does not get faster on faster hardware and it gets
+  # slower on a loaded CI runner.
+  #
+  # Measured on an M-series Mac: tui_pty_session 54.7 s, mix_pty_e2e 31.8 s,
+  # sequencer_pty_e2e 21.2 s, chop_pty_e2e 13.9 s. The longest was already at
+  # 45% of the budget locally, and it is what TIMED OUT on the GitHub Linux
+  # runner -- passing here and failing there, which is exactly what a
+  # wall-clock-bound test does when the ceiling is sized for something else.
+  #
+  # 300 s is about five times the local worst. Still bounded on purpose: a PTY
+  # session that HANGS is a real failure mode this project has already paid for
+  # once, and an unbounded test would sit there instead of reporting it.
+  set(CRATEDIG_PTY_TIMEOUT 300)
   add_test(NAME tui_pty_session
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tui/pty_session.py
                    $<TARGET_FILE:cratedig> ${CMAKE_CURRENT_SOURCE_DIR}/tui/snapshots)
-  set_tests_properties(tui_pty_session PROPERTIES LABELS tui)
+  set_tests_properties(tui_pty_session PROPERTIES LABELS tui TIMEOUT ${CRATEDIG_PTY_TIMEOUT})
 
   # The other half of the pair: a pty that ANSWERS the keyboard query, so the
   # negotiated path is driven end to end in CSI-u. The session above covers the
@@ -122,7 +140,8 @@ if(Python3_FOUND)
   add_test(NAME tui_pty_kitty_session
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tui/pty_kitty_session.py
                    $<TARGET_FILE:cratedig>)
-  set_tests_properties(tui_pty_kitty_session PROPERTIES LABELS tui)
+  set_tests_properties(tui_pty_kitty_session PROPERTIES LABELS tui
+                       TIMEOUT ${CRATEDIG_PTY_TIMEOUT})
 
   # docs/ROADMAP.md's M3 acceptance, typed into the real binary. Labelled e2e
   # rather than tui because it is the acceptance rather than a layout check:
@@ -131,7 +150,7 @@ if(Python3_FOUND)
   add_test(NAME chop_pty_e2e
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_chop_session.py
                    $<TARGET_FILE:cratedig>)
-  set_tests_properties(chop_pty_e2e PROPERTIES LABELS e2e)
+  set_tests_properties(chop_pty_e2e PROPERTIES LABELS e2e TIMEOUT ${CRATEDIG_PTY_TIMEOUT})
 
   # M4's acceptance, same split: sequencer_e2e_test.cpp renders the audio and
   # this writes the pattern by typing at the binary. It is the half that can say
@@ -144,12 +163,12 @@ if(Python3_FOUND)
   add_test(NAME mix_pty_e2e
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_mix_session.py
                    $<TARGET_FILE:cratedig>)
-  set_tests_properties(mix_pty_e2e PROPERTIES LABELS e2e)
+  set_tests_properties(mix_pty_e2e PROPERTIES LABELS e2e TIMEOUT ${CRATEDIG_PTY_TIMEOUT})
 
   add_test(NAME sequencer_pty_e2e
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_sequencer_session.py
                    $<TARGET_FILE:cratedig>)
-  set_tests_properties(sequencer_pty_e2e PROPERTIES LABELS e2e)
+  set_tests_properties(sequencer_pty_e2e PROPERTIES LABELS e2e TIMEOUT ${CRATEDIG_PTY_TIMEOUT})
 else()
   message(STATUS "cratedig: PTY session tests disabled (no python3 interpreter)")
 endif()
