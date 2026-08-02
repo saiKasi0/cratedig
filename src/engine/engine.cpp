@@ -293,6 +293,11 @@ void Engine::mix_graph(std::span<float* const> channels, std::size_t num_frames)
   // one fewer way for the graph to differ between a live run and a bounce.
   for (std::size_t bus = 0; bus < rt::kNumBuses; ++bus) {
     const std::span<float* const> buffer = node_channels(rt::kNumPads + bus);
+
+    // The bus fader, applied to the bus itself rather than folded into the sum,
+    // so the meter below reads what the bus is actually sending -- the same
+    // post-fader rule the strips follow.
+    apply_gain(buffer, rt::clamp_bus_gain(m_master.bus_gain[bus]), num_frames);
     m_bus_peak[bus] = peak_of(buffer, num_frames);
     mix_into(channels, buffer, num_frames);
   }
@@ -379,15 +384,34 @@ bool Engine::send_transport(const rt::TransportCommand& command) noexcept {
 }
 
 bool Engine::set_limiter(const rt::LimiterConfig& limiter) noexcept {
-  if (!m_limiter_commands.try_push(limiter)) {
+  rt::MasterConfig next = m_published_master;
+  next.limiter = limiter;
+  if (!m_master_commands.try_push(next)) {
     return false;
   }
-  m_published_limiter = limiter;
+  m_published_master = next;
+  return true;
+}
+
+bool Engine::set_bus_gain(std::uint8_t bus, float gain) noexcept {
+  if (bus >= rt::kNumBuses) {
+    return false;
+  }
+  rt::MasterConfig next = m_published_master;
+  next.bus_gain[bus] = gain;
+  if (!m_master_commands.try_push(next)) {
+    return false;
+  }
+  m_published_master = next;
   return true;
 }
 
 rt::LimiterConfig Engine::limiter() const noexcept {
-  return m_published_limiter;
+  return m_published_master.limiter;
+}
+
+float Engine::bus_gain(std::uint8_t bus) const noexcept {
+  return bus < rt::kNumBuses ? m_published_master.bus_gain[bus] : 1.0F;
 }
 
 void Engine::adopt_sequencer() noexcept {
@@ -738,9 +762,9 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
   // ring, so there is nothing to retire and no ordering to preserve: only the
   // newest setting matters, and any earlier ones in the same block were
   // superseded before a sample was rendered with them.
-  rt::LimiterConfig limiter_update;
-  while (m_limiter_commands.try_pop(limiter_update)) {
-    m_limiter_config = limiter_update;
+  rt::MasterConfig master_update;
+  while (m_master_commands.try_pop(master_update)) {
+    m_master = master_update;
   }
 
   // Before the position advances, so a seek lands on this block rather than one
@@ -792,8 +816,8 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
   // Bypassed entirely when disabled, not run with a unity gain: the lookahead is
   // a DELAY, so a disabled limiter that still ran would shift every sample by
   // 64 frames and move every committed hash in the project.
-  if (m_limiter_config.enabled) {
-    m_limiter.process(m_limiter_config, channels, num_frames);
+  if (m_master.limiter.enabled) {
+    m_limiter.process(m_master.limiter, channels, num_frames);
   } else {
     // Reset rather than left holding old audio, so enabling it starts from
     // silence in the delay line instead of replaying 64 frames from whenever it
@@ -915,7 +939,7 @@ void Engine::publish_telemetry(std::span<float* const> channels, std::size_t num
   for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
     m_published.strip_reduction[pad].store(m_strip_reduction[pad], std::memory_order_relaxed);
   }
-  m_published.limiter_gain.store(m_limiter_config.enabled ? m_limiter.gain() : 1.0F,
+  m_published.limiter_gain.store(m_master.limiter.enabled ? m_limiter.gain() : 1.0F,
                                  std::memory_order_relaxed);
 
   // relaxed everywhere: the UI wants a recent value, not a synchronised one, and

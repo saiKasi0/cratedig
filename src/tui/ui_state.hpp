@@ -4,6 +4,7 @@
 #include "ingest/peak_pyramid.hpp"
 #include "rt/pad_event.hpp"
 #include "rt/sequencer.hpp"
+#include "rt/strip.hpp"
 
 #include <array>
 #include <cstddef>
@@ -187,6 +188,25 @@ struct PatternView {
 enum class Screen : std::uint8_t {
   kPerform = 0,
   kEdit,
+  kMix,
+};
+
+// Which page of strips the MIX row is showing.
+//
+// THE DEPARTURE FROM THE MOCKUP, and the reason for it. The mockup draws eight
+// channel strips with master pinned right, filling all hundred columns exactly,
+// and draws no bus strips at all. Sixteen channels, four buses and a master is
+// twenty-one strips; at the ten columns a legible strip needs, that is two
+// hundred and ten. It does not fit and no amount of arranging makes it fit.
+//
+// So the strip row is a VIEWPORT and the buses are a page of it. Master stays
+// pinned right on every page, because master is the one strip you always want to
+// see. The alternative -- shrinking strips until all twenty-one fit -- costs the
+// name, the EQ curve and the readout, which is most of what a strip is for.
+enum class MixPage : std::uint8_t {
+  kChannelsLow = 0,  // pads 1-8
+  kChannelsHigh,     // pads 9-16
+  kBuses,            // buses A-D
 };
 
 // One pad's playback parameters, as EDIT displays them.
@@ -239,11 +259,89 @@ struct EditState {
   bool snap_enabled = true;
 };
 
+// One strip as MIX draws it: a channel, a bus, or the master.
+//
+// Denominated in what the SCREEN needs rather than in what rt::StripConfig
+// holds. dB rather than linear because that is what the readout says and what a
+// fader is scaled in; a label rather than an rt::EqConfig because the renderer
+// must not have to know the RBJ cookbook to print "4bd". The conversion happens
+// on the control thread, which is also what lets the snapshot tests write these
+// as literals.
+struct StripView {
+  std::string name;
+
+  // Fader position and the meter beside it. `peak` is post-fader and linear,
+  // matching engine::Telemetry::strip_peak -- and zero when the strip is not
+  // reaching the mix, which is the honest thing for a meter next to a fader.
+  float gain_db = 0.0F;
+  float peak = 0.0F;
+
+  // [-1, +1]. Drawn as a two-character offset under the name, and absent
+  // entirely on a bus and on master, neither of which has one.
+  float balance = 0.0F;
+  bool has_balance = true;
+
+  // The EQ magnitude response in dB, sampled left to right across the panel at
+  // braille resolution -- two samples per character column, the same way the
+  // waveform is summarised. Empty means the EQ is bypassed and the curve row
+  // draws a flat line rather than a lie.
+  std::vector<float> eq_curve;
+
+  // What the two fixed chain rows say. The mockup draws two FREE-FORM insert
+  // slots ("a comp", "b eq"); the chain is fixed at EQ then compressor
+  // (docs/MIXER.md), so these name what is actually there. Arbitrary processors
+  // in arbitrary slots is M8's plugin chain.
+  std::string eq_label = "--";
+  std::string comp_label = "--";
+
+  // Compressor gain reduction, LINEAR, 1.0 meaning none -- matching
+  // engine::Telemetry::strip_reduction. Drawn as a downward bar beside the
+  // meter, which is the one place on the strip that reads top-down.
+  float reduction = 1.0F;
+
+  bool mute = false;
+  bool solo = false;
+
+  // Which bus this strip feeds, 0-based. Shown on a channel, meaningless on a
+  // bus or on master.
+  std::uint8_t bus = 0;
+  bool has_bus = true;
+
+  // How many channels feed this bus. Meaningful only on a bus strip, where it
+  // fills the space a channel spends on its EQ curve: a bus in M5 has a gain and
+  // a meter and nothing else, and "how much is coming into this" is the fact
+  // worth putting there rather than three blank rows.
+  std::size_t routed = 0;
+};
+
+// What MIX is looking at.
+struct MixState {
+  MixPage page = MixPage::kChannelsLow;
+
+  // Which strip on the current page the keys act on, 0-based within the page.
+  std::size_t cursor = 0;
+
+  std::array<StripView, rt::kNumPads> strips;
+  std::array<StripView, rt::kNumBuses> buses;
+  StripView master;
+
+  // The master limiter's current gain, linear. 1.0 when it is not reducing --
+  // and when it is switched off, which is the truth about the signal either way.
+  float limiter_gain = 1.0F;
+  bool limiter_enabled = false;
+
+  // True when ANY strip is soloed, which is what makes every un-soloed strip
+  // silent. Derived on the control thread from the same set the audio thread
+  // derives it from, so the screen and the sound agree.
+  bool any_solo = false;
+};
+
 struct UiState {
   std::string version;
 
   Screen screen = Screen::kPerform;
   EditState edit;
+  MixState mix;
 
   // The loaded sample. `frames == 0` means nothing is loaded, which is a
   // legitimate state the interface has to be able to draw.

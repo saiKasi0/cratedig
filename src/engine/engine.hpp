@@ -188,14 +188,14 @@ class Engine {
   // Deep enough for a dense chord plus pedal traffic between two audio blocks.
   static constexpr std::size_t kMidiRingCapacity = 256;
 
-  // Master limiter settings in flight, control -> audio.
+  // Master section settings in flight, control -> audio.
   //
   // A VALUE RING, not the shared_ptr handoff the pads use, and the difference is
   // the reason the one-pointer rule exists at all: a PadConfig owns a Sample and
   // cannot be copied atomically, so it must be swapped by pointer. A
   // LimiterConfig owns nothing -- it is a handful of floats -- so it travels the
   // same way a PadEvent does, by value, with no garbage to retire afterwards.
-  static constexpr std::size_t kLimiterRingCapacity = 8;
+  static constexpr std::size_t kMasterRingCapacity = 8;
 
   // Transport commands in flight. Play, stop and seek arrive at human speed; the
   // depth is here so a burst during a stalled stream is dropped visibly rather
@@ -292,8 +292,16 @@ class Engine {
   // Returns false if the ring is full, in which case nothing changed.
   [[nodiscard]] bool set_limiter(const rt::LimiterConfig& limiter) noexcept;
 
+  // CONTROL THREAD. Sets one bus's output gain, linear.
+  //
+  // Travels in the SAME message as the limiter, because they are one thing --
+  // the master section -- and two rings would let the audio thread render a
+  // block with a new bus gain and an old limiter, a state nobody asked for.
+  [[nodiscard]] bool set_bus_gain(std::uint8_t bus, float gain) noexcept;
+
   // CONTROL THREAD. What this thread last published.
   [[nodiscard]] rt::LimiterConfig limiter() const noexcept;
+  [[nodiscard]] float bus_gain(std::uint8_t bus) const noexcept;
 
   // CONTROL THREAD. Queues a pad hit for the next block.
   //
@@ -627,7 +635,7 @@ class Engine {
   rt::SpscRing<rt::PadEvent, kEventRingCapacity> m_events;
   rt::SpscRing<rt::PadEvent, kMidiRingCapacity> m_midi_events;
   rt::SpscRing<rt::TransportCommand, kTransportRingCapacity> m_transport_commands;
-  rt::SpscRing<rt::LimiterConfig, kLimiterRingCapacity> m_limiter_commands;
+  rt::SpscRing<rt::MasterConfig, kMasterRingCapacity> m_master_commands;
   rt::HandoffRing<rt::PadConfig, kPadHandoffCapacity> m_pad_handoff;
   rt::HandoffRing<rt::SequencerState, kSequencerHandoffCapacity> m_sequencer_handoff;
   rt::VoicePool<kMaxVoices> m_voices;
@@ -677,7 +685,7 @@ class Engine {
   // AUDIO THREAD ONLY. The master limiter, and the settings it is running with.
   // The delay line is allocated in the constructor.
   rt::Limiter m_limiter;
-  rt::LimiterConfig m_limiter_config{};
+  rt::MasterConfig m_master{};
 
   // This block's worst gain reduction per strip, as a LINEAR gain with the
   // makeup divided back out. 1.0 means none. Converted to dB at the interface
@@ -692,7 +700,7 @@ class Engine {
 
   // CONTROL THREAD ONLY: what this thread has published, so limiter() can answer
   // without reading the audio thread's copy.
-  rt::LimiterConfig m_published_limiter{};
+  rt::MasterConfig m_published_master{};
 
   // Written by the control thread only, and read by it -- no cross-thread access,
   // so no atomic.

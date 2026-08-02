@@ -39,6 +39,10 @@ inline constexpr std::size_t kMinRows = 20;
 [[nodiscard]] ftxui::Element render_edit(const UiState& state, std::size_t terminal_columns,
                                          std::size_t terminal_rows);
 
+// MIX, likewise. A third pure function of the same UiState.
+[[nodiscard]] ftxui::Element render_mix(const UiState& state, std::size_t terminal_columns,
+                                        std::size_t terminal_rows);
+
 [[nodiscard]] ftxui::Element render(const UiState& state, std::size_t terminal_columns,
                                     std::size_t terminal_rows);
 

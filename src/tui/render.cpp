@@ -902,6 +902,9 @@ ftxui::Element render(const UiState& state, std::size_t terminal_columns,
   if (state.screen == Screen::kEdit) {
     return render_edit(state, terminal_columns, terminal_rows);
   }
+  if (state.screen == Screen::kMix) {
+    return render_mix(state, terminal_columns, terminal_rows);
+  }
 
   const Layout layout = layout_for(terminal_rows);
   const std::size_t wave_columns = wave_columns_for(terminal_columns);

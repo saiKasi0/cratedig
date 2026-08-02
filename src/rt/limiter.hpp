@@ -2,8 +2,10 @@
 #define CRATEDIG_RT_LIMITER_HPP
 
 #include "rt/arch.hpp"
+#include "rt/strip.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <span>
@@ -182,6 +184,30 @@ class Limiter {
   std::size_t m_write = 0;
   float m_gain = 1.0F;
 };
+
+// The master section, as one message.
+//
+// Bus gains and the limiter travel TOGETHER rather than through two rings. They
+// are one thing the control thread edits -- "the master section" -- and pushing
+// them separately would let the audio thread render a block with a new bus gain
+// and an old limiter, a state the control thread never asked for. One struct,
+// one push, no partial edits.
+//
+// By VALUE, not through the shared_ptr handoff: this owns nothing (see the note
+// on Engine::set_limiter). That is the whole reason the one-pointer rule exists
+// for PadConfig and does not apply here.
+struct MasterConfig {
+  // Linear, per bus, applied where the bus sums into master. Unity by default,
+  // and unity is exact -- the same transparency requirement the strip fader
+  // meets (docs/MIXER.md).
+  std::array<float, kNumBuses> bus_gain{1.0F, 1.0F, 1.0F, 1.0F};
+
+  LimiterConfig limiter{};
+};
+
+[[nodiscard]] constexpr float clamp_bus_gain(float gain) noexcept {
+  return gain >= 0.0F && gain <= kMaxStripGain ? gain : 1.0F;
+}
 
 }  // namespace rt
 

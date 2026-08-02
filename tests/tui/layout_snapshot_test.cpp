@@ -14,6 +14,7 @@
 #include "ingest/peak_pyramid.hpp"
 #include "ingest/slices.hpp"
 #include "rt/sample.hpp"
+#include "rt/strip.hpp"
 #include "tui/render.hpp"
 #include "tui/theme.hpp"
 #include "tui/ui_state.hpp"
@@ -1123,4 +1124,249 @@ TEST_CASE("a hit that has not been heard yet does not light its pad", "[tui]") {
     }
   }
   CHECK(lit == 0);
+}
+
+// -- MIX ---------------------------------------------------------------------
+
+namespace {
+
+// A magnitude response, sampled left to right, standing in for what the control
+// thread computes from the published coefficients. Hand-built rather than run
+// through rt::make_eq_band so the snapshot's curve is a fact about the RENDERER
+// rather than about the cookbook -- biquad_test.cpp already owns the filter.
+[[nodiscard]] std::vector<float> curve_of(float low, float mid, float high) {
+  std::vector<float> curve(16, 0.0F);
+  for (std::size_t index = 0; index < curve.size(); ++index) {
+    const auto position = static_cast<float>(index) / static_cast<float>(curve.size() - 1);
+    const float a = low * (1.0F - position) * (1.0F - position);
+    const float b = mid * (1.0F - std::abs((2.0F * position) - 1.0F));
+    const float c = high * position * position;
+    curve[index] = a + b + c;
+  }
+  return curve;
+}
+
+[[nodiscard]] tui::UiState mix_state(int columns) {
+  tui::UiState state = chopped_state(columns);
+  state.screen = tui::Screen::kMix;
+
+  static constexpr std::array<std::string_view, 8> kNames{"kick", "snap", "rim",  "hat",
+                                                          "chop", "bass", "keys", "vox"};
+  for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+    tui::StripView& strip = state.mix.strips[pad];
+    strip.name = pad < kNames.size() ? std::string{kNames[pad]} : "--";
+
+    // Deliberately varied, so one snapshot covers a fader above unity, several
+    // below, a silent strip, a muted one and a soloed one. A snapshot that only
+    // ever shows the default state cannot tell a renderer that ignores its
+    // input from one that does not.
+    strip.gain_db = 3.0F - (static_cast<float>(pad) * 2.1F);
+    strip.peak = pad == 3 ? 0.0F : 0.9F / (1.0F + (0.35F * static_cast<float>(pad)));
+    strip.balance = pad == 1 ? -0.5F : 0.0F;
+    strip.bus = static_cast<std::uint8_t>(pad % rt::kNumBuses);
+  }
+
+  state.mix.strips[0].eq_curve = curve_of(9.0F, 0.0F, -4.0F);
+  state.mix.strips[0].eq_label = "lo+9";
+  state.mix.strips[0].comp_label = "4:1";
+  state.mix.strips[0].reduction = 0.35F;
+
+  state.mix.strips[2].eq_curve = curve_of(-12.0F, 6.0F, 0.0F);
+  state.mix.strips[2].eq_label = "2bd";
+
+  state.mix.strips[4].mute = true;
+  state.mix.strips[6].solo = true;
+  state.mix.any_solo = true;
+
+  for (std::size_t bus = 0; bus < rt::kNumBuses; ++bus) {
+    tui::StripView& strip = state.mix.buses[bus];
+    strip.name = "bus";
+    strip.gain_db = static_cast<float>(bus) * -1.5F;
+    strip.peak = 0.8F / (1.0F + static_cast<float>(bus));
+    strip.has_balance = false;
+    strip.has_bus = false;
+    strip.routed = 4;
+  }
+
+  state.mix.master.name = "master";
+  state.mix.master.gain_db = 0.0F;
+  state.mix.master.peak = 0.93F;
+  state.mix.master.has_balance = false;
+  state.mix.master.has_bus = false;
+  state.mix.limiter_enabled = true;
+  state.mix.limiter_gain = 0.72F;
+  state.master_peak = 0.93F;
+
+  return state;
+}
+
+}  // namespace
+
+TEST_CASE("MIX draws eight strips and master at the design grid", "[tui]") {
+  check_snapshot("mix_100x30", mix_state(100), 100, 30);
+}
+
+TEST_CASE("MIX shows the second page of channels", "[tui]") {
+  tui::UiState state = mix_state(100);
+  state.mix.page = tui::MixPage::kChannelsHigh;
+  state.mix.cursor = 2;
+  check_snapshot("mix_page_high_100x30", state, 100, 30);
+}
+
+TEST_CASE("MIX shows the buses on their own page", "[tui]") {
+  // THE DEPARTURE FROM THE MOCKUP. It draws no bus strips at all, and twenty-one
+  // strips do not fit on a hundred columns, so the row pages and master stays
+  // pinned right. docs/design/README.md records it.
+  tui::UiState state = mix_state(100);
+  state.mix.page = tui::MixPage::kBuses;
+  check_snapshot("mix_page_buses_100x30", state, 100, 30);
+}
+
+TEST_CASE("MIX drops strips rather than shrinking them when narrow", "[tui]") {
+  // Master is pinned, so a narrow terminal loses channels from the right rather
+  // than squeezing every strip until the names and readouts stop fitting.
+  check_snapshot("mix_72x30", mix_state(72), 72, 30);
+}
+
+namespace {
+
+// The row a strip's fader cap sits on, found by looking for the cap glyph in the
+// panel's columns. Screen inspection rather than string matching, because the
+// row is what the test is about.
+[[nodiscard]] int fader_cap_row(const ftxui::Screen& screen, int panel_left) {
+  for (int y = 0; y < screen.dimy(); ++y) {
+    for (int x = panel_left; x < panel_left + 10 && x < screen.dimx(); ++x) {
+      if (screen.PixelAt(x, y).character == "━") {
+        return y;
+      }
+    }
+  }
+  return -1;
+}
+
+// One row of the screen as text. Needed because "does the word master appear"
+// is answered by the MODE LINE as well as by the panel -- a weaker version of
+// the test below passed happily with the master panel deleted.
+[[nodiscard]] std::string screen_row(const ftxui::Screen& screen, int row) {
+  std::string out;
+  for (int x = 0; x < screen.dimx(); ++x) {
+    out += screen.PixelAt(x, row).character;
+  }
+  return out;
+}
+
+[[nodiscard]] std::size_t meter_cells(const ftxui::Screen& screen, int panel_left) {
+  std::size_t lit = 0;
+  for (int y = 0; y < screen.dimy(); ++y) {
+    for (int x = panel_left; x < panel_left + 10 && x < screen.dimx(); ++x) {
+      if (screen.PixelAt(x, y).character == "█") {
+        ++lit;
+      }
+    }
+  }
+  return lit;
+}
+
+}  // namespace
+
+TEST_CASE("the fader cap moves with the gain, and upward means louder", "[tui]") {
+  tui::UiState quiet = mix_state(100);
+  quiet.mix.strips[0].gain_db = -40.0F;
+  tui::UiState loud = mix_state(100);
+  loud.mix.strips[0].gain_db = 6.0F;
+
+  const int quiet_row = fader_cap_row(render_screen(quiet, 100, 30), 1);
+  const int loud_row = fader_cap_row(render_screen(loud, 100, 30), 1);
+
+  REQUIRE(quiet_row > 0);
+  REQUIRE(loud_row > 0);
+
+  // Smaller y is higher on the screen, so louder must sit ABOVE quieter. A
+  // fader drawn upside down still moves when the gain changes, which is why the
+  // direction is asserted rather than just the difference.
+  CHECK(loud_row < quiet_row);
+}
+
+TEST_CASE("the meter is scaled in decibels, not linearly", "[tui]") {
+  // A linear meter over ten rows spends nine of them on the top 20 dB and reads
+  // EMPTY for anything quiet -- which on a sampler is most of the time. -40 dBFS
+  // is quiet and audible, and must light something.
+  tui::UiState state = mix_state(100);
+  for (tui::StripView& strip : state.mix.strips) {
+    strip.peak = 0.0F;
+  }
+  state.mix.strips[0].peak = 0.01F;  // -40 dBFS
+
+  const ftxui::Screen screen = render_screen(state, 100, 30);
+  CHECK(meter_cells(screen, 1) > 0);
+
+  // ...and it is not simply full: a meter that lights everything for everything
+  // would also pass the line above.
+  tui::UiState hot = state;
+  hot.mix.strips[0].peak = 1.0F;
+  CHECK(meter_cells(render_screen(hot, 100, 30), 1) > meter_cells(screen, 1));
+}
+
+TEST_CASE("a strip that is not reaching the mix shows no meter", "[tui]") {
+  // engine::Telemetry::strip_peak is zero for a muted or soloed-out strip, and
+  // the meter beside the fader must say so rather than showing what the pad
+  // played. The two questions are answered by two different numbers
+  // (docs/MIXER.md, "Metering").
+  tui::UiState state = mix_state(100);
+  state.mix.strips[0].peak = 0.0F;
+  CHECK(meter_cells(render_screen(state, 100, 30), 1) == 0);
+}
+
+TEST_CASE("master is pinned on every page", "[tui]") {
+  // The reason the strip row pages at all is that twenty-one strips do not fit.
+  // Master is the one you always want, so it is not part of the paging.
+  for (const tui::MixPage page :
+       {tui::MixPage::kChannelsLow, tui::MixPage::kChannelsHigh, tui::MixPage::kBuses}) {
+    tui::UiState state = mix_state(100);
+    state.mix.page = page;
+    const std::string titles = screen_row(render_screen(state, 100, 30), 3);
+    INFO("page " << static_cast<int>(page) << ", titles: " << titles);
+    CHECK(titles.find("master") != std::string::npos);
+  }
+}
+
+TEST_CASE("a narrow terminal drops strips and keeps master", "[tui]") {
+  for (const int columns : {100, 84, 72, 60}) {
+    const ftxui::Screen screen = render_screen(mix_state(columns), columns, 30);
+
+    // The PANEL TITLE ROW, not the whole screen: the mode line also says
+    // "master", so searching the render as a whole finds it whether or not the
+    // panel is there -- which is exactly what let a version of this test pass
+    // with the master panel deleted.
+    const std::string titles = screen_row(screen, 3);
+    INFO("columns " << columns << ", titles: " << titles);
+    CHECK(titles.find("master") != std::string::npos);
+
+    // Strip 1 is always drawn, and always at the same width -- panels are
+    // dropped rather than squeezed, because a squeezed strip loses its name and
+    // its readout, which is most of what it is for.
+    CHECK(titles.find("01 kick") != std::string::npos);
+  }
+}
+
+TEST_CASE("the EQ curve follows the published response", "[tui]") {
+  // The curve is drawn from StripView::eq_curve, so a boost must draw higher
+  // than a cut. Without this, a renderer that ignored the curve entirely would
+  // still pass every snapshot that happens to contain a flat one.
+  tui::UiState boosted = mix_state(100);
+  boosted.mix.strips[1].eq_curve = std::vector<float>(16, 9.0F);
+  tui::UiState cut = mix_state(100);
+  cut.mix.strips[1].eq_curve = std::vector<float>(16, -9.0F);
+
+  const std::string with_boost = strip_ansi(render_screen(boosted, 100, 30).ToString());
+  const std::string with_cut = strip_ansi(render_screen(cut, 100, 30).ToString());
+  CHECK(with_boost != with_cut);
+
+  // And flat is different from both, so the curve is not merely "any two
+  // settings differ".
+  tui::UiState flat = mix_state(100);
+  flat.mix.strips[1].eq_curve = std::vector<float>(16, 0.0F);
+  const std::string with_flat = strip_ansi(render_screen(flat, 100, 30).ToString());
+  CHECK(with_flat != with_boost);
+  CHECK(with_flat != with_cut);
 }
