@@ -210,12 +210,15 @@ constexpr double kZoomStep = 0.5;
 // Sixteen at a time; banks are M5. Slices past the sixteenth still exist in the
 // SliceSet and the wave panel draws them, so nothing is lost -- there is just
 // nothing to play them with yet.
-[[nodiscard]] std::size_t apply_slices(engine::Engine& engine,
-                                       const std::shared_ptr<const rt::Sample>& sample,
+// `file` is the pool entry the slices belong to: a pad records WHICH FILE as
+// well as which slice, because with a crate a slice index alone no longer names
+// a sound. `set` is passed separately so `:chop reset` can publish a one-slice
+// set without first writing it into the entry.
+[[nodiscard]] std::size_t apply_slices(engine::Engine& engine, const ingest::PoolEntry& file,
                                        const ingest::SliceSet& set, UiState& state) {
   std::size_t published = 0;
   for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
-    const bool has_slice = pad < set.size() && sample != nullptr;
+    const bool has_slice = pad < set.size() && file.sample != nullptr;
 
     // Built fresh and published whole. A PadConfig is immutable once the audio
     // thread can see it, so "clear this pad" is a new config with no sample --
@@ -223,7 +226,7 @@ constexpr double kZoomStep = 0.5;
     rt::PadConfig config{};
     config.pad = static_cast<std::uint8_t>(pad);
     if (has_slice) {
-      config.sample = sample;
+      config.sample = file.sample;
       config.start_frame = set.slices[pad].start_frame;
       config.end_frame = set.slices[pad].end_frame;
     }
@@ -235,6 +238,7 @@ constexpr double kZoomStep = 0.5;
 
     state.pads[pad].loaded = has_slice;
     state.pads[pad].has_slice = has_slice;
+    state.pads[pad].file = has_slice ? file.id : ingest::kNoFile;
     state.pads[pad].slice_index = pad;
     state.pads[pad].name = has_slice ? slice_pad_name(pad + 1) : std::string{};
   }
@@ -305,10 +309,25 @@ struct SliceEdit {
   std::size_t end_frame = 0;
 };
 
-// The pad that plays a slice, or rt::kNumPads.
-[[nodiscard]] std::uint8_t pad_for_slice(const UiState& state, std::size_t slice) noexcept {
+// The pad that plays a given slice OF A GIVEN FILE, or rt::kNumPads.
+//
+// The file half is not decoration. With a crate, slice 3 of the break and slice
+// 3 of the vocal are different sounds; a lookup on the index alone would answer
+// "pad 3 plays that" about whichever file happened to be assigned there, and
+// EDIT would then audition the wrong material while showing the right waveform.
+//
+// UNASSERTED AS OF THIS COMMIT, and said so rather than assumed: deleting the
+// file comparison passes the whole suite, because nothing can load a second file
+// yet -- the CLI puts exactly one in the pool. The :load verb makes it reachable
+// and is where the test belongs.
+[[nodiscard]] std::uint8_t pad_for_slice(const UiState& state, ingest::FileId file,
+                                         std::size_t slice) noexcept {
+  if (file == ingest::kNoFile) {
+    return rt::kNumPads;
+  }
   for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
-    if (state.pads[pad].has_slice && state.pads[pad].slice_index == slice) {
+    if (state.pads[pad].has_slice && state.pads[pad].file == file &&
+        state.pads[pad].slice_index == slice) {
       return static_cast<std::uint8_t>(pad);
     }
   }
@@ -330,9 +349,25 @@ int run_app(const AppOptions& options) {
 
   // 1. Load. On this thread, before anything real-time exists, which is exactly
   //    where decoding belongs.
-  std::shared_ptr<const rt::Sample> sample;
-  std::string sample_name;
-  ingest::PeakPyramid pyramid;
+  // THE CRATE. Until M5.5 these were three locals -- one Sample, one name, one
+  // pyramid -- and that was the one-file assumption: a session held exactly one
+  // file for its whole life and every pad was a slice of it.
+  //
+  // The pool holds as many as are loaded, and `current` says which one the wave
+  // panel and EDIT are looking at. A PAD IS NOT LIMITED TO `current`: each pad's
+  // rt::PadConfig carries its own shared_ptr, so pad 3 can be playing a slice of
+  // a file that is not on screen and pad 4 a slice of another.
+  ingest::SamplePool pool;
+  ingest::FileId current = ingest::kNoFile;
+
+  // The entry being looked at, or nullptr when the crate is empty. A function
+  // rather than a reference because the pool's storage moves when it grows --
+  // holding a PoolEntry& across a `:load` would be holding a dangling one.
+  const auto entry = [&pool, &current]() -> ingest::PoolEntry* { return pool.find(current); };
+  const auto current_sample = [&entry]() -> std::shared_ptr<const rt::Sample> {
+    ingest::PoolEntry* found = entry();
+    return found == nullptr ? nullptr : found->sample;
+  };
 
   if (!options.sample_path.empty()) {
     const ingest::SampleLoad load = ingest::load_sample(options.sample_path, options.sample_rate);
@@ -344,13 +379,11 @@ int run_app(const AppOptions& options) {
       std::cerr << '\n';
       return 1;
     }
-    sample = load.sample;
-    sample_name = options.sample_path.filename().string();
-
     // Built here, on the control thread, before anything real-time exists.
     // ~100-200 ms for a five-minute file; moving it onto a worker so the
     // interface can come up first is M6's ingest job, not M2's.
-    pyramid = ingest::PeakPyramid::build(*sample);
+    ingest::PeakPyramid pyramid = ingest::PeakPyramid::build(*load.sample);
+    current = pool.add(load.sample, options.sample_path, ingest::SliceSet{}, std::move(pyramid));
   }
 
   // 2. Build the engine and assign the pad.
@@ -364,11 +397,12 @@ int run_app(const AppOptions& options) {
                                                .num_channels = 2,
                                                .max_block_frames = kMaxBlockFrames,
                                                .seed = 0}};
-  if (sample != nullptr && !engine.set_pad_sample(kPad, sample)) {
+  if (current_sample() != nullptr && !engine.set_pad_sample(kPad, current_sample())) {
     // Only reachable if the handoff ring is full, which cannot happen on the
     // very first publish. Checked anyway rather than discarded: a pad that
     // silently failed to load would present as "the spacebar does nothing".
-    std::cerr << "error: could not assign " << sample_name << " to pad 1\n";
+    std::cerr << "error: could not assign " << options.sample_path.filename().string()
+              << " to pad 1\n";
     return 1;
   }
 
@@ -436,19 +470,22 @@ int run_app(const AppOptions& options) {
   // makes a terminal emit mouse escape sequences into the PTY snapshot tests.
   screen.TrackMouse(false);
 
-  const std::size_t total_frames = sample != nullptr ? sample->num_frames() : 0;
+  const std::size_t total_frames = current_sample() != nullptr ? current_sample()->num_frames() : 0;
 
   UiState state;
   state.version = CRATEDIG_VERSION;
   state.engine_rate = options.sample_rate;
   state.max_voices = engine::Engine::kMaxVoices;
-  if (sample != nullptr) {
-    state.sample_name = sample_name;
-    state.sample_rate = sample->sample_rate();
-    state.sample_channels = sample->num_channels();
+  if (const ingest::PoolEntry* loaded = entry(); loaded != nullptr) {
+    state.current_file = loaded->id;
+    state.sample_name = loaded->name;
+    state.sample_rate = loaded->sample->sample_rate();
+    state.sample_channels = loaded->sample->num_channels();
     state.sample_frames = total_frames;
-    state.pads[kPad] =
-        PadState{.name = options.sample_path.stem().string(), .level = 0.0F, .loaded = true};
+    state.pads[kPad] = PadState{.name = options.sample_path.stem().string(),
+                                .level = 0.0F,
+                                .loaded = true,
+                                .file = loaded->id};
     state.view.fit(total_frames);
   }
   if (!options.no_audio) {
@@ -456,10 +493,10 @@ int run_app(const AppOptions& options) {
     state.block_frames = device.actual_block_frames();
   }
 
-  // The chops, control-side. UiState carries a display copy in frames; this is
-  // the one `slot assign` reads, because it is the only place a slice NUMBER
-  // still means something.
-  ingest::SliceSet slices;
+  // The chops live in the pool entry now -- each file carries its own, which is
+  // the other half of the assumption M5.5 removes: `:chop` used to mean "the
+  // chop" and means "this file's chop". Every site reaches them through
+  // `entry()`, so there is no second copy to keep in step.
 
   // The keyboard negotiation, in two bits. `asked` says the query has gone out;
   // `active` says a terminal answered it and the flags are pushed. There is no
@@ -604,7 +641,7 @@ int run_app(const AppOptions& options) {
     state.edit.zero_crossings.clear();
     state.edit.pad_known = false;
     state.edit.undo_depth = undo.size();
-    if (sample == nullptr || state.edit.slice >= state.slices.size()) {
+    if (current_sample() == nullptr || state.edit.slice >= state.slices.size()) {
       return;
     }
 
@@ -613,13 +650,13 @@ int run_app(const AppOptions& options) {
     // which is the honest picture of "zoomed too far out to see crossings", and
     // the row fills in again as you zoom toward sample resolution.
     const std::size_t limit = std::max<std::size_t>(edit_wave_columns_for(columns) / 2, 1);
-    state.edit.zero_crossings = ingest::zero_crossings_in(*sample, state.edit.view.first_frame,
-                                                          state.edit.view.frames_visible, limit);
+    state.edit.zero_crossings = ingest::zero_crossings_in(
+        *current_sample(), state.edit.view.first_frame, state.edit.view.frames_visible, limit);
     if (state.edit.zero_crossings.size() == limit) {
       state.edit.zero_crossings.clear();
     }
 
-    const std::uint8_t pad = pad_for_slice(state, state.edit.slice);
+    const std::uint8_t pad = pad_for_slice(state, state.current_file, state.edit.slice);
     if (pad >= rt::kNumPads) {
       return;
     }
@@ -666,16 +703,17 @@ int run_app(const AppOptions& options) {
   // rather than merely drawn. Built from the current config, so a nudge does not
   // reset the envelope somebody set a moment ago.
   auto republish_slice = [&](std::size_t index) {
-    const std::uint8_t pad = pad_for_slice(state, index);
-    if (pad >= rt::kNumPads || sample == nullptr || index >= slices.size()) {
+    const std::uint8_t pad = pad_for_slice(state, state.current_file, index);
+    ingest::PoolEntry* file = entry();
+    if (pad >= rt::kNumPads || file == nullptr || index >= file->slices.size()) {
       return;
     }
     const std::shared_ptr<const rt::PadConfig> current = engine.pad_config(pad);
     rt::PadConfig next = current != nullptr ? *current : rt::PadConfig{};
     next.pad = pad;
-    next.sample = sample;
-    next.start_frame = slices.slices[index].start_frame;
-    next.end_frame = slices.slices[index].end_frame;
+    next.sample = file->sample;
+    next.start_frame = file->slices.slices[index].start_frame;
+    next.end_frame = file->slices.slices[index].end_frame;
     static_cast<void>(engine.publish_pad_config(std::make_shared<const rt::PadConfig>(next)));
   };
 
@@ -687,10 +725,11 @@ int run_app(const AppOptions& options) {
   // deliberately, and refusing would make the last frame before a neighbour
   // unreachable.
   auto nudge = [&](bool end_boundary, std::ptrdiff_t delta, std::size_t columns) {
-    if (state.edit.slice >= slices.size() || sample == nullptr) {
+    ingest::PoolEntry* file = entry();
+    if (file == nullptr || state.edit.slice >= file->slices.size()) {
       return;
     }
-    ingest::Slice& slice = slices.slices[state.edit.slice];
+    ingest::Slice& slice = file->slices.slices[state.edit.slice];
     undo.push_back(SliceEdit{
         .index = state.edit.slice, .start_frame = slice.start_frame, .end_frame = slice.end_frame});
 
@@ -708,7 +747,7 @@ int run_app(const AppOptions& options) {
       slice.start_snap = 0;
     }
 
-    show_slices(slices, state);
+    show_slices(file->slices, state);
     republish_slice(state.edit.slice);
     refresh_edit(columns);
   };
@@ -720,10 +759,11 @@ int run_app(const AppOptions& options) {
     }
     const SliceEdit last = undo.back();
     undo.pop_back();
-    if (last.index < slices.size()) {
-      slices.slices[last.index].start_frame = last.start_frame;
-      slices.slices[last.index].end_frame = last.end_frame;
-      show_slices(slices, state);
+    ingest::PoolEntry* file = entry();
+    if (file != nullptr && last.index < file->slices.size()) {
+      file->slices.slices[last.index].start_frame = last.start_frame;
+      file->slices.slices[last.index].end_frame = last.end_frame;
+      show_slices(file->slices, state);
       republish_slice(last.index);
     }
     state.edit.slice = last.index;
@@ -783,7 +823,8 @@ int run_app(const AppOptions& options) {
 
       case CommandKind::kChopTransient:
       case CommandKind::kChopGrid: {
-        if (sample == nullptr) {
+        ingest::PoolEntry* file = entry();
+        if (file == nullptr) {
           set_message("nothing loaded to chop", true);
           break;
         }
@@ -793,43 +834,46 @@ int run_app(const AppOptions& options) {
         // of audio. Putting it on the worker lane is M6's ingest job; doing it
         // now would mean building most of that lane to earn a progress bar
         // nobody can see yet.
-        slices =
-            transient ? ingest::chop_transient(*sample) : ingest::chop_grid(*sample, command.count);
-        show_slices(slices, state);
+        file->slices = transient ? ingest::chop_transient(*file->sample)
+                                 : ingest::chop_grid(*file->sample, command.count);
+        show_slices(file->slices, state);
 
         const std::string what = transient ? "chop transient" : "chop grid";
-        if (slices.empty()) {
+        const std::size_t count = file->slices.size();
+        if (count == 0) {
           set_message(what + ": no transients found", true);
           break;
         }
-        const std::size_t published = apply_slices(engine, sample, slices, state);
-        const std::size_t on_pads = std::min(slices.size(), static_cast<std::size_t>(rt::kNumPads));
+        const std::size_t published = apply_slices(engine, *file, file->slices, state);
+        const std::size_t on_pads = std::min(count, static_cast<std::size_t>(rt::kNumPads));
         if (published < rt::kNumPads) {
-          set_message(what + ": " + std::to_string(slices.size()) + " slices, but only " +
+          set_message(what + ": " + std::to_string(count) + " slices, but only " +
                           std::to_string(published) + " pads took it",
                       true);
           break;
         }
-        set_message(what + ": " + std::to_string(slices.size()) + " slices on " +
-                        std::to_string(on_pads) + " pads",
-                    false);
+        set_message(
+            what + ": " + std::to_string(count) + " slices on " + std::to_string(on_pads) + " pads",
+            false);
         break;
       }
 
       case CommandKind::kChopReset: {
-        slices = ingest::SliceSet{};
-        show_slices(slices, state);
-        if (sample == nullptr) {
+        ingest::PoolEntry* file = entry();
+        if (file == nullptr) {
           set_message("nothing loaded", true);
           break;
         }
+        file->slices = ingest::SliceSet{};
+        show_slices(file->slices, state);
         // Back to how the file arrived: the whole thing on pad 1, every other
         // pad empty. Expressed as a one-slice chop so there is a single code
         // path that publishes pads, then the NAME is put back -- pad 1 is the
         // file again, not slice one of it.
         ingest::SliceSet whole;
-        whole.slices.push_back(ingest::Slice{.start_frame = 0, .end_frame = sample->num_frames()});
-        static_cast<void>(apply_slices(engine, sample, whole, state));
+        whole.slices.push_back(
+            ingest::Slice{.start_frame = 0, .end_frame = file->sample->num_frames()});
+        static_cast<void>(apply_slices(engine, *file, whole, state));
         state.pads[kPad].has_slice = false;
         state.pads[kPad].name = options.sample_path.stem().string();
         set_message("chop reset", false);
@@ -837,7 +881,8 @@ int run_app(const AppOptions& options) {
       }
 
       case CommandKind::kSlotAssign: {
-        if (slices.empty()) {
+        const ingest::PoolEntry* file = entry();
+        if (file == nullptr || file->slices.empty()) {
           set_message("nothing chopped yet — try :chop transient", true);
           break;
         }
@@ -848,9 +893,9 @@ int run_app(const AppOptions& options) {
         // is what only this thread can know, which is how many slices and pads
         // actually exist.
         const std::size_t count = command.slice_last - command.slice + 1;
-        if (command.slice_last > slices.size()) {
+        if (command.slice_last > file->slices.size()) {
           set_message("no slice " + std::to_string(command.slice_last) + " (have " +
-                          std::to_string(slices.size()) + ")",
+                          std::to_string(file->slices.size()) + ")",
                       true);
           break;
         }
@@ -873,10 +918,10 @@ int run_app(const AppOptions& options) {
         // identical failures.
         std::size_t done = 0;
         for (; done < count; ++done) {
-          const ingest::Slice& slice = slices.slices[command.slice - 1 + done];
+          const ingest::Slice& slice = file->slices.slices[command.slice - 1 + done];
           const auto pad = static_cast<std::uint8_t>(command.pad - 1 + done);
           rt::PadConfig config{};
-          config.sample = sample;
+          config.sample = file->sample;
           config.pad = pad;
           config.start_frame = slice.start_frame;
           config.end_frame = slice.end_frame;
@@ -886,6 +931,7 @@ int run_app(const AppOptions& options) {
           }
           state.pads[pad].loaded = true;
           state.pads[pad].has_slice = true;
+          state.pads[pad].file = file->id;
           state.pads[pad].slice_index = command.slice - 1 + done;
           state.pads[pad].name = slice_pad_name(command.slice + done);
         }
@@ -1267,6 +1313,23 @@ int run_app(const AppOptions& options) {
       state.mix.limiter_gain = telemetry.limiter_gain;
     }
 
+    // THE CRATE, listed. Rebuilt each frame rather than maintained: it is at
+    // most a handful of entries of a few words each, and a cached copy is one
+    // more thing that can disagree with the pool after a load or an unload.
+    state.files.clear();
+    state.files.reserve(pool.size());
+    for (const ingest::PoolEntry& file : pool.entries()) {
+      state.files.push_back(UiState::FileEntry{
+          .id = file.id,
+          .name = file.name,
+          .slices = file.slices.size(),
+          .frames = file.sample != nullptr ? file.sample->num_frames() : 0,
+          .rate = file.sample != nullptr ? file.sample->sample_rate() : 0,
+          .channels = file.sample != nullptr ? file.sample->num_channels() : std::uint16_t{0},
+      });
+    }
+    state.current_file = current;
+
     state.active_voices = engine.active_voices();
     state.xruns = device.xrun_count();
     state.dropped =
@@ -1319,7 +1382,8 @@ int run_app(const AppOptions& options) {
     // correct redraw rather than a stretched one. At any zoom this reads about
     // five pyramid bins per column, which is what makes it affordable at 30 Hz
     // on a five-minute file.
-    if (sample != nullptr && !pyramid.empty()) {
+    const ingest::PoolEntry* drawn = entry();
+    if (drawn != nullptr && !drawn->pyramid.empty()) {
       // Each screen has its own view and its own panel width -- EDIT spends six
       // columns on the amplitude gutter -- so which one is up decides both the
       // span summarised and the number of bins to summarise it into. Using one
@@ -1329,7 +1393,8 @@ int run_app(const AppOptions& options) {
       const std::size_t wave_columns =
           editing ? edit_wave_columns_for(columns) : wave_columns_for(columns);
       state.bins.assign(bins_for_columns(wave_columns), ingest::PeakBin{});
-      pyramid.summarize(*sample, 0, view.first_frame, view.frames_visible, state.bins);
+      drawn->pyramid.summarize(*drawn->sample, 0, view.first_frame, view.frames_visible,
+                               state.bins);
     }
 
     return render(state, columns, rows);
@@ -1557,7 +1622,7 @@ int run_app(const AppOptions& options) {
         return true;
       }
       if (code == kSpace) {
-        const std::uint8_t pad = pad_for_slice(state, state.edit.slice);
+        const std::uint8_t pad = pad_for_slice(state, state.current_file, state.edit.slice);
         if (pad >= rt::kNumPads) {
           // A SLICE NOT ON A PAD CANNOT BE HEARD, because every route to sound
           // here is a pad trigger: the audio thread plays m_pads[N], so there is

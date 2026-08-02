@@ -2,6 +2,7 @@
 #define CRATEDIG_TUI_UI_STATE_HPP
 
 #include "ingest/peak_pyramid.hpp"
+#include "ingest/pool.hpp"
 #include "rt/pad_event.hpp"
 #include "rt/sequencer.hpp"
 #include "rt/strip.hpp"
@@ -84,9 +85,19 @@ struct PadState {
   float level = 0.0F;
   bool loaded = false;
 
-  // Which slice this pad plays, or none. Displayed rather than acted on -- the
-  // engine already has the config.
+  // WHICH FILE AND WHICH SLICE this pad plays, or none. Displayed rather than
+  // acted on -- the engine already has the config.
+  //
+  // The file is half the answer as of M5.5, and that is the assumption this
+  // milestone removes: until now a session held one file, so a slice index alone
+  // named a sound. With a crate it does not -- slice 3 of the break and slice 3
+  // of the vocal are different sounds, and a pad grid that showed only the index
+  // would say the same thing about both.
+  //
+  // A FileId rather than a pool position, for the reason ingest/pool.hpp gives:
+  // unloading a file must not silently re-point every pad after it.
   bool has_slice = false;
+  ingest::FileId file = ingest::kNoFile;
   std::size_t slice_index = 0;
 
   // How long ago the pad was hit, in seconds, and how hard. Straight from
@@ -343,6 +354,16 @@ struct UiState {
   EditState edit;
   MixState mix;
 
+  // WHAT THE WAVE PANEL AND EDIT ARE LOOKING AT -- one file out of the pool,
+  // not "the" file. Every field below describes that one; the crate as a whole
+  // is `files`.
+  //
+  // Kept as flat display fields rather than as a pointer into the pool, so
+  // render() stays a pure function of this struct and needs neither the pool nor
+  // the Sample. That is the same reason `bins` is a summarised waveform rather
+  // than the audio.
+  ingest::FileId current_file = ingest::kNoFile;
+
   // The loaded sample. `frames == 0` means nothing is loaded, which is a
   // legitimate state the interface has to be able to draw.
   std::string sample_name;
@@ -365,6 +386,20 @@ struct UiState {
 
   std::vector<SliceMark> slices;
   std::string chop_algorithm;  // "transient" or "grid n", for the panel
+
+  // The crate: one line per loaded file, in pool order. Enough to list and to
+  // choose between, and no more -- the browser (M5.5) draws from this and the
+  // pool itself stays on the control side.
+  struct FileEntry {
+    ingest::FileId id = ingest::kNoFile;
+    std::string name;
+    std::size_t slices = 0;
+    std::size_t frames = 0;
+    std::uint32_t rate = 0;
+    std::uint16_t channels = 0;
+  };
+
+  std::vector<FileEntry> files;
 
   std::array<PadState, rt::kNumPads> pads;
   std::uint8_t selected_pad = 0;

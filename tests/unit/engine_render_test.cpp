@@ -1567,3 +1567,66 @@ TEST_CASE("the graph is bit-exact when trigger order follows pad order", "[unit]
   CHECK(std::memcmp(result.graph.data(), result.flat.data(), result.graph.size() * sizeof(float)) ==
         0);
 }
+
+TEST_CASE("two pads can play slices of two different files at once", "[unit]") {
+  // M5.5's acceptance, at the level where it is actually a claim about the
+  // ENGINE: "a pad plays a slice of one file while its neighbour plays a slice
+  // of another, published live with no allocation on the audio thread".
+  //
+  // The pool, the browser and the `:load` verb are all control-side; the reason
+  // they can be is that rt::PadConfig has carried its own
+  // shared_ptr<const rt::Sample> since M3, so a crate needs no change to the
+  // callback. That has been asserted in prose in three documents and nowhere in
+  // a test until now.
+  engine::Engine eng{test_config()};
+
+  // Two files, deliberately different in rate and channel count as well as in
+  // content -- the mixed case a crate actually produces, and the one where a
+  // voice pool that assumed a single source would come apart.
+  const std::shared_ptr<const rt::Sample> break_loop = make_test_sample(44'100, 2, 3'000);
+  const std::shared_ptr<const rt::Sample> vocal = make_test_sample(48'000, 1, 1'500);
+
+  // The SAME slice index in each, which is exactly what a crate makes ambiguous:
+  // slice 0 of the break and slice 0 of the vocal are different sounds.
+  REQUIRE(eng.publish_pad_config(std::make_shared<const rt::PadConfig>(
+      rt::PadConfig{.sample = break_loop, .pad = 0, .start_frame = 0, .end_frame = 800})));
+  REQUIRE(eng.publish_pad_config(std::make_shared<const rt::PadConfig>(
+      rt::PadConfig{.sample = vocal, .pad = 1, .start_frame = 0, .end_frame = 800})));
+
+  REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 0, .velocity = 1.0F}));
+  REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 1, .velocity = 1.0F}));
+
+  const std::array<std::size_t, 1> blocks{256};
+  RenderCapture together{512, kChannels};
+  together.render_in_blocks(eng, blocks);
+
+  // Both sounded, and each pad's meter reflects its own material.
+  const engine::Telemetry telemetry = eng.telemetry();
+  CHECK(telemetry.pad_peak[0] > 0.0F);
+  CHECK(telemetry.pad_peak[1] > 0.0F);
+  CHECK(eng.active_voices() == 2);
+
+  // And each is playing ITS OWN file: rendering pad 0 alone gives a different
+  // result from rendering pad 1 alone, so the two are not quietly sharing one
+  // sample. Without this the test would pass on an engine that ignored the
+  // second config entirely.
+  auto alone = [&](std::uint8_t pad, const std::shared_ptr<const rt::Sample>& sample) {
+    engine::Engine one{test_config()};
+    REQUIRE(one.publish_pad_config(std::make_shared<const rt::PadConfig>(
+        rt::PadConfig{.sample = sample, .pad = pad, .start_frame = 0, .end_frame = 800})));
+    REQUIRE(one.trigger_pad(rt::PadEvent{.pad = pad, .velocity = 1.0F}));
+    RenderCapture out{512, kChannels};
+    out.render_in_blocks(one, blocks);
+    return std::vector<float>{out.samples().begin(), out.samples().end()};
+  };
+
+  const std::vector<float> only_break = alone(0, break_loop);
+  const std::vector<float> only_vocal = alone(1, vocal);
+  CHECK(std::memcmp(only_break.data(), only_vocal.data(), only_break.size() * sizeof(float)) != 0);
+
+  // The pool can drop a file while a pad is still playing it, because the pad
+  // owns its own reference. Asserted here rather than in pool_test.cpp because
+  // this is the half that involves the engine: the config is already published
+  // and the voice is already running.
+  CHECK(break_loop.use_count() > 1);
+}
