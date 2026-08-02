@@ -37,6 +37,24 @@ using tui::kPadKeys;
 
 [[nodiscard]] std::string format_dbfs(float linear);
 
+// The other direction, for the mixer's `:` verbs.
+//
+// BESIDE format_dbfs and not somewhere in rt/, because docs/MIXER.md is explicit
+// that the audio path is linear everywhere and dB exists only at the interface
+// boundary -- this IS that boundary. Keeping both directions in one file is the
+// same reasoning format_bpm gives for living beside its parser: two conversions
+// that must agree should not be able to drift apart.
+//
+// 0 dB returns exactly 1.0f rather than pow(10, 0), so a fader typed back to
+// unity is bit-transparent again -- the transparency requirement the whole
+// mixer rests on (docs/MIXER.md).
+[[nodiscard]] float db_to_linear(float decibels);
+
+// And back, for a fader the keys nudge: the engine stores linear, the key steps
+// in dB, so the round trip has to exist. Silence returns the bottom of the
+// fader rather than -infinity, which is what a clamped nudge needs.
+[[nodiscard]] float linear_to_db(float linear);
+
 // Cells, not bytes. Every waveform row is UTF-8 with a mix of one-byte spaces
 // and three-byte braille, so byte offsets are not column offsets.
 [[nodiscard]] std::size_t utf8_cells(std::string_view text);

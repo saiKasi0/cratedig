@@ -1,6 +1,8 @@
 #include "tui/command.hpp"
 
+#include "rt/limiter.hpp"
 #include "rt/sequencer.hpp"
+#include "rt/strip.hpp"
 
 #include <charconv>
 #include <cstddef>
@@ -384,6 +386,335 @@ namespace {
   return error("metro: " + std::string{words[1]} + " is not on or off");
 }
 
+// -- the mixer ---------------------------------------------------------------
+
+// A signed decimal, for the values a mixer is denominated in: "-6", "3.5",
+// "-0.25". Refused rather than clamped -- the caller names the real limits, so
+// the message can say what the range actually is.
+[[nodiscard]] bool parse_decimal(std::string_view text, float& out) {
+  if (text.empty()) {
+    return false;
+  }
+  const bool negative = text.front() == '-';
+  if (negative || text.front() == '+') {
+    text.remove_prefix(1);
+  }
+  const std::size_t dot = text.find('.');
+  std::size_t units = 0;
+  if (!parse_number(text.substr(0, dot), units) || units > 1'000'000) {
+    return false;
+  }
+
+  double value = static_cast<double>(units);
+  if (dot != std::string_view::npos) {
+    const std::string_view fraction = text.substr(dot + 1);
+    if (fraction.empty() || fraction.size() > 4) {
+      return false;
+    }
+    std::size_t digits = 0;
+    if (!parse_number(fraction, digits)) {
+      return false;
+    }
+    double scale = 1.0;
+    for (std::size_t index = 0; index < fraction.size(); ++index) {
+      scale *= 10.0;
+    }
+    value += static_cast<double>(digits) / scale;
+  }
+
+  out = static_cast<float>(negative ? -value : value);
+  return true;
+}
+
+// A bus, as the letter the screen shows. 0-based on the way out.
+[[nodiscard]] bool parse_bus_letter(std::string_view text, std::uint8_t& out) {
+  if (text.size() != 1) {
+    return false;
+  }
+  const char letter = text.front();
+  const char lower =
+      letter >= 'A' && letter <= 'Z' ? static_cast<char>(letter - 'A' + 'a') : letter;
+  if (lower < 'a' || lower >= static_cast<char>('a' + rt::kNumBuses)) {
+    return false;
+  }
+  out = static_cast<std::uint8_t>(lower - 'a');
+  return true;
+}
+
+// A pad, 1-based as typed. Zero is refused rather than read as "all": on the
+// mixer every verb acts on one strip, and `mute 0` is a typo for `mute 10` far
+// more often than it is a request to mute everything.
+[[nodiscard]] bool parse_pad_number(std::string_view text, std::size_t& out) {
+  return parse_number(text, out) && out >= 1 && out <= rt::kNumPads;
+}
+
+[[nodiscard]] Command parse_mix(const std::vector<std::string_view>& words) {
+  Command out = command_of(CommandKind::kMix);
+  if (words.size() < 2) {
+    return out;
+  }
+  if (words[1] == "bus" || words[1] == "buses") {
+    out.pattern = 1;
+    return out;
+  }
+  return error("mix: " + std::string{words[1]} + " is not a page; try: mix, or mix bus");
+}
+
+// `gain 3 -6` moves pad 3's fader; `gain bus a -6` moves bus A's.
+//
+// The bus form is spelled out rather than overloading the first argument,
+// because "a" and "3" would otherwise both be targets and a typo in either one
+// would silently address the wrong thing.
+[[nodiscard]] Command parse_gain(const std::vector<std::string_view>& words) {
+  Command out = command_of(CommandKind::kStripGain);
+
+  std::size_t value_index = 2;
+  if (words.size() >= 2 && words[1] == "bus") {
+    if (words.size() < 4) {
+      return error("gain bus needs a bus and a level, e.g. gain bus a -6");
+    }
+    std::uint8_t bus = 0;
+    if (!parse_bus_letter(words[2], bus)) {
+      return error("gain: " + std::string{words[2]} + " is not a bus; try a, b, c or d");
+    }
+    out.bus = bus;
+    out.bus_target = true;
+    value_index = 3;
+  } else {
+    if (words.size() < 3) {
+      return error("gain needs a pad and a level, e.g. gain 3 -6, or gain bus a -6");
+    }
+    std::size_t pad = 0;
+    if (!parse_pad_number(words[1], pad)) {
+      return error("gain: " + std::string{words[1]} + " is not a pad, 1 to 16");
+    }
+    out.pad = pad;
+  }
+
+  if (!parse_decimal(words[value_index], out.decibels)) {
+    return error("gain: " + std::string{words[value_index]} + " is not a level in dB");
+  }
+  // The fader's range, from rt::kMaxStripGain (+12 dB) down to silence. Named
+  // in the message rather than clamped, so a mistyped -60 is a refusal instead
+  // of a strip that quietly went quiet.
+  if (out.decibels > 12.0F || out.decibels < -60.0F) {
+    return error("gain: " + std::string{words[value_index]} + " is outside -60 to +12 dB");
+  }
+  return out;
+}
+
+[[nodiscard]] Command parse_pan(const std::vector<std::string_view>& words) {
+  if (words.size() < 3) {
+    return error("pan needs a pad and a position, e.g. pan 3 -50 or pan 3 c");
+  }
+  Command out = command_of(CommandKind::kStripPan);
+  std::size_t pad = 0;
+  if (!parse_pad_number(words[1], pad)) {
+    return error("pan: " + std::string{words[1]} + " is not a pad, 1 to 16");
+  }
+  out.pad = pad;
+
+  // `c` for centre, because that is what the strip reads back and typing 0 to
+  // mean centre is a guess the readout would not confirm.
+  if (words[2] == "c" || words[2] == "C") {
+    out.pan_percent = 0;
+    return out;
+  }
+  float percent = 0.0F;
+  if (!parse_decimal(words[2], percent)) {
+    return error("pan: " + std::string{words[2]} + " is not a position; try -100 to 100, or c");
+  }
+  if (percent < -100.0F || percent > 100.0F) {
+    return error("pan: " + std::string{words[2]} + " is outside -100 to 100");
+  }
+  out.pan_percent = static_cast<int>(percent);
+  return out;
+}
+
+// `mute 3`, `mute 3 on`, `mute 3 off`. Bare flips it, the same tri-state
+// `metro` uses and for the same reason: the parser does not know the current
+// setting and must not guess.
+[[nodiscard]] Command parse_strip_switch(const std::vector<std::string_view>& words,
+                                         CommandKind kind, std::string_view verb) {
+  if (words.size() < 2) {
+    return error(std::string{verb} + " needs a pad, e.g. " + std::string{verb} + " 3");
+  }
+  Command out = command_of(kind);
+  std::size_t pad = 0;
+  if (!parse_pad_number(words[1], pad)) {
+    return error(std::string{verb} + ": " + std::string{words[1]} + " is not a pad, 1 to 16");
+  }
+  out.pad = pad;
+  if (words.size() < 3) {
+    return out;
+  }
+  if (words[2] == "on") {
+    out.toggle = Switch::kOn;
+    return out;
+  }
+  if (words[2] == "off") {
+    out.toggle = Switch::kOff;
+    return out;
+  }
+  return error(std::string{verb} + ": " + std::string{words[2]} + " is not on or off");
+}
+
+[[nodiscard]] Command parse_bus(const std::vector<std::string_view>& words) {
+  if (words.size() < 3) {
+    return error("bus needs a pad and a bus, e.g. bus 3 a");
+  }
+  Command out = command_of(CommandKind::kStripBus);
+  std::size_t pad = 0;
+  if (!parse_pad_number(words[1], pad)) {
+    return error("bus: " + std::string{words[1]} + " is not a pad, 1 to 16");
+  }
+  std::uint8_t bus = 0;
+  if (!parse_bus_letter(words[2], bus)) {
+    return error("bus: " + std::string{words[2]} + " is not a bus; try a, b, c or d");
+  }
+  out.pad = pad;
+  out.bus = bus;
+  return out;
+}
+
+// `eq 3 2 off` bypasses band 2; `eq 3 2 800 -4 1.2` sets it.
+//
+// Frequency, gain, shape -- in that order because it is the order the cookbook
+// and docs/MIXER.md state them in, and an EQ whose arguments are in a different
+// order from its specification is one nobody can check against it.
+[[nodiscard]] Command parse_eq(const std::vector<std::string_view>& words) {
+  if (words.size() < 3) {
+    return error("eq needs a pad and a band, e.g. eq 3 2 800 -4 1.2, or eq 3 2 off");
+  }
+  Command out = command_of(CommandKind::kStripEq);
+  std::size_t pad = 0;
+  if (!parse_pad_number(words[1], pad)) {
+    return error("eq: " + std::string{words[1]} + " is not a pad, 1 to 16");
+  }
+  std::size_t band = 0;
+  if (!parse_number(words[2], band) || band < 1 || band > rt::kEqBands) {
+    return error("eq: " + std::string{words[2]} + " is not a band, 1 to 4");
+  }
+  out.pad = pad;
+  out.band = static_cast<std::uint8_t>(band);
+
+  if (words.size() >= 4 && words[3] == "off") {
+    out.toggle = Switch::kOff;
+    return out;
+  }
+  if (words.size() < 6) {
+    return error("eq needs frequency, gain and Q, e.g. eq 3 2 800 -4 1.2 (or eq 3 2 off)");
+  }
+  if (!parse_decimal(words[3], out.frequency) || out.frequency <= 0.0F) {
+    return error("eq: " + std::string{words[3]} + " is not a frequency in Hz");
+  }
+  if (!parse_decimal(words[4], out.decibels)) {
+    return error("eq: " + std::string{words[4]} + " is not a gain in dB");
+  }
+  if (out.decibels < -24.0F || out.decibels > 24.0F) {
+    return error("eq: " + std::string{words[4]} + " is outside -24 to +24 dB");
+  }
+  if (!parse_decimal(words[5], out.shape) || out.shape <= 0.0F) {
+    return error("eq: " + std::string{words[5]} + " is not a Q or shelf slope");
+  }
+  out.toggle = Switch::kOn;
+  return out;
+}
+
+// `comp 3 off`, or `comp 3 -18 4` with optional knee, makeup, attack, release.
+[[nodiscard]] Command parse_comp(const std::vector<std::string_view>& words) {
+  if (words.size() < 3) {
+    return error("comp needs a pad and a threshold, e.g. comp 3 -18 4, or comp 3 off");
+  }
+  Command out = command_of(CommandKind::kStripComp);
+  std::size_t pad = 0;
+  if (!parse_pad_number(words[1], pad)) {
+    return error("comp: " + std::string{words[1]} + " is not a pad, 1 to 16");
+  }
+  out.pad = pad;
+
+  if (words[2] == "off") {
+    out.toggle = Switch::kOff;
+    return out;
+  }
+  if (words.size() < 4) {
+    return error("comp needs a threshold and a ratio, e.g. comp 3 -18 4");
+  }
+  if (!parse_decimal(words[2], out.decibels)) {
+    return error("comp: " + std::string{words[2]} + " is not a threshold in dB");
+  }
+  if (out.decibels < -60.0F || out.decibels > 0.0F) {
+    return error("comp: " + std::string{words[2]} + " is outside -60 to 0 dB");
+  }
+  if (!parse_decimal(words[3], out.ratio)) {
+    return error("comp: " + std::string{words[3]} + " is not a ratio");
+  }
+  if (out.ratio < 1.0F || out.ratio > 20.0F) {
+    return error("comp: " + std::string{words[3]} + " is outside 1 to 20");
+  }
+
+  // Defaults for what was not typed: a soft-ish knee, no makeup, and times that
+  // catch a drum transient without pumping. Stated here rather than left to the
+  // engine so that `comp 3 -18 4` produces the same compressor every time.
+  out.knee_db = 6.0F;
+  out.makeup_db = 0.0F;
+  out.attack_ms = 5.0F;
+  out.release_ms = 120.0F;
+
+  if (words.size() >= 5 && !parse_decimal(words[4], out.knee_db)) {
+    return error("comp: " + std::string{words[4]} + " is not a knee in dB");
+  }
+  if (words.size() >= 6 && !parse_decimal(words[5], out.makeup_db)) {
+    return error("comp: " + std::string{words[5]} + " is not a makeup gain in dB");
+  }
+  if (words.size() >= 7 && !parse_decimal(words[6], out.attack_ms)) {
+    return error("comp: " + std::string{words[6]} + " is not an attack in ms");
+  }
+  if (words.size() >= 8 && !parse_decimal(words[7], out.release_ms)) {
+    return error("comp: " + std::string{words[7]} + " is not a release in ms");
+  }
+  if (out.knee_db < 0.0F || out.knee_db > 24.0F) {
+    return error("comp: knee is outside 0 to 24 dB");
+  }
+  if (out.makeup_db < 0.0F || out.makeup_db > 24.0F) {
+    return error("comp: makeup is outside 0 to 24 dB");
+  }
+  if (out.attack_ms < 0.0F || out.release_ms < 0.0F) {
+    return error("comp: times cannot be negative");
+  }
+  out.toggle = Switch::kOn;
+  return out;
+}
+
+// `limit`, `limit on`, `limit off`, `limit on -1.0`.
+//
+// Here rather than left unreachable: T6 built the limiter OFF by default and
+// nothing could turn it on, which is a feature that exists only in the tests.
+[[nodiscard]] Command parse_limit(const std::vector<std::string_view>& words) {
+  Command out = command_of(CommandKind::kLimiter);
+  out.decibels = rt::kDefaultCeilingDb;
+  if (words.size() < 2) {
+    return out;  // bare `limit` flips it
+  }
+  if (words[1] == "off") {
+    out.toggle = Switch::kOff;
+    return out;
+  }
+  if (words[1] != "on") {
+    return error("limit: " + std::string{words[1]} + " is not on or off");
+  }
+  out.toggle = Switch::kOn;
+  if (words.size() >= 3) {
+    if (!parse_decimal(words[2], out.decibels)) {
+      return error("limit: " + std::string{words[2]} + " is not a ceiling in dB");
+    }
+    if (out.decibels > 0.0F || out.decibels < -24.0F) {
+      return error("limit: " + std::string{words[2]} + " is outside -24 to 0 dB");
+    }
+  }
+  return out;
+}
+
 }  // namespace
 
 std::string format_bpm(std::uint32_t bpm_x100) {
@@ -444,6 +775,33 @@ Command parse_command(std::string_view line) {
   }
   if (verb == "perform") {
     return command_of(CommandKind::kPerform);
+  }
+  if (verb == "mix") {
+    return parse_mix(words);
+  }
+  if (verb == "gain") {
+    return parse_gain(words);
+  }
+  if (verb == "pan") {
+    return parse_pan(words);
+  }
+  if (verb == "mute") {
+    return parse_strip_switch(words, CommandKind::kStripMute, "mute");
+  }
+  if (verb == "solo") {
+    return parse_strip_switch(words, CommandKind::kStripSolo, "solo");
+  }
+  if (verb == "bus") {
+    return parse_bus(words);
+  }
+  if (verb == "eq") {
+    return parse_eq(words);
+  }
+  if (verb == "comp") {
+    return parse_comp(words);
+  }
+  if (verb == "limit") {
+    return parse_limit(words);
   }
   if (verb == "q" || verb == "quit") {
     return command_of(CommandKind::kQuit);

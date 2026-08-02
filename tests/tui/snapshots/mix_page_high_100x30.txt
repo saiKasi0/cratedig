@@ -27,4 +27,4 @@ cratedig 0.0.1  mix                                                      ch 9-16
 ╰────────╯ ╰────────╯ ╰────────╯ ╰────────╯ ╰────────╯ ╰────────╯ ╰────────╯ ╰────────╯ ╰──────────╯
                                                                                                     
                                                                                                     
-  mix       master -0.6 · lim -2.9 · ch 9-16   tab page · hjkl strip/fader · m mute · s solo · b bus
+  mix       master -0.6 · lim -2.9              [] page · hjkl strip/fader · m mute · s solo · b bus

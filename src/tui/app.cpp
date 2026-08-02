@@ -12,6 +12,7 @@
 #include "tui/command.hpp"
 #include "tui/keys.hpp"
 #include "tui/render.hpp"
+#include "tui/render_detail.hpp"
 #include "tui/ui_state.hpp"
 #include "tui/waveform.hpp"
 
@@ -27,6 +28,8 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -39,6 +42,66 @@
 
 namespace tui {
 namespace {
+
+// What the strip's chain rows say. Short enough for eight columns, and naming
+// the BAND COUNT rather than a type, because "2bd" answers "is anything on" at a
+// glance and the curve above it answers "doing what".
+[[nodiscard]] std::string eq_label_of(const rt::EqConfig& eq) {
+  std::size_t on = 0;
+  for (const rt::EqBand& band : eq.bands) {
+    on += band.enabled ? 1 : 0;
+  }
+  return on == 0 ? std::string{"--"} : std::to_string(on) + "bd";
+}
+
+[[nodiscard]] std::string comp_label_of(const rt::CompressorConfig& compressor) {
+  if (!compressor.enabled) {
+    return "--";
+  }
+  // The ratio, which is the one number that says what a compressor is doing.
+  const auto whole = static_cast<int>(compressor.ratio);
+  return std::to_string(whole) + ":1";
+}
+
+// The EQ magnitude response across the audible band, in dB, at the braille
+// resolution render_mix draws it at.
+//
+// Log-spaced from 20 Hz to 20 kHz, because an EQ curve drawn on a linear
+// frequency axis spends three quarters of its width above 5 kHz and squeezes
+// everything anybody actually adjusts into the first inch.
+//
+// Evaluated from the SAME published coefficients the audio thread is running,
+// so the curve cannot drift from the sound: |H(e^jw)| out of b0..a2, exactly as
+// docs/MIXER.md's acceptance defines it.
+[[nodiscard]] std::vector<float> eq_response(const rt::EqConfig& eq, std::uint32_t rate) {
+  if (!eq.any_enabled() || rate == 0) {
+    return {};
+  }
+  constexpr std::size_t kPoints = 16;
+  std::vector<float> curve(kPoints, 0.0F);
+  for (std::size_t index = 0; index < kPoints; ++index) {
+    const double position = static_cast<double>(index) / static_cast<double>(kPoints - 1);
+    const double frequency = 20.0 * std::pow(1000.0, position);  // 20 Hz .. 20 kHz
+    const double omega = 2.0 * std::acos(-1.0) * frequency / static_cast<double>(rate);
+    const std::complex<double> z = std::polar(1.0, -omega);
+
+    double total_db = 0.0;
+    for (const rt::EqBand& band : eq.bands) {
+      if (!band.enabled) {
+        continue;
+      }
+      const std::complex<double> numerator = static_cast<double>(band.coeffs.b0) +
+                                             (static_cast<double>(band.coeffs.b1) * z) +
+                                             (static_cast<double>(band.coeffs.b2) * z * z);
+      const std::complex<double> denominator = 1.0 + (static_cast<double>(band.coeffs.a1) * z) +
+                                               (static_cast<double>(band.coeffs.a2) * z * z);
+      // Cascaded bands MULTIPLY, so their dB contributions add.
+      total_db += 20.0 * std::log10(std::abs(numerator / denominator));
+    }
+    curve[index] = static_cast<float>(total_db);
+  }
+  return curve;
+}
 
 // Comfortably above anything a device will negotiate. The engine's buffers are
 // sized from this at construction, before the device has told us what it
@@ -667,6 +730,45 @@ int run_app(const AppOptions& options) {
     refresh_edit(columns);
   };
 
+  // Read-modify-publish one strip, the same shape republish_slice() uses.
+  //
+  // A published PadConfig is immutable, so every mixer edit is a new object --
+  // which is the one-pointer rule doing its job rather than getting in the way.
+  // Built from what is currently published, so setting a fader does not reset an
+  // EQ somebody dialled in a moment ago.
+  //
+  // Returns false when the handoff ring is full, which the caller reports rather
+  // than swallowing: an edit that did not reach the audio thread must not look
+  // like one that did.
+  auto edit_strip = [&](std::size_t pad_1based, auto&& mutate) -> bool {
+    const auto pad = static_cast<std::uint8_t>(pad_1based - 1);
+    if (pad >= rt::kNumPads) {
+      return false;
+    }
+    rt::StripConfig strip = engine.strip(pad);
+    mutate(strip);
+    return engine.set_strip(pad, strip);
+  };
+
+  // Says what happened, or says the ring was full. One place, so no mixer verb
+  // can quietly forget the failure case.
+  auto report_strip = [&](bool ok, const std::string& said) {
+    if (ok) {
+      set_message(said, false);
+    } else {
+      set_message("mixer busy — the edit did not happen, try again", true);
+    }
+  };
+
+  // Milliseconds to frames, at the engine's rate. The interface talks in time
+  // and rt::CompressorConfig counts frames, for the reason rt::AdsrFrames does:
+  // a block size must not be able to change how long an attack is.
+  auto frames_of_ms = [&](float milliseconds) {
+    const double frames =
+        static_cast<double>(milliseconds) * static_cast<double>(options.sample_rate) / 1000.0;
+    return static_cast<std::size_t>(frames < 0.0 ? 0.0 : frames);
+  };
+
   // Runs a parsed command. Everything it touches -- the engine's handoff ring,
   // the slice set, the UiState -- belongs to this thread, which is what makes a
   // command a plain function call rather than a message.
@@ -967,6 +1069,132 @@ int run_app(const AppOptions& options) {
         set_message("stopped pad " + std::to_string(command.pad), false);
         break;
 
+      case CommandKind::kMix:
+        state.screen = Screen::kMix;
+        state.mix.page = command.pattern == 1 ? MixPage::kBuses : MixPage::kChannelsLow;
+        state.mix.cursor = 0;
+        break;
+
+      case CommandKind::kStripGain:
+        if (command.bus_target) {
+          const float linear = tui::detail::db_to_linear(command.decibels);
+          const bool ok = engine.set_bus_gain(command.bus, linear);
+          report_strip(ok,
+                       "bus " + std::string(1, static_cast<char>('a' + command.bus)) + " " +
+                           tui::detail::with_precision(static_cast<double>(command.decibels), 1) +
+                           " dB");
+          break;
+        }
+        report_strip(edit_strip(command.pad,
+                                [&](rt::StripConfig& strip) {
+                                  strip.gain = tui::detail::db_to_linear(command.decibels);
+                                }),
+                     "pad " + std::to_string(command.pad) + " gain " +
+                         tui::detail::with_precision(static_cast<double>(command.decibels), 1) +
+                         " dB");
+        break;
+
+      case CommandKind::kStripPan:
+        report_strip(edit_strip(command.pad,
+                                [&](rt::StripConfig& strip) {
+                                  strip.balance = static_cast<float>(command.pan_percent) / 100.0F;
+                                }),
+                     "pad " + std::to_string(command.pad) + " pan " +
+                         (command.pan_percent == 0 ? std::string{"centre"}
+                                                   : std::to_string(command.pan_percent)));
+        break;
+
+      case CommandKind::kStripMute: {
+        bool muted = false;
+        const bool ok = edit_strip(command.pad, [&](rt::StripConfig& strip) {
+          strip.mute =
+              command.toggle == Switch::kToggle ? !strip.mute : command.toggle == Switch::kOn;
+          muted = strip.mute;
+        });
+        report_strip(ok, "pad " + std::to_string(command.pad) + (muted ? " muted" : " unmuted"));
+        break;
+      }
+
+      case CommandKind::kStripSolo: {
+        bool soloed = false;
+        const bool ok = edit_strip(command.pad, [&](rt::StripConfig& strip) {
+          strip.solo =
+              command.toggle == Switch::kToggle ? !strip.solo : command.toggle == Switch::kOn;
+          soloed = strip.solo;
+        });
+        report_strip(ok, "pad " + std::to_string(command.pad) + (soloed ? " soloed" : " unsoloed"));
+        break;
+      }
+
+      case CommandKind::kStripBus:
+        report_strip(
+            edit_strip(command.pad, [&](rt::StripConfig& strip) { strip.bus = command.bus; }),
+            "pad " + std::to_string(command.pad) + " -> bus " +
+                std::string(1, static_cast<char>('a' + command.bus)));
+        break;
+
+      case CommandKind::kStripEq: {
+        const auto index = static_cast<std::size_t>(command.band - 1);
+        const bool ok = edit_strip(command.pad, [&](rt::StripConfig& strip) {
+          if (command.toggle == Switch::kOff) {
+            strip.eq.bands[index].enabled = false;
+            return;
+          }
+          // The TYPE stays with the band -- band 1 is the low shelf whatever it
+          // is tuned to. Letting a verb change a band's type would mean four
+          // bands that are only nominally in the fixed order docs/MIXER.md
+          // specifies.
+          strip.eq.bands[index] =
+              rt::make_eq_band(strip.eq.bands[index].type, command.frequency, command.decibels,
+                               command.shape, options.sample_rate);
+        });
+        report_strip(
+            ok, command.toggle == Switch::kOff
+                    ? "pad " + std::to_string(command.pad) + " eq " + std::to_string(command.band) +
+                          " off"
+                    : "pad " + std::to_string(command.pad) + " eq " + std::to_string(command.band) +
+                          " " +
+                          tui::detail::with_precision(static_cast<double>(command.frequency), 0) +
+                          " Hz " +
+                          tui::detail::with_precision(static_cast<double>(command.decibels), 1) +
+                          " dB");
+        break;
+      }
+
+      case CommandKind::kStripComp: {
+        const bool ok = edit_strip(command.pad, [&](rt::StripConfig& strip) {
+          if (command.toggle == Switch::kOff) {
+            strip.compressor.enabled = false;
+            return;
+          }
+          strip.compressor = rt::make_compressor(command.decibels, command.ratio, command.knee_db,
+                                                 command.makeup_db, frames_of_ms(command.attack_ms),
+                                                 frames_of_ms(command.release_ms));
+        });
+        report_strip(
+            ok, command.toggle == Switch::kOff
+                    ? "pad " + std::to_string(command.pad) + " comp off"
+                    : "pad " + std::to_string(command.pad) + " comp " +
+                          tui::detail::with_precision(static_cast<double>(command.decibels), 1) +
+                          " dB " +
+                          tui::detail::with_precision(static_cast<double>(command.ratio), 1) +
+                          ":1");
+        break;
+      }
+
+      case CommandKind::kLimiter: {
+        const bool on = command.toggle == Switch::kToggle ? !engine.limiter().enabled
+                                                          : command.toggle == Switch::kOn;
+        rt::LimiterConfig limiter = on ? rt::make_limiter(command.decibels) : rt::LimiterConfig{};
+        const bool ok = engine.set_limiter(limiter);
+        report_strip(
+            ok, on ? "limiter on at " +
+                         tui::detail::with_precision(static_cast<double>(command.decibels), 1) +
+                         " dB"
+                   : "limiter off");
+        break;
+      }
+
       case CommandKind::kQuit:
         quit();
         break;
@@ -991,6 +1219,54 @@ int run_app(const AppOptions& options) {
       state.pads[pad].glow_velocity = telemetry.pad_glow[pad].velocity;
       state.pads[pad].glow_sequenced = telemetry.pad_glow[pad].sequenced;
     }
+    // THE MIXER'S VIEW, refreshed only when MIX is up.
+    //
+    // Sixteen strips of EQ response is a few hundred evaluations of a transfer
+    // function, and PERFORM does not draw any of it. Building it every frame
+    // regardless would be paying for a screen nobody is looking at -- the same
+    // reason the waveform is only summarised for the view that is showing.
+    if (state.screen == Screen::kMix) {
+      state.mix.any_solo = false;
+      for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+        const rt::StripConfig strip = engine.strip(static_cast<std::uint8_t>(pad));
+        StripView& view = state.mix.strips[pad];
+        view.name = state.pads[pad].name;
+        view.gain_db = tui::detail::linear_to_db(strip.gain);
+        view.balance = strip.balance;
+        view.peak = telemetry.strip_peak[pad];
+        view.reduction = telemetry.strip_reduction[pad];
+        view.mute = strip.mute;
+        view.solo = strip.solo;
+        view.bus = strip.bus;
+        state.mix.any_solo = state.mix.any_solo || strip.solo;
+
+        view.eq_label = eq_label_of(strip.eq);
+        view.comp_label = comp_label_of(strip.compressor);
+        view.eq_curve = eq_response(strip.eq, options.sample_rate);
+      }
+
+      for (std::size_t bus = 0; bus < rt::kNumBuses; ++bus) {
+        StripView& view = state.mix.buses[bus];
+        view.name = "bus";
+        view.gain_db = tui::detail::linear_to_db(engine.bus_gain(static_cast<std::uint8_t>(bus)));
+        view.peak = telemetry.bus_peak[bus];
+        view.has_balance = false;
+        view.has_bus = false;
+        view.routed = 0;
+        for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+          view.routed += engine.strip(static_cast<std::uint8_t>(pad)).bus == bus ? 1 : 0;
+        }
+      }
+
+      state.mix.master.name = "master";
+      state.mix.master.gain_db = 0.0F;
+      state.mix.master.peak = telemetry.master_peak;
+      state.mix.master.has_balance = false;
+      state.mix.master.has_bus = false;
+      state.mix.limiter_enabled = engine.limiter().enabled;
+      state.mix.limiter_gain = telemetry.limiter_gain;
+    }
+
     state.active_voices = engine.active_voices();
     state.xruns = device.xrun_count();
     state.dropped =
@@ -1114,6 +1390,157 @@ int run_app(const AppOptions& options) {
       // a keystroke aimed at the prompt.
       if (const std::string typed = printable(code); !typed.empty()) {
         state.command_text += typed;
+      }
+      return true;
+    }
+
+    // MIX HAS ITS OWN KEYMAP TOO, for the same reason EDIT does: `s` is pad 10
+    // and `d` is pad 11, so a mixer that bound them to solo and something else
+    // would make two strips unreachable exactly while you were setting their
+    // levels. The pads are off here and SPACE is the transport -- which is the
+    // right thing on this screen anyway, since mixing is done while the pattern
+    // runs rather than by poking individual pads.
+    if (state.screen == Screen::kMix) {
+      if (!typing) {
+        return true;
+      }
+      if (code == kEscape) {
+        state.screen = Screen::kPerform;
+        return true;
+      }
+      if (code == ':') {
+        state.command_active = true;
+        state.command_text.clear();
+        return true;
+      }
+
+      // How many strips this page holds -- the cursor is an index into the PAGE,
+      // not into the pads, so it cannot point past the four buses.
+      const std::size_t page_size =
+          state.mix.page == MixPage::kBuses ? rt::kNumBuses : std::size_t{8};
+
+      // Which pad the cursor is on, or kNumPads on the bus page. Every key below
+      // that edits a strip goes through this, so none of them can act on a pad
+      // number the screen is not showing.
+      const auto cursor_pad = [&]() -> std::size_t {
+        if (state.mix.page == MixPage::kBuses) {
+          return rt::kNumPads;
+        }
+        const std::size_t first = state.mix.page == MixPage::kChannelsHigh ? 8 : 0;
+        return first + state.mix.cursor;
+      };
+
+      switch (code) {
+        case '[':
+        case ']': {
+          // PAGING IS ON `[` AND `]`, NOT ON TAB, and that is a measurement
+          // rather than a preference. Tab never reaches this handler: FTXUI
+          // consumes it before CatchEvent runs, which a probe confirmed by
+          // reporting the code of every other key and nothing for Tab. PERFORM's
+          // own Tab binding -- the sample/pattern panel switch, in this file
+          // since M2 -- is dead for the same reason and was never noticed
+          // because the PTY session only presses it conditionally.
+          //
+          // `[` and `]` also read better here: EDIT already uses them to step
+          // through slices, and they are bidirectional where Tab only cycles one
+          // way through three pages.
+          //
+          // The cursor resets rather than being carried: strip 6 of a channel
+          // page has no counterpart among four buses, and leaving it at 6 would
+          // put it off the end.
+          const bool forward = code == ']';
+          state.mix.page = state.mix.page == MixPage::kChannelsLow
+                               ? (forward ? MixPage::kChannelsHigh : MixPage::kBuses)
+                           : state.mix.page == MixPage::kChannelsHigh
+                               ? (forward ? MixPage::kBuses : MixPage::kChannelsLow)
+                               : (forward ? MixPage::kChannelsLow : MixPage::kChannelsHigh);
+          state.mix.cursor = 0;
+          return true;
+        }
+
+        case 'h':
+          // Clamped, not wrapped -- the same rule EDIT's `[` and `]` follow.
+          if (state.mix.cursor > 0) {
+            state.mix.cursor--;
+          }
+          return true;
+
+        case 'l':
+          if (state.mix.cursor + 1 < page_size) {
+            state.mix.cursor++;
+          }
+          return true;
+
+        case 'k':
+        case 'j': {
+          const float step = code == 'k' ? 1.0F : -1.0F;
+          if (state.mix.page == MixPage::kBuses) {
+            const auto bus = static_cast<std::uint8_t>(state.mix.cursor);
+            const float now = tui::detail::linear_to_db(engine.bus_gain(bus));
+            const float next = std::clamp(now + step, -60.0F, 12.0F);
+            report_strip(engine.set_bus_gain(bus, tui::detail::db_to_linear(next)),
+                         "bus " + std::string(1, static_cast<char>('a' + bus)) + " " +
+                             tui::detail::with_precision(static_cast<double>(next), 1) + " dB");
+            return true;
+          }
+          const std::size_t pad = cursor_pad();
+          float shown = 0.0F;
+          const bool ok = edit_strip(pad + 1, [&](rt::StripConfig& strip) {
+            shown = std::clamp(tui::detail::linear_to_db(strip.gain) + step, -60.0F, 12.0F);
+            strip.gain = tui::detail::db_to_linear(shown);
+          });
+          report_strip(ok, "pad " + std::to_string(pad + 1) + " gain " +
+                               tui::detail::with_precision(static_cast<double>(shown), 1) + " dB");
+          return true;
+        }
+
+        case 'm': {
+          if (state.mix.page == MixPage::kBuses) {
+            set_message("a bus has no mute — mute the strips feeding it", true);
+            return true;
+          }
+          const std::size_t pad = cursor_pad();
+          bool muted = false;
+          const bool ok = edit_strip(pad + 1, [&](rt::StripConfig& strip) {
+            strip.mute = !strip.mute;
+            muted = strip.mute;
+          });
+          report_strip(ok, "pad " + std::to_string(pad + 1) + (muted ? " muted" : " unmuted"));
+          return true;
+        }
+
+        case 's': {
+          if (state.mix.page == MixPage::kBuses) {
+            set_message("a bus has no solo — solo the strips feeding it", true);
+            return true;
+          }
+          const std::size_t pad = cursor_pad();
+          bool soloed = false;
+          const bool ok = edit_strip(pad + 1, [&](rt::StripConfig& strip) {
+            strip.solo = !strip.solo;
+            soloed = strip.solo;
+          });
+          report_strip(ok, "pad " + std::to_string(pad + 1) + (soloed ? " soloed" : " unsoloed"));
+          return true;
+        }
+
+        case 'b': {
+          if (state.mix.page == MixPage::kBuses) {
+            return true;  // a bus does not route to a bus
+          }
+          const std::size_t pad = cursor_pad();
+          std::uint8_t bus = 0;
+          const bool ok = edit_strip(pad + 1, [&](rt::StripConfig& strip) {
+            strip.bus = static_cast<std::uint8_t>((strip.bus + 1) % rt::kNumBuses);
+            bus = strip.bus;
+          });
+          report_strip(ok, "pad " + std::to_string(pad + 1) + " -> bus " +
+                               std::string(1, static_cast<char>('a' + bus)));
+          return true;
+        }
+
+        default:
+          break;
       }
       return true;
     }

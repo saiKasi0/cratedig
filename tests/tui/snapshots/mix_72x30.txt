@@ -27,4 +27,4 @@ cratedig 0.0.1  mix                           ch 1-8 · 5 of 16 ch · solo
 ╰────────╯ ╰────────╯ ╰────────╯ ╰────────╯ ╰────────╯ ╰──────────╯     
                                                                         
                                                                         
-  mix       master -0.6 · lim -2.9 · ch 1-8                     tab page
+  mix       master -0.6 · lim -2.9        [] page · hjkl · m/s mute solo

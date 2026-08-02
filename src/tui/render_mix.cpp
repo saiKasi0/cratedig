@@ -404,22 +404,30 @@ Element render_mix(const UiState& state, std::size_t terminal_columns, std::size
   });
 
   // The facts, in priority order -- dropped from the end when the line is short.
+  //
+  // The PAGE is deliberately not among them. It was, and it cost the middle hint
+  // tier: the header already says "ch 1-8 · 8 of 16 ch" two lines up, so the
+  // mode line was spending six cells repeating it and at 72 columns that was
+  // exactly enough to push the keymap down to "tab page".
   std::vector<std::string> facts;
   facts.push_back("master " + format_dbfs(state.master_peak));
-  if (mix.limiter_enabled) {
-    facts.push_back("lim " + format_dbfs(mix.limiter_gain));
-  } else {
-    facts.push_back("lim off");
-  }
-  facts.push_back(page_name(mix.page));
+  facts.push_back(mix.limiter_enabled ? "lim " + format_dbfs(mix.limiter_gain) : "lim off");
 
   static constexpr std::array<std::string_view, 3> kHints{
-      "tab page · hjkl strip/fader · m mute · s solo · b bus",
-      "tab page · hjkl strip · m/s mute solo",
-      "tab page",
+      "[] page · hjkl strip/fader · m mute · s solo · b bus",
+      "[] page · hjkl · m/s mute solo",
+      "[] page",
   };
 
-  Element line = detail::mode_line(state, terminal_columns, "  mix       ", facts, kHints, 26);
+  // Room for both facts -- "master -0.6 · lim -2.9" is 22 cells -- so the
+  // limiter readout does not vanish the moment the terminal narrows. MEASURED
+  // at 60, 72, 84 and 100 columns rather than reasoned about, because M4.5
+  // proved that arithmetic done in the head puts a fact on the grid at one
+  // tempo and off it at another.
+  constexpr std::size_t kMinFactCells = 22;
+
+  Element line =
+      detail::mode_line(state, terminal_columns, "  mix       ", facts, kHints, kMinFactCells);
 
   static_cast<void>(terminal_rows);
   return ftxui::vbox({

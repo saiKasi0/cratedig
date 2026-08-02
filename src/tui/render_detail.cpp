@@ -41,6 +41,26 @@ std::string format_time(double seconds, double span_seconds) {
   return with_precision(seconds * 1000.0, 1) + "ms";
 }
 
+float db_to_linear(float decibels) {
+  if (!std::isfinite(decibels)) {
+    return 1.0F;
+  }
+  if (decibels == 0.0F) {
+    return 1.0F;  // exactly unity, not almost
+  }
+  return static_cast<float>(std::pow(10.0, static_cast<double>(decibels) / 20.0));
+}
+
+float linear_to_db(float linear) {
+  if (!std::isfinite(linear) || linear <= 0.0F) {
+    return -60.0F;
+  }
+  if (linear == 1.0F) {
+    return 0.0F;  // exactly unity, so a nudge from unity starts from 0.0 and not -0.0000001
+  }
+  return static_cast<float>(20.0 * std::log10(static_cast<double>(linear)));
+}
+
 std::string format_dbfs(float linear) {
   if (linear <= 0.0F) {
     return "-inf";

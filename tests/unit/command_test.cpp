@@ -1,5 +1,7 @@
 #include "tui/command.hpp"
 
+#include "rt/limiter.hpp"
+
 #include <string>
 #include <string_view>
 
@@ -484,4 +486,202 @@ TEST_CASE("edit, with the slice number optional", "[command]") {
   CHECK(parse_command("edit 0").kind == CommandKind::kError);
   CHECK(parse_command("edit x").kind == CommandKind::kError);
   CHECK(parse_command("perform").kind == CommandKind::kPerform);
+}
+
+// -- the mixer ---------------------------------------------------------------
+
+TEST_CASE("mix opens the screen, and names a page", "[command]") {
+  const Command open = parse_command("mix");
+  REQUIRE(open.kind == CommandKind::kMix);
+  CHECK(open.pattern == 0);
+
+  const Command buses = parse_command("mix bus");
+  REQUIRE(buses.kind == CommandKind::kMix);
+  CHECK(buses.pattern == 1);
+  CHECK(parse_command("mix buses").pattern == 1);
+
+  CHECK(parse_command("mix sideways").kind == CommandKind::kError);
+}
+
+TEST_CASE("gain takes a pad or a bus", "[command]") {
+  const Command pad = parse_command("gain 3 -6");
+  REQUIRE(pad.kind == CommandKind::kStripGain);
+  CHECK(pad.pad == 3);
+  CHECK_FALSE(pad.bus_target);
+  CHECK(pad.decibels == -6.0F);
+
+  // Fractions survive: a mixer that could only move in whole decibels would be
+  // a mixer nobody could balance two similar sounds with.
+  CHECK(parse_command("gain 3 -6.5").decibels == -6.5F);
+  CHECK(parse_command("gain 3 +2.25").decibels == 2.25F);
+  CHECK(parse_command("gain 3 0").decibels == 0.0F);
+
+  const Command bus = parse_command("gain bus c -3");
+  REQUIRE(bus.kind == CommandKind::kStripGain);
+  CHECK(bus.bus_target);
+  CHECK(bus.bus == 2);
+  CHECK(bus.decibels == -3.0F);
+  CHECK(parse_command("gain bus A 0").bus == 0);
+
+  // The bus form is SPELLED OUT rather than overloading the first argument. If
+  // `gain a -3` were legal, a typo in a pad number would silently address a bus.
+  CHECK(parse_command("gain a -3").kind == CommandKind::kError);
+
+  // Out of range is refused with the range named, not clamped: a mistyped -600
+  // that quietly became -60 would look like the fader had a mind of its own.
+  const Command loud = parse_command("gain 3 20");
+  REQUIRE(loud.kind == CommandKind::kError);
+  CHECK(loud.message.find("+12") != std::string::npos);
+  CHECK(parse_command("gain 3 -600").kind == CommandKind::kError);
+  CHECK(parse_command("gain 0 -6").kind == CommandKind::kError);
+  CHECK(parse_command("gain 17 -6").kind == CommandKind::kError);
+  CHECK(parse_command("gain 3 loud").kind == CommandKind::kError);
+  CHECK(parse_command("gain 3").kind == CommandKind::kError);
+  CHECK(parse_command("gain bus e 0").kind == CommandKind::kError);
+}
+
+TEST_CASE("pan takes a percentage, or c for centre", "[command]") {
+  const Command left = parse_command("pan 4 -50");
+  REQUIRE(left.kind == CommandKind::kStripPan);
+  CHECK(left.pad == 4);
+  CHECK(left.pan_percent == -50);
+
+  CHECK(parse_command("pan 4 100").pan_percent == 100);
+
+  // `c` rather than 0, because "centre" is what the strip reads back and typing
+  // 0 to mean it is a guess the readout would not confirm.
+  const Command centre = parse_command("pan 4 c");
+  REQUIRE(centre.kind == CommandKind::kStripPan);
+  CHECK(centre.pan_percent == 0);
+
+  CHECK(parse_command("pan 4 -101").kind == CommandKind::kError);
+  CHECK(parse_command("pan 4 hard").kind == CommandKind::kError);
+  CHECK(parse_command("pan 4").kind == CommandKind::kError);
+}
+
+TEST_CASE("mute and solo flip by default and can be stated", "[command]") {
+  // Bare flips it -- the same tri-state `metro` uses, and for the same reason:
+  // the parser does not know the current setting and must not guess.
+  const Command flip = parse_command("mute 5");
+  REQUIRE(flip.kind == CommandKind::kStripMute);
+  CHECK(flip.pad == 5);
+  CHECK(flip.toggle == tui::Switch::kToggle);
+
+  CHECK(parse_command("mute 5 on").toggle == tui::Switch::kOn);
+  CHECK(parse_command("mute 5 off").toggle == tui::Switch::kOff);
+
+  const Command solo = parse_command("solo 12 on");
+  REQUIRE(solo.kind == CommandKind::kStripSolo);
+  CHECK(solo.pad == 12);
+  CHECK(solo.toggle == tui::Switch::kOn);
+
+  CHECK(parse_command("mute").kind == CommandKind::kError);
+  CHECK(parse_command("mute 0").kind == CommandKind::kError);
+  CHECK(parse_command("solo 5 maybe").kind == CommandKind::kError);
+}
+
+TEST_CASE("bus routes a pad", "[command]") {
+  const Command route = parse_command("bus 7 d");
+  REQUIRE(route.kind == CommandKind::kStripBus);
+  CHECK(route.pad == 7);
+  CHECK(route.bus == 3);
+
+  CHECK(parse_command("bus 7 B").bus == 1);
+  CHECK(parse_command("bus 7 e").kind == CommandKind::kError);
+  CHECK(parse_command("bus 7").kind == CommandKind::kError);
+  CHECK(parse_command("bus 0 a").kind == CommandKind::kError);
+}
+
+TEST_CASE("eq sets a band or switches it off", "[command]") {
+  const Command band = parse_command("eq 3 2 800 -4 1.2");
+  REQUIRE(band.kind == CommandKind::kStripEq);
+  CHECK(band.pad == 3);
+  CHECK(band.band == 2);
+  CHECK(band.frequency == 800.0F);
+  CHECK(band.decibels == -4.0F);
+  CHECK(band.shape == 1.2F);
+  CHECK(band.toggle == tui::Switch::kOn);
+
+  const Command off = parse_command("eq 3 2 off");
+  REQUIRE(off.kind == CommandKind::kStripEq);
+  CHECK(off.band == 2);
+  CHECK(off.toggle == tui::Switch::kOff);
+
+  // The band range is the fixed four of docs/MIXER.md, not an arbitrary count.
+  CHECK(parse_command("eq 3 0 800 -4 1.2").kind == CommandKind::kError);
+  CHECK(parse_command("eq 3 5 800 -4 1.2").kind == CommandKind::kError);
+
+  // Gain is bounded by rt::kMaxEqGainDb, and the message says so.
+  const Command loud = parse_command("eq 3 2 800 40 1.2");
+  REQUIRE(loud.kind == CommandKind::kError);
+  CHECK(loud.message.find("24") != std::string::npos);
+
+  CHECK(parse_command("eq 3 2 800 -4").kind == CommandKind::kError);
+  CHECK(parse_command("eq 3 2 0 -4 1.2").kind == CommandKind::kError);
+  CHECK(parse_command("eq 3 2 800 -4 0").kind == CommandKind::kError);
+}
+
+TEST_CASE("comp takes a threshold and ratio, with defaults for the rest", "[command]") {
+  const Command basic = parse_command("comp 3 -18 4");
+  REQUIRE(basic.kind == CommandKind::kStripComp);
+  CHECK(basic.pad == 3);
+  CHECK(basic.decibels == -18.0F);
+  CHECK(basic.ratio == 4.0F);
+  CHECK(basic.toggle == tui::Switch::kOn);
+
+  // Defaults are STATED by the parser rather than left to the engine, so that
+  // `comp 3 -18 4` builds the same compressor every time it is typed.
+  CHECK(basic.knee_db == 6.0F);
+  CHECK(basic.makeup_db == 0.0F);
+  CHECK(basic.attack_ms == 5.0F);
+  CHECK(basic.release_ms == 120.0F);
+
+  const Command full = parse_command("comp 3 -18 4 3 6 1 200");
+  CHECK(full.knee_db == 3.0F);
+  CHECK(full.makeup_db == 6.0F);
+  CHECK(full.attack_ms == 1.0F);
+  CHECK(full.release_ms == 200.0F);
+
+  CHECK(parse_command("comp 3 off").toggle == tui::Switch::kOff);
+
+  // The ranges are MIXER.md's, and refused rather than clamped.
+  CHECK(parse_command("comp 3 -18 30").kind == CommandKind::kError);
+  CHECK(parse_command("comp 3 -18 0.5").kind == CommandKind::kError);
+  CHECK(parse_command("comp 3 5 4").kind == CommandKind::kError);
+  CHECK(parse_command("comp 3 -70 4").kind == CommandKind::kError);
+  CHECK(parse_command("comp 3 -18").kind == CommandKind::kError);
+}
+
+TEST_CASE("limit reaches the master limiter", "[command]") {
+  // Without this verb the limiter T6 built is unreachable -- off by default and
+  // with nothing able to turn it on, which is a feature that exists only in the
+  // tests.
+  const Command flip = parse_command("limit");
+  REQUIRE(flip.kind == CommandKind::kLimiter);
+  CHECK(flip.toggle == tui::Switch::kToggle);
+  CHECK(flip.decibels == rt::kDefaultCeilingDb);
+
+  CHECK(parse_command("limit off").toggle == tui::Switch::kOff);
+
+  const Command on = parse_command("limit on -1.5");
+  REQUIRE(on.kind == CommandKind::kLimiter);
+  CHECK(on.toggle == tui::Switch::kOn);
+  CHECK(on.decibels == -1.5F);
+
+  // A ceiling above 0 dBFS is not a ceiling.
+  CHECK(parse_command("limit on 3").kind == CommandKind::kError);
+  CHECK(parse_command("limit maybe").kind == CommandKind::kError);
+}
+
+TEST_CASE("the mixer verbs do not collide with what was already there", "[command]") {
+  // `bus` and `mix` are new words, but `stop`, `pad` and `slot` were not -- and
+  // a parser that started matching a prefix would break them silently.
+  CHECK(parse_command("stop").kind == CommandKind::kStop);
+  CHECK(parse_command("pad gate 3").kind == CommandKind::kPadGate);
+  CHECK(parse_command("metro on").kind == CommandKind::kMetronome);
+  CHECK(parse_command("perform").kind == CommandKind::kPerform);
+
+  // And an unknown verb is still refused rather than falling into a mixer verb.
+  CHECK(parse_command("mixer").kind == CommandKind::kError);
+  CHECK(parse_command("gains 3 -6").kind == CommandKind::kError);
 }

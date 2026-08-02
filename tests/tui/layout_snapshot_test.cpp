@@ -1370,3 +1370,34 @@ TEST_CASE("the EQ curve follows the published response", "[tui]") {
   CHECK(with_flat != with_boost);
   CHECK(with_flat != with_cut);
 }
+
+TEST_CASE("the MIX mode line keeps its facts and picks a hint tier that fits", "[tui]") {
+  // MEASURED, NOT REASONED ABOUT. M4.5 proved that hand arithmetic on this line
+  // puts a fact on the design grid at one tempo and off it at another, so the
+  // widths that matter are checked rather than argued.
+  for (const int columns : {60, 72, 84, 100}) {
+    const ftxui::Screen screen = render_screen(mix_state(columns), columns, 30);
+    const std::string line = screen_row(screen, 29);
+    INFO("columns " << columns << "\n[" << line << "]");
+
+    // Both facts survive at every width the layout supports. The limiter readout
+    // is the one that would go first, and it is the one that says whether the
+    // master is being held down at all.
+    CHECK(line.find("master") != std::string::npos);
+    CHECK(line.find("lim") != std::string::npos);
+
+    // And some keymap is always shown -- a mode line with no hint is a mode line
+    // that has stopped doing its second job.
+    CHECK(line.find("[] page") != std::string::npos);
+  }
+
+  // The widest tier is what the design grid gets, and it names every key MIX
+  // binds. If a key is added without extending this, the hint silently stops
+  // describing the screen.
+  const std::string wide = screen_row(render_screen(mix_state(100), 100, 30), 29);
+  for (const std::string& key : {std::string{"[] page"}, std::string{"hjkl"}, std::string{"m mute"},
+                                 std::string{"s solo"}, std::string{"b bus"}}) {
+    INFO("wide tier: [" << wide << "] missing " << key);
+    CHECK(wide.find(key) != std::string::npos);
+  }
+}

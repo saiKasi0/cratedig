@@ -51,6 +51,18 @@ enum class CommandKind : std::uint8_t {
   // a fraction of a beat.
   kStop,
 
+  // The mixer, M5. `pad` is 1-based as typed throughout, matching every other
+  // verb here; `bus` is 0-based because a-d is not a number anyone types twice.
+  kMix,        // open MIX; `pattern` reused as the page, 0 = channels, 1 = buses
+  kStripGain,  // `pad` (or `bus` when `bus_target`), `decibels`
+  kStripPan,   // `pad`, `pan_percent` in [-100, 100]
+  kStripMute,  // `pad`, `toggle`
+  kStripSolo,  // `pad`, `toggle`
+  kStripBus,   // `pad` -> `bus`
+  kStripEq,    // `pad`, `band`, and either `toggle == kOff` or the three values
+  kStripComp,  // `pad`, and either `toggle == kOff` or the four values
+  kLimiter,    // `toggle`, and `decibels` as the ceiling when turning it on
+
   kQuit,
 };
 
@@ -99,6 +111,37 @@ struct Command {
   // command, and for `song clear` -- which is kSongClear rather than an empty
   // kSong, so "no song" cannot be confused with "a song nobody filled in".
   std::vector<std::uint8_t> song;
+
+  // -- the mixer -------------------------------------------------------------
+  //
+  // Denominated the way a person types them: decibels, percent, a bus letter.
+  // The conversion to rt::StripConfig's linear gains and [-1, 1] balance happens
+  // in the app, which is where the engine is -- the parser's job is to decide
+  // what was MEANT, and "-6 dB" is what was meant.
+  float decibels = 0.0F;
+  int pan_percent = 0;
+
+  // 0-based, so it indexes rt::kNumBuses directly. `bus_target` says the command
+  // is ABOUT a bus rather than about a pad, which `gain` needs and the others do
+  // not: `bus 3 a` routes pad 3, `gain bus a -6` moves bus A's own fader.
+  std::uint8_t bus = 0;
+  bool bus_target = false;
+
+  // EQ band, 1-based as typed. 1 is the low shelf, 4 the high shelf.
+  std::uint8_t band = 0;
+
+  // EQ: frequency, gain and shape (Q for the peaking bands, S for the shelves).
+  float frequency = 0.0F;
+  float shape = 0.0F;
+
+  // Compressor, in the units MIXER.md states them in. Times are milliseconds
+  // here and frames in rt::CompressorConfig, because a person thinks in
+  // milliseconds and the DSP must not depend on the block size.
+  float ratio = 1.0F;
+  float knee_db = 0.0F;
+  float makeup_db = 0.0F;
+  float attack_ms = 0.0F;
+  float release_ms = 0.0F;
 
   // For kError, what was wrong -- phrased for the mode line, so it names the
   // correct spelling rather than just refusing.
