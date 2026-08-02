@@ -319,14 +319,36 @@ void place_handle(std::string& row, std::size_t column, std::string_view left,
   // precision. These are POSITIONS in a file, and the two of them are read
   // against each other and against the slice table below -- a unit that changes
   // with the zoom would make the same boundary read differently at two zooms.
-  const std::string start =
-      "start " + with_precision(static_cast<double>(slice.start_frame) / rate, 3) + "s";
-  const std::string end =
-      "end " + with_precision(static_cast<double>(slice.end_frame) / rate, 3) + "s";
+  //
+  // AND THE FRAME NUMBER, which is the unit `h` and `l` actually move in.
+  //
+  // Without it a nudge is invisible: one frame is 1/48000 of a second, three
+  // decimals resolve a MILLISECOND, and it therefore takes about forty-eight
+  // presses to change a digit. Measured, after "h and l aren't working" was
+  // reported: forty presses moved the readout from 0.125s to 0.124s and nothing
+  // else on the screen said a thing. The key was working the whole time, which
+  // is the worst way for a control to be broken -- it is doing what you asked
+  // and denying it.
+  //
+  // The mockup's own caption is `h -1 ┻ +1 l`, and minus one FRAME is what it
+  // means, so the frame count is the primary number and the seconds are the
+  // secondary one.
+  const std::string start = "start " + std::to_string(slice.start_frame) + " · " +
+                            with_precision(static_cast<double>(slice.start_frame) / rate, 3) + "s";
+  const std::string end = "end " + std::to_string(slice.end_frame) + " · " +
+                          with_precision(static_cast<double>(slice.end_frame) / rate, 3) + "s";
+
+  // Frames alone when both together will not fit without colliding. A row that
+  // overlaps is worse than a row that is terse, and the frame count is the half
+  // that answers "did my keypress land".
+  const std::size_t span = end_column > start_column ? end_column - start_column : 0;
+  const bool room = span >= (utf8_cells(start) / 2) + (utf8_cells(end) / 2) + 2;
+  const std::string start_text = room ? start : "start " + std::to_string(slice.start_frame);
+  const std::string end_text = room ? end : "end " + std::to_string(slice.end_frame);
 
   std::string row(wide, ' ');
-  place_at(row, start_column, start, utf8_cells(start) / 2);
-  place_at(row, end_column, end, utf8_cells(end) / 2);
+  place_at(row, start_column, start_text, utf8_cells(start_text) / 2);
+  place_at(row, end_column, end_text, utf8_cells(end_text) / 2);
   return row;
 }
 

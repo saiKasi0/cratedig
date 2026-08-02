@@ -3,11 +3,15 @@
 the terminal crate-digging DAW — pull samples in, chop them, play chops on pads,
 sequence, mix, export. keep it CLI smooth.
 
-**Status: pre-alpha (M5 — mixer & built-in DSP).** Loads a file, draws it, finds
-the transients, cuts them into slices, lays them across sixteen pads and plays
-them; records patterns and chains them into a song; and mixes the result through
-sixteen channel strips with four-band EQ, a compressor, four buses and a master
-limiter. No recording, no export and one file at a time yet.
+**Status: pre-alpha (M5.5 — the crate).** Loads files, draws them, finds the
+transients, cuts them into slices, lays them across sixteen pads and plays them;
+records patterns and chains them into a song; mixes the result through sixteen
+channel strips with four-band EQ, a compressor, four buses and a master limiter;
+and holds several files at once, so one bank can mix a break, a vocal take and a
+one-shot.
+
+**Not yet:** recording your own audio (M6 — see *What is not built* below),
+export, and yt-dlp import.
 
 ## Quick start
 
@@ -43,6 +47,15 @@ t                      bring up the pattern lane, and write the selected pad
 space                  play / stop
 :bpm 92.5              set the tempo
 :song 1 2              chain pattern 1 into pattern 2
+```
+
+Then bring in more records:
+
+```
+:load ~/breaks/amen.wav   add a file — it does not replace what is loaded
+:files                    the crate, with a * on the one you are looking at
+:file 2                   look at another one
+:unload                   drop the one showing; pads holding it keep playing
 ```
 
 Then mix it:
@@ -81,6 +94,7 @@ rather than pretending.
 | `+` `-` · `0` | zoom · fit the whole file |
 | `g` `G` | jump to the start · the end |
 | `\` | switch the right-hand panel |
+| `h` `l` | scroll — only once `+` has zoomed in; the whole file is on screen by default |
 | `.` | stop every sounding voice, and the transport |
 | `esc` | quit |
 
@@ -97,11 +111,16 @@ keyboard. `f` is pad 12, so "fit" is `0` — the one digit the map does not clai
 | | |
 |---|---|
 | `[` `]` | previous / next slice |
-| `h` `l` | nudge the slice **start** back / forward one frame |
+| `h` `l` | nudge the slice **start** back / forward one frame — the readout shows the frame number, so a single press is visible |
 | `H` `L` | nudge the slice **end** |
+| `space` | play the slice — through its pad if it has one, auditioned if it has not |
 | `z` | zoom in; once there is no more to see, reframe the slice |
 | `u` | undo the last nudge |
 | `esc` | back to PERFORM |
+
+A chop of more than sixteen leaves the rest on no pad. They are still editable,
+drawable and now **playable**: `space` auditions them on their own voices, so a
+preview cannot light a pad or be silenced by one's mute.
 
 ## Commands
 
@@ -114,6 +133,10 @@ keyboard. `f` is pad 12, so "fit" is `0` — the one digit the map does not clai
 | `:pad gate [N]` | pad N (or all of them) sustaings while held |
 | `:pad oneshot [N]` | pad N (or all of them) plays to the end of its slice |
 | `:edit [S]` | open EDIT, on slice S or on the current one |
+| `:load <path>` | add a file to the crate — the rest of the line is the path, spaces and all |
+| `:files` · `:pool` | list the crate |
+| `:file N` | look at another loaded file |
+| `:unload [N]` | drop a file; pads holding it keep playing |
 | `:perform` | back to PERFORM |
 | `:bpm N` | tempo, 20–300, one or two decimals (`:bpm 92.5`) |
 | `:swing N` | shift the odd steps late by N% of a step, up to 75 |
@@ -152,6 +175,21 @@ cratedig [file]
   --list-devices        list output devices and exit
   --version             version, FFmpeg build and license, then exit
 ```
+
+## What is not built
+
+Written down because the difference between "not yet" and "broken" is the whole
+point of a status section.
+
+| | |
+|---|---|
+| **Recording your own audio** | M6, and it goes first in that milestone. A sampler that cannot sample is a player. Today material comes from a file on disk; `:load` is the only way in. |
+| **Export / bounce** | M6. `Engine::render()` already works with no device, which is what an offline bounce needs, but nothing writes a file yet. |
+| **yt-dlp import** | M6, using a yt-dlp you install yourself (see `docs/LICENSING.md`). |
+| **Banks and a 32-pad mode** | M6. Sixteen pads at a time; `:slot assign 17-32 1` reaches further slices in one line. |
+| **Saturation, sends, reverb, delay** | M5.2. The mixer's graph already has the attachment points, which is why they can land without re-cutting it. |
+| **A file browser** | M5.5, in progress. `:load <path>` is the way in until then. |
+| **Lua config and scripting** | M7. |
 
 ## Building and testing
 

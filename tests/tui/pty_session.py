@@ -228,14 +228,22 @@ def write_fixture_wav(path: Path) -> None:
         out.writeframes(bytes(samples))
 
 
-def start_time_on(painted: str) -> str:
-    """The EDIT screen's `start N.NNNs` readout, or "" if it is not up.
+def start_frame_on(painted: str) -> str:
+    """The EDIT screen's `start N` frame readout, or "" if it is not up.
 
     Read off the painted grid rather than tracked alongside it: the point is
     that a nudge reaches the screen, and a value this test computed itself would
     prove only that this test can add.
+
+    THE FRAME NUMBER, not the seconds. This used to read `start N.NNNs`, and a
+    single nudge could not move it: one frame is 1/48000 of a second and the
+    readout resolves a millisecond, so the test pressed the key TWO HUNDRED times
+    to make four milliseconds of difference. That is a test working around a
+    usability bug instead of reporting one -- "h and l aren't working" was
+    eventually reported by a person instead. The readout now leads with the frame
+    number, so one press is one visible change, and this asserts that.
     """
-    match = re.search(r"start (\d+\.\d+)s", painted)
+    match = re.search(r"start (\d+) ", painted)
     return match.group(1) if match else ""
 
 
@@ -400,22 +408,25 @@ def main() -> int:
         if "slice 02" not in stepped:
             command_failures.append("`]` did not step to the next slice")
 
-        # 200 single-frame nudges is 4 ms at 48 kHz, which moves the third
-        # decimal of the readout by four. Forty would move it by one, and a
-        # rounding boundary could then hide the whole effect.
-        before_nudge = start_time_on(stepped)
-        alive = send("l" * 200)
+        # ONE nudge, and one visible change. The readout leads with the frame
+        # number now, so there is no reason to press the key two hundred times to
+        # make the effect big enough to see -- and pressing it once is what a
+        # person does, which makes this the thing worth asserting.
+        before_nudge = start_frame_on(stepped)
+        if not before_nudge:
+            command_failures.append("EDIT did not show the slice start as a frame number")
+        alive = send("l")
         nudged = screen_now()
-        if start_time_on(nudged) == before_nudge:
-            command_failures.append("nudging the start boundary changed nothing on screen")
+        if start_frame_on(nudged) == before_nudge:
+            command_failures.append("one nudge of the start boundary changed nothing on screen")
         if "undo" not in nudged:
             command_failures.append("nudging left nothing to undo")
 
         alive = send("u" * 200)
         undone = screen_now()
-        if start_time_on(undone) != before_nudge:
+        if start_frame_on(undone) != before_nudge:
             command_failures.append(
-                f"undo did not restore the boundary: {start_time_on(undone)!r} "
+                f"undo did not restore the boundary: {start_frame_on(undone)!r} "
                 f"!= {before_nudge!r}"
             )
 

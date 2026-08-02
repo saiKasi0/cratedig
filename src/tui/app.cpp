@@ -2046,12 +2046,26 @@ int run_app(const AppOptions& options) {
     switch (code) {
       case 'h':
       case kKeyArrowLeft:
-        state.view.scroll_by(-step, total_frames);
-        break;
       case 'l':
-      case kKeyArrowRight:
-        state.view.scroll_by(step, total_frames);
+      case kKeyArrowRight: {
+        // SAYS SO WHEN THERE IS NOWHERE TO GO.
+        //
+        // At the default zoom the whole file is on screen, so scrolling is
+        // correctly a no-op -- and a key that correctly does nothing is
+        // indistinguishable from a key that is broken. "h and l aren't working"
+        // was reported against exactly this: they work, and at fit-to-file zoom
+        // there is nothing for them to do, and nothing said so.
+        //
+        // Only when it cannot move. A message on every scroll would be noise on
+        // the one screen that is meant to stay quiet while you play.
+        const std::size_t before = state.view.first_frame;
+        const bool left = code == 'h' || code == kKeyArrowLeft;
+        state.view.scroll_by(left ? -step : step, total_frames);
+        if (state.view.first_frame == before && state.view.frames_visible >= total_frames) {
+          set_message("the whole file is on screen — + to zoom in first", false);
+        }
         break;
+      }
       case 'H':
         state.view.scroll_by(-static_cast<std::ptrdiff_t>(state.view.frames_visible), total_frames);
         break;
