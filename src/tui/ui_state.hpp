@@ -254,12 +254,6 @@ struct EditState {
 
   EnvelopeView envelope;
 
-  // Which pad plays this slice, if any. Shown in the header and in the table's
-  // `pad` column, because "which key makes this sound" is the question EDIT is
-  // usually being asked in service of.
-  std::uint8_t pad = 0;
-  bool pad_known = false;
-
   // How many boundary nudges are undoable. Shown rather than acted on -- `u`
   // does the acting, and a count is what tells you whether it will.
   std::size_t undo_depth = 0;

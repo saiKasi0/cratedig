@@ -296,8 +296,6 @@ void fill_bins(tui::UiState& state, int columns) {
                                           .choke_group = 1,
                                           .gain = 1.0F,
                                           .pitch_ratio = 1.0F};
-  state.edit.pad = 5;
-  state.edit.pad_known = true;
   state.edit.undo_depth = 4;
 
   // The real crossings of the real fixture, so the ruler is a picture of the

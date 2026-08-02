@@ -565,13 +565,14 @@ def main() -> int:
 
     if alive:
         # A SLICE THAT IS NOT ON A PAD. Twenty chops onto sixteen pads leaves
-        # four that nothing can play: every route to sound is a pad trigger, so
-        # a slice no pad holds is editable, drawable and silent.
+        # four of them, and until M5.5 nothing could play those: every route to
+        # sound was a pad trigger, so a slice no pad held was editable, drawable
+        # and silent. M4.5 made this key SAY so, which was as far as it could go,
+        # and this session pinned that message.
         #
-        # That is a real limit until M5.5 gives auditioning its own path. What is
-        # checked here is that EDIT SAYS SO -- the key did nothing at all before,
-        # which reads as EDIT being broken on those slices rather than as the
-        # slice being unreachable.
+        # IT NOW PLAYS THEM. The audition path gives a preview its own voices out
+        # of its own pool, so the slice is heard without borrowing a pad -- and
+        # the message says what happened rather than why it could not.
         alive = send(":chop grid 20\r")
         if "20 slices" not in screen_now():
             command_failures.append(":chop grid 20 did not report twenty slices")
@@ -581,20 +582,22 @@ def main() -> int:
             command_failures.append("`:edit 20` did not open EDIT on slice 20")
 
         alive = send(" ")
-        unreachable = screen_now()
-        if "not on a pad" not in unreachable:
-            command_failures.append("auditioning a slice with no pad said nothing")
-        if ":slot assign 20" not in unreachable:
-            command_failures.append("the message does not say how to reach the slice")
+        padless = screen_now()
+        if "auditioning slice 20" not in padless:
+            command_failures.append("space on a padless slice did not audition it")
+        if ":slot assign 20" not in padless:
+            command_failures.append("the message no longer says how to keep the slice")
 
-        # And a slice that IS on a pad still auditions silently -- no message,
-        # because nothing went wrong. Without this the check above would pass on
-        # a build that had simply broken auditioning altogether.
+        # And a slice that IS on a pad still triggers that pad -- no audition
+        # message, because a pad is the better answer when there is one: it goes
+        # through that pad's strip, so you hear it as it will sound in the mix.
+        # Without this the check above would pass on a build that auditioned
+        # everything and had stopped using the pads at all.
         alive = send("\x1b")
         alive = send(":edit 3\r")
         alive = send(" ")
-        if "not on a pad" in screen_now():
-            command_failures.append("auditioning slice 3, which is on pad 3, was refused")
+        if "auditioning" in screen_now():
+            command_failures.append("slice 3 is on a pad but was auditioned instead of triggered")
 
         alive = send("\x1b")  # out of EDIT before the quit below
 

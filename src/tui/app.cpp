@@ -639,7 +639,6 @@ int run_app(const AppOptions& options) {
   // answer only changes when one of those two does.
   auto refresh_edit = [&](std::size_t columns) {
     state.edit.zero_crossings.clear();
-    state.edit.pad_known = false;
     state.edit.undo_depth = undo.size();
     if (current_sample() == nullptr || state.edit.slice >= state.slices.size()) {
       return;
@@ -664,9 +663,6 @@ int run_app(const AppOptions& options) {
     if (config == nullptr) {
       return;
     }
-    state.edit.pad = pad;
-    state.edit.pad_known = true;
-
     // Frames to milliseconds happens HERE, on the thread that knows the rate.
     // UiState carries times so the renderer -- and therefore every snapshot
     // test -- needs no rate at all.
@@ -1763,21 +1759,42 @@ int run_app(const AppOptions& options) {
       if (code == kSpace) {
         const std::uint8_t pad = pad_for_slice(state, state.current_file, state.edit.slice);
         if (pad >= rt::kNumPads) {
-          // A SLICE NOT ON A PAD CANNOT BE HEARD, because every route to sound
-          // here is a pad trigger: the audio thread plays m_pads[N], so there is
-          // nothing to address a slice that no pad holds. A chop of more than
-          // sixteen leaves the rest exactly there -- editable, drawable, and
-          // silent.
+          // A SLICE NOT ON A PAD IS AUDITIONED, as of M5.5.
           //
-          // Said rather than ignored. The key did nothing at all before, which
-          // reads as EDIT being broken on those slices rather than as the slice
-          // being unreachable. Auditioning without a pad is M5.5's, alongside
-          // the browser that needs the same mechanism to preview a file it has
-          // not loaded.
-          set_message("slice " + std::to_string(state.edit.slice + 1) +
-                          " is not on a pad — :slot assign " +
-                          std::to_string(state.edit.slice + 1) + " <pad> to hear it",
-                      true);
+          // It used to be unreachable: every route to sound was a pad trigger,
+          // the audio thread played m_pads[N], and there was nothing to address
+          // material no pad held -- so a chop of more than sixteen left the rest
+          // editable, drawable and silent. M4.5 made this key SAY that rather
+          // than do nothing, which was as far as it could go. The audition path
+          // is the mechanism it was waiting for.
+          //
+          // THROUGH THE AUDITION LANE, not through some pad borrowed for the
+          // purpose: a preview must not light a pad it does not belong to, and
+          // must not be silenced by that pad's mute.
+          const ingest::PoolEntry* file = entry();
+          if (file == nullptr || state.edit.slice >= file->slices.size()) {
+            set_message("nothing to audition", true);
+            return true;
+          }
+          const ingest::Slice& slice = file->slices.slices[state.edit.slice];
+
+          // Built from the file and the slice, with the defaults a pad would
+          // have. Not copied from a pad's config: there is no pad, and borrowing
+          // a neighbouring one's envelope would make the preview sound like
+          // something the slice is not.
+          rt::PadConfig preview{};
+          preview.sample = file->sample;
+          preview.start_frame = slice.start_frame;
+          preview.end_frame = slice.end_frame;
+
+          if (!engine.audition(std::make_shared<const rt::PadConfig>(std::move(preview)))) {
+            set_message("audition is busy — try again", true);
+            return true;
+          }
+          set_message("auditioning slice " + std::to_string(state.edit.slice + 1) +
+                          " (on no pad — :slot assign " + std::to_string(state.edit.slice + 1) +
+                          " <pad> to keep it)",
+                      false);
           return true;
         }
         static_cast<void>(
