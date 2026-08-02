@@ -21,6 +21,21 @@ Engine::Engine(const Config& config) noexcept : m_config(config) {
     glow.store(kNeverTriggered, std::memory_order_relaxed);
   }
 
+  // Gain reduction is UNITY when there is none, and a default-constructed float
+  // is zero -- which reads as "this strip is pulling everything down to
+  // silence". Both the audio thread's copy and the published one, because the
+  // published one is what the interface reads and nothing writes it until the
+  // first block renders: an engine that has never rendered would otherwise show
+  // sixteen strips crushed flat.
+  //
+  // BEFORE the early return below, so a degenerate config gets it too. The
+  // interface reads telemetry from any engine it is handed, working graph or
+  // not.
+  m_strip_reduction.fill(1.0F);
+  for (std::atomic<float>& reduction : m_published.strip_reduction) {
+    reduction.store(1.0F, std::memory_order_relaxed);
+  }
+
   // The mixer graph, allocated ONCE, here, on the control thread. This is the
   // whole reason Config carries max_block_frames: render() asserts against it,
   // so a buffer sized for it can never be overrun by a block the device asks
@@ -171,6 +186,45 @@ void Engine::apply_eq(std::span<float* const> buffer, const rt::EqConfig& eq, st
   }
 }
 
+void Engine::apply_compressor(std::span<float* const> buffer, const rt::CompressorConfig& config,
+                              std::size_t pad, std::size_t num_frames) noexcept {
+  rt::Compressor& compressor = m_strip_compressor[pad];
+
+  if (!config.enabled) {
+    // Bit-exact bypass, and the envelope reset rather than frozen -- the same
+    // rule as a bypassed EQ band, for the same reason: a frozen envelope would
+    // make the first block after re-enabling depend on how long ago it was
+    // switched off.
+    compressor.reset();
+    m_strip_reduction[pad] = 1.0F;
+    return;
+  }
+
+  float lowest = 1.0F;
+  for (std::size_t frame = 0; frame < num_frames; ++frame) {
+    // ONE DETECTOR ACROSS THE CHANNELS, and one gain applied to all of them.
+    // Per-channel compression would move a hard-panned snare toward the middle
+    // every time it hit, which is the stereo-image problem docs/MIXER.md names.
+    float detector = 0.0F;
+    for (const float* samples : buffer) {
+      const float value = samples[frame];
+      detector = std::max(detector, value < 0.0F ? -value : value);
+    }
+
+    const float gain = compressor.process(config, detector);
+    for (float* samples : buffer) {
+      samples[frame] *= gain;
+    }
+
+    // Reported without the makeup, so the meter shows REDUCTION rather than the
+    // net of two independent decisions -- a compressor pulling 6 dB down with
+    // 6 dB of makeup is doing something, and a meter reading unity would say it
+    // was not.
+    lowest = std::min(lowest, config.makeup_gain > 0.0F ? gain / config.makeup_gain : gain);
+  }
+  m_strip_reduction[pad] = lowest;
+}
+
 rt::StripConfig Engine::strip_config(std::size_t pad) const noexcept {
   const std::shared_ptr<const rt::PadConfig>& config = m_pads[pad];
   return config == nullptr ? rt::StripConfig{} : config->strip;
@@ -213,6 +267,7 @@ void Engine::mix_graph(std::span<float* const> channels, std::size_t num_frames)
     // "audible".
     apply_gain(buffer, rt::clamp_strip_gain(strip.gain), num_frames);
     apply_eq(buffer, strip.eq, pad, num_frames);
+    apply_compressor(buffer, strip.compressor, pad, num_frames);
     apply_balance(buffer, rt::clamp_strip_balance(strip.balance), num_frames);
 
     // POST-FADER, and zero when the strip is not reaching the mix. This meter
@@ -810,6 +865,14 @@ void Engine::publish_telemetry(std::span<float* const> channels, std::size_t num
                                     std::memory_order_relaxed);
   }
 
+  // Gain reduction is published as measured, with no fall applied: it is not a
+  // peak that needs holding, it is the gain the compressor is applying right
+  // now, and a decaying gain-reduction meter would show reduction that has
+  // already stopped.
+  for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+    m_published.strip_reduction[pad].store(m_strip_reduction[pad], std::memory_order_relaxed);
+  }
+
   // relaxed everywhere: the UI wants a recent value, not a synchronised one, and
   // an acquire/release pair here would put a barrier in the audio thread's hot
   // path to make a meter one frame fresher.
@@ -846,6 +909,8 @@ Telemetry Engine::telemetry() const noexcept {
   for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
     snapshot.pad_peak[pad] = m_published.pad_peak[pad].load(std::memory_order_relaxed);
     snapshot.strip_peak[pad] = m_published.strip_peak[pad].load(std::memory_order_relaxed);
+    snapshot.strip_reduction[pad] =
+        m_published.strip_reduction[pad].load(std::memory_order_relaxed);
 
     const std::uint32_t glow = m_published.pad_glow[pad].load(std::memory_order_relaxed);
     if (glow == kNeverTriggered) {

@@ -4,6 +4,7 @@
 #include "rt/arch.hpp"
 #include "rt/biquad.hpp"
 #include "rt/click.hpp"
+#include "rt/compressor.hpp"
 #include "rt/garbage_ring.hpp"
 #include "rt/handoff_ring.hpp"
 #include "rt/pad_config.hpp"
@@ -92,6 +93,12 @@ struct Telemetry {
 
   // Per-bus level, after every strip routed to it has summed in.
   std::array<float, rt::kNumBuses> bus_peak{};
+
+  // Worst compressor gain reduction on each strip, LINEAR, with the makeup gain
+  // divided back out. 1.0 is none. Linear rather than dB for the reason
+  // docs/MIXER.md gives for every level here: dB is a display unit, converted at
+  // the boundary.
+  std::array<float, rt::kNumPads> strip_reduction{};
 
   // Per-pad trigger acknowledgement. Indexed by pad. See PadGlow above for why
   // this is not the same thing as pad_peak.
@@ -440,6 +447,7 @@ class Engine {
     std::array<std::atomic<float>, rt::kNumPads> pad_peak{};
     std::array<std::atomic<float>, rt::kNumPads> strip_peak{};
     std::array<std::atomic<float>, rt::kNumBuses> bus_peak{};
+    std::array<std::atomic<float>, rt::kNumPads> strip_reduction{};  // filled with 1.0 in the ctor
 
     // Written on trigger and aged once per block. Initialised in the Engine
     // constructor rather than here, because a default-constructed
@@ -537,6 +545,12 @@ class Engine {
   void apply_eq(std::span<float* const> buffer, const rt::EqConfig& eq, std::size_t pad,
                 std::size_t num_frames) noexcept;
 
+  // AUDIO THREAD, once per strip per block, after the EQ. Applies one gain to
+  // every channel of each frame, from a detector that is the maximum across
+  // them.
+  void apply_compressor(std::span<float* const> buffer, const rt::CompressorConfig& config,
+                        std::size_t pad, std::size_t num_frames) noexcept;
+
   // AUDIO THREAD. This pad's mixer settings, or the defaults if nothing has been
   // published to it. An unloaded pad has a strip like any other -- it is simply
   // one with nothing running through it.
@@ -629,6 +643,17 @@ class Engine {
   // Putting state in the config would mean two engines rendering the same
   // project shared a filter, which is not a thing filters can do.
   std::vector<rt::Biquad> m_eq_state;
+
+  // AUDIO THREAD ONLY. One compressor per strip -- not per channel, because the
+  // detector is the maximum across channels and two envelopes would be two
+  // different gains. A plain array rather than a vector: the size does not
+  // depend on the channel count.
+  std::array<rt::Compressor, rt::kNumPads> m_strip_compressor{};
+
+  // This block's worst gain reduction per strip, as a LINEAR gain with the
+  // makeup divided back out. 1.0 means none. Converted to dB at the interface
+  // boundary like every other level in the program.
+  std::array<float, rt::kNumPads> m_strip_reduction{};
 
   // CONTROL THREAD ONLY: what this thread has published, so pad_config() can
   // answer without reading the audio thread's table. Not a cache of m_pads — it

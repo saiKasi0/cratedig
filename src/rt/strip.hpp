@@ -1,6 +1,7 @@
 #ifndef CRATEDIG_RT_STRIP_HPP
 #define CRATEDIG_RT_STRIP_HPP
 
+#include "rt/compressor.hpp"
 #include "rt/eq.hpp"
 #include "rt/pad_event.hpp"
 
@@ -58,7 +59,8 @@ inline constexpr float kMaxStripGain = 4.0F;
 // block on the strip, and it moves what is sounding -- because a fader that only
 // affected the next hit is broken in a way that is very hard to describe and
 // very easy to ship.
-// Declared in SIGNAL ORDER -- gain, EQ, (compressor), balance -- so the struct
+//
+// Declared in SIGNAL ORDER -- gain, EQ, compressor, balance -- so the struct
 // reads as the chain docs/MIXER.md specifies rather than as a bag of settings.
 struct StripConfig {
   // Linear, both channels. 1.0 is unity and is exact: x * 1.0f == x for every
@@ -71,6 +73,11 @@ struct StripConfig {
   // every voice holding it, while state belongs to one strip on the audio
   // thread. The engine owns the rt::Biquad instances.
   EqConfig eq{};
+
+  // One per strip, after the EQ. Off until somebody enables it, and its default
+  // ratio of 1 is unity at every level anyway -- two independent reasons a fresh
+  // strip cannot change the signal.
+  CompressorConfig compressor{};
 
   // [-1, +1], 0 at centre. BALANCE, not a constant-power pan law -- see
   // balance_left/right below.

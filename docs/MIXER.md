@@ -407,6 +407,31 @@ manufacturers and cannot be tested against.
 Peak rather than RMS: this is a drum machine, and an RMS detector on a kick transient is late
 by design. RMS is not offered, rather than offered and wrong.
 
+The detector reads the **maximum across the channels** and one gain is applied to all of them.
+Two independent detectors would apply two different gains, which moves a hard-panned hit toward
+the centre every time it fires. A test for this has to put the loud material on **each** channel
+in turn: against a signal loudest on channel 0, "the maximum of the channels" and "channel 0"
+are the same number, and a detector reading only the first channel passes.
+
+#### The envelope never quite arrives, and that is arithmetic
+
+A one-pole in `float` stalls short of its target: once the per-step change falls below half an
+ULP, `coeff * (env - d) + d` rounds back to `env` and the iteration stops. The residual is
+about `eps / (1 - coeff)`, so it **grows with the time constant**:
+
+| `time_frames` | residual `1 - env` |
+|---|---|
+| 10 | 3.0e-7 |
+| 48 | 1.4e-6 |
+| 240 | 7.2e-6 |
+| 4800 | 1.4e-4 |
+| 48000 | 1.4e-3 |
+
+Inaudible for a gain-control signal, and worth writing down because a test that asserts the
+envelope reaches its target to some fixed tolerance is asserting something `float` cannot do
+for the slower settings. The time-constant test measures the **fraction traversed** from the
+level actually reached, not the absolute value.
+
 ### Curve
 
 In dB, with `x` the detector level, `T` the threshold, `R` the ratio and `W` the knee width:
@@ -421,11 +446,34 @@ The gain applied is `10^((y - x)/20)`, multiplied by the makeup gain.
 
 The quadratic knee is **continuous in value and in first derivative** at both boundaries,
 which is the property the test checks — a knee that is merely continuous still produces an
-audible edge, and the derivative is where that lives.
+audible edge, and the derivative is where that lives. The slope interpolates linearly from 1 at
+the bottom of the knee to `1/R` at the top; at the centre it is exactly `(1 + 1/R)/2`.
 
-Ratio is clamped to `[1, 20]`. `R = 1` is unity gain at every level and is what "bypassed"
-means arithmetically, so the bypass flag is an optimisation rather than a second code path.
-Threshold `[-60, 0] dB`, knee `[0, 24] dB`, makeup `[0, +24] dB`.
+Ratio is clamped to `[1, 20]`, threshold to `[-60, 0] dB`, knee to `[0, 24] dB`, makeup to
+`[0, +24] dB`. Out-of-range handling is the same everywhere in this file: finite values clamp,
+non-finite ones fall back to the default. A ratio of infinity becomes 1, not 20.
+
+#### The implementation computes reduction, not output level
+
+The curve above is written as an output level because that is how it reads. The code computes
+`y - x` **directly**, which is algebraically the same and numerically not:
+
+```
+  above the knee:  y - x  ==  -(x - T)(1 - 1/R)
+```
+
+Two reasons, one of them a bug that was caught by its own test:
+
+- **`R = 1` is only exactly unity in the reduction form.** This section used to claim that
+  `R = 1` is unity at every level, and therefore that the enabled flag is an optimisation
+  rather than a second code path. That is true in algebra and false in float: `T + (x - T)`
+  does not round back to `x`, and a ratio of 1 measured **0.99999976**. Written as a reduction
+  the `(1 - 1/R)` factor is exactly zero, the expression vanishes, and the claim holds for
+  every threshold and every knee width.
+- Differencing `y` and `x` cancels catastrophically exactly when reduction is small, which is
+  when the answer most needs its precision.
+
+A reduction of exactly zero returns unity without calling `pow` at all.
 
 ## The master limiter
 
@@ -454,8 +502,20 @@ explicitly **not part of the determinism contract** — the fall rate depends on
 which depends on the device, while `render()`'s output does not.
 
 Peak with a fall time of `Engine::kPeakFallSeconds` (0.4 s), reusing the existing constant so
-every meter in the program falls at the same rate. Gain reduction is metered separately, as a
-linear gain rather than a dB value, converted at the boundary like everything else.
+every meter in the program falls at the same rate.
+
+**Gain reduction is metered separately**, as a linear gain rather than a dB value, converted at
+the boundary like everything else. Three details it is easy to get wrong:
+
+- **No fall is applied to it.** It is not a peak that needs holding; it is the gain the
+  compressor is applying now, and a decaying gain-reduction meter shows reduction that has
+  already stopped.
+- **The makeup gain is divided back out.** A compressor pulling 6 dB down with 6 dB of makeup
+  is doing something, and a meter reporting the net would say it was not.
+- **Unity means none, so it is initialised to 1.0** — including the published copy the
+  interface reads, which nothing writes until the first block renders. Left at the
+  default-constructed zero, an engine that has not rendered yet reports every strip crushed
+  flat.
 
 **Strip peaks are post-fader, and read zero when the strip is muted or soloed out.** That is
 not the same question `Telemetry::pad_peak` answers, and both are wanted:

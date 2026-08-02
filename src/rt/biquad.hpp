@@ -1,6 +1,8 @@
 #ifndef CRATEDIG_RT_BIQUAD_HPP
 #define CRATEDIG_RT_BIQUAD_HPP
 
+#include "rt/arch.hpp"
+
 #include <span>
 
 namespace rt {
@@ -27,22 +29,6 @@ struct BiquadCoeffs {
   float a2 = 0.0F;
 };
 
-// State below this magnitude is flushed to zero. -600 dBFS.
-//
-// Far below anything audible and far above the smallest normal float (about
-// 1.2e-38). An IIR fed silence decays geometrically and eventually produces
-// denormals, which on several CPUs cost hundreds of cycles each -- in an audio
-// callback that is a dropout caused by a tail nobody can hear.
-//
-// FLUSHED HERE RATHER THAN LEFT TO FTZ/DAZ, deliberately.
-// rt::ScopedDenormalDisable sets those at audio-thread start, but the offline
-// renderer never opens a device and so never sets them. Relying on the FPU mode
-// would make a live render and a bounce of the same material disagree in the far
-// tail -- and "same input, same bytes" is a promise this project makes
-// (docs/TESTING.md). Doing it in the filter makes the behaviour the same either
-// way, which is worth more than the last 1e-30 of an impulse response.
-inline constexpr float kBiquadDenormalFloor = 1.0e-30F;
-
 // One Direct Form I biquad section: coefficients in, state here.
 //
 // DIRECT FORM I because its state is the input and output history rather than an
@@ -64,8 +50,9 @@ inline constexpr float kBiquadDenormalFloor = 1.0e-30F;
 class Biquad {
  public:
   [[nodiscard]] float process(const BiquadCoeffs& coeffs, float input) noexcept {
-    const float output = flush((coeffs.b0 * input) + (coeffs.b1 * m_x1) + (coeffs.b2 * m_x2) -
-                               (coeffs.a1 * m_y1) - (coeffs.a2 * m_y2));
+    const float output =
+        flush_denormal((coeffs.b0 * input) + (coeffs.b1 * m_x1) + (coeffs.b2 * m_x2) -
+                       (coeffs.a1 * m_y1) - (coeffs.a2 * m_y2));
     m_x2 = m_x1;
     m_x1 = input;
     m_y2 = m_y1;
@@ -96,13 +83,6 @@ class Biquad {
   }
 
  private:
-  [[nodiscard]] static float flush(float value) noexcept {
-    // NaN fails both comparisons and so passes through unchanged, which is the
-    // honest behaviour: a NaN in the audio is a bug to find, not one to hide by
-    // quietly turning it into silence.
-    return (value > -kBiquadDenormalFloor && value < kBiquadDenormalFloor) ? 0.0F : value;
-  }
-
   float m_x1 = 0.0F;
   float m_x2 = 0.0F;
   float m_y1 = 0.0F;

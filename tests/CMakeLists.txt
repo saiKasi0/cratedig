@@ -15,6 +15,7 @@ add_executable(
   unit/biquad_test.cpp
   unit/click_test.cpp
   unit/command_test.cpp
+  unit/compressor_test.cpp
   unit/decode_test.cpp
   unit/engine_render_test.cpp
   unit/envelope_test.cpp
