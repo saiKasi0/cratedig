@@ -1701,7 +1701,21 @@ int run_app(const AppOptions& options) {
       quit();
       return true;
     }
-    if (code == kTab) {
+    // The right-hand panel, on BACKSLASH as well as on Tab.
+    //
+    // Tab has been the binding since M2 and has never worked: FTXUI consumes it
+    // before CatchEvent runs, so it does not reach this function at all. Found
+    // in M5 while giving MIX a paging key -- a probe that reported the code of
+    // every unbound key showed `z` and `n` arriving and nothing for Tab. The
+    // PTY session only ever pressed Tab inside an `if`, so the assertion after
+    // it had been passing without exercising the key.
+    //
+    // Tab is KEPT rather than deleted: it costs nothing, it is what the mockup's
+    // caption row says, and it will start working on its own the day the Kitty
+    // protocol is negotiated (where Tab arrives as a CSI-u sequence this
+    // program decodes itself -- see keys.cpp). Backslash is the one that works
+    // today, on every terminal.
+    if (code == kTab || code == '\\') {
       state.tab = state.tab == PanelTab::kSample ? PanelTab::kPattern : PanelTab::kSample;
       return true;
     }

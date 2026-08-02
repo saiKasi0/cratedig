@@ -435,12 +435,20 @@ def main() -> int:
     # no device the transport genuinely does not run, and the program says so
     # instead of pretending.
     if alive:
-        # Off the lane first, whichever tab the session left up, so that the
+        # Off the lane first, whichever panel the session left up, so that the
         # step key has to bring it back by itself.
+        #
+        # BACKSLASH, NOT TAB, and unconditionally. This was `if on the lane:
+        # press tab`, which meant the assertion after it never ran when the lane
+        # was already down -- and Tab has never reached the program at all
+        # (FTXUI consumes it before CatchEvent), so the panel switch had been
+        # dead since M2 behind a check that could not fail. Pressing the key
+        # every time is what makes the next line an assertion.
+        alive = send("\\")
         if "pattern 01" in screen_now():
-            alive = send("\t")
+            alive = send("\\")
         if "pattern 01" in screen_now():
-            command_failures.append("tab did not leave the pattern lane")
+            command_failures.append("\\ did not leave the pattern lane")
 
         # `t` BRINGS THE LANE UP as well as writing a step. A step key that
         # edited a grid nobody could see would be a way to write a pattern you

@@ -48,6 +48,7 @@ add_executable(
   integration/engine_threading_test.cpp
   integration/rt_safety_test.cpp
   e2e/chop_e2e_test.cpp
+  e2e/mixer_e2e_test.cpp
   e2e/sequencer_e2e_test.cpp
   # The guard's operator new/delete replacements must be linked into the
   # executable directly, not via a library — see src/CMakeLists.txt.

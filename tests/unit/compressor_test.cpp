@@ -14,6 +14,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <numbers>
 #include <span>
 #include <vector>
 
@@ -61,7 +62,8 @@ std::shared_ptr<const rt::Sample> loud_sample() {
   for (std::uint16_t channel = 0; channel < kChannels; ++channel) {
     std::span<float> data = sample->mutable_channel(channel);
     for (std::size_t frame = 0; frame < data.size(); ++frame) {
-      const auto mixed = static_cast<float>(((frame * 47) + (channel * 409)) % 5'003);
+      const auto mixed =
+          static_cast<float>(((frame * 47) + (static_cast<std::size_t>(channel) * 409)) % 5'003);
       data[frame] = ((mixed / 2'501.5F) - 1.0F) * 0.9F;
     }
   }
@@ -108,7 +110,12 @@ TEST_CASE("the compressor curve matches the specified curve", "[unit]") {
       for (const float knee : {0.0F, 3.0F, 12.0F, 24.0F}) {
         const rt::CompressorConfig config = rt::make_compressor(threshold, ratio, knee, 0.0F, 0, 0);
 
-        for (double input_db = -90.0; input_db <= 6.0; input_db += 0.5) {
+        // Stepped by an INTEGER index rather than by accumulating 0.5 into a
+        // double: the values are then exact multiples of a half rather than a
+        // running sum, and clang-tidy's FloatLoopCounter check is right that the
+        // difference matters once a loop is long enough.
+        for (int step = -180; step <= 12; ++step) {
+          const double input_db = static_cast<double>(step) * 0.5;
           const double expected =
               reference_curve_db(input_db, static_cast<double>(threshold),
                                  static_cast<double>(ratio), static_cast<double>(knee));
@@ -175,7 +182,7 @@ TEST_CASE("the envelope reaches 1 - 1/e after exactly the time constant", "[unit
   // What "attack time" MEANS here, per docs/MIXER.md: not "time to full gain
   // reduction", a definition that varies between manufacturers and cannot be
   // tested against.
-  constexpr double kTarget = 1.0 - (1.0 / 2.718'281'828'459'045);
+  constexpr double kTarget = 1.0 - (1.0 / std::numbers::e);
 
   for (const std::size_t frames : {1U, 10U, 48U, 240U, 4'800U}) {
     const rt::CompressorConfig config = rt::make_compressor(0.0F, 1.0F, 0.0F, 0.0F, frames, frames);
@@ -202,7 +209,7 @@ TEST_CASE("the envelope reaches 1 - 1/e after exactly the time constant", "[unit
     for (std::size_t frame = 0; frame < 200'000; ++frame) {
       static_cast<void>(releasing.process(config, 1.0F));
     }
-    const double from = static_cast<double>(releasing.envelope());
+    const auto from = static_cast<double>(releasing.envelope());
     REQUIRE(from > 0.99);
 
     for (std::size_t frame = 0; frame < frames; ++frame) {
@@ -248,7 +255,8 @@ TEST_CASE("ratio 1 is unity at every level, for every knee", "[unit]") {
   for (const float knee : {0.0F, 6.0F, 24.0F}) {
     for (const float threshold : {-60.0F, -20.0F, 0.0F}) {
       const rt::CompressorConfig config = rt::make_compressor(threshold, 1.0F, knee, 0.0F, 48, 480);
-      for (double input_db = -90.0; input_db <= 6.0; input_db += 0.25) {
+      for (int step = -360; step <= 24; ++step) {
+        const double input_db = static_cast<double>(step) * 0.25;
         const auto envelope = static_cast<float>(std::pow(10.0, input_db / 20.0));
         INFO("T = " << threshold << ", W = " << knee << ", input " << input_db << " dB");
         CHECK(rt::Compressor::gain_for(config, envelope) == 1.0F);
@@ -354,7 +362,7 @@ TEST_CASE("an engaged compressor is invariant to block size", "[unit]") {
     REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 0, .velocity = 1.0F}));
 
     std::vector<float> out(kTotal * kChannels, 0.0F);
-    std::array<float, 2'048 * kChannels> scratch{};
+    std::array<float, std::size_t{2'048} * kChannels> scratch{};
     std::size_t done = 0;
     std::size_t next = 0;
     while (done < kTotal) {

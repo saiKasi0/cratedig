@@ -663,10 +663,52 @@ Implemented:
   rather than a layout one), `command.cpp` (the `:` grammar), `theme.hpp`,
   `app.cpp`, `cli.cpp`.
 
-Not yet built: the mixer graph (M5), the sample pool and browser (M5.5),
-recording and the project file (M6). See `docs/ROADMAP.md`.
+Not yet built: the sample pool and browser (M5.5), recording and the project file
+(M6). See `docs/ROADMAP.md`.
 
-### What M5 inherits
+### The mixer graph, as built (M5)
+
+`render()` clears the caller's buffers, then clears the graph, then walks it in
+one fixed order every block:
+
+```
+  voices ─► strip 0..15 ─► bus a..d ─► master (the caller's buffer) ─► out
+              gain            gain        metronome, then limiter
+              EQ
+              compressor
+              balance
+```
+
+Six things about it that the rest of the system depends on:
+
+- **The shape is fixed and preallocated.** Sixteen strips and four buses, one
+  flat allocation in the `Engine` constructor sized from
+  `Config::max_block_frames` — about 320 KB at the defaults. No node is created
+  or destroyed while running, so there is no topology to branch on in the
+  callback. `rt::kNumBuses` and `rt::kDefaultBus` live in `src/rt/strip.hpp`.
+- **The master is not a node.** It is the caller's output buffer, already cleared,
+  which everything sums into. One buffer fewer and one copy fewer, and an offline
+  bounce writes exactly where the device would have.
+- **`rt::StripConfig` is nested inside `rt::PadConfig`**, not a parallel table —
+  the one-pointer rule, as this file predicted. A fader move is a new PadConfig
+  through the same handoff ring a sample load uses.
+- **DSP STATE IS NOT IN THE CONFIG.** A published config is immutable and shared
+  between the pad and every voice holding it; filter and envelope history belong
+  to one strip in one engine. The `rt::Biquad` and `rt::Compressor` instances
+  live in `Engine`, indexed by pad (and band, and channel).
+- **The master section travels by value.** `rt::MasterConfig` — the four bus gains
+  and the limiter — goes through an `SpscRing` rather than the shared_ptr
+  handoff, because it owns nothing. That is the one-pointer rule applied rather
+  than copied: `PadConfig` owns a `Sample` and cannot be swapped atomically any
+  other way; a struct of floats can.
+- **A default strip is bit-transparent**, deliberately and by test. Gain 1.0,
+  balance centre, EQ and compressor bypassed, limiter off. Every committed hash
+  in the project still holds, which is only possible because bypass means the
+  samples are not touched rather than multiplied by something that rounds to one.
+
+Full signal flow and the DSP definitions: `docs/MIXER.md`.
+
+### What M5 inherited
 
 - **A release has a declick floor**, `PadConfig::release_floor_frames`, defaulting
   to the same `kDefaultFadeFrames` the boundary fades use. `AdsrFrames::release`
@@ -689,15 +731,19 @@ recording and the project file (M6). See `docs/ROADMAP.md`.
   playing flag, and step/slot/pattern together — for the same reason the playhead
   and the pad glow are packed: the UI must never pair fields from two blocks and
   name a step the pattern does not have.
-- **Reverse and loop are still `PadConfig` fields nothing honours**, waiting on
-  M5's DSP. They were deferred out of M3 and again out of M4 for the same reason.
+- **Reverse and loop are STILL `PadConfig` fields nothing honours.** M5 was the
+  milestone that was supposed to bring the DSP for them and did not: the mixer is
+  about level, routing and tone, and reverse is a playback direction on the phase
+  accumulator. They move to M5.5 with the varispeed work, which is where the
+  phase step is being touched anyway.
 
 ### Known limitations
 
 These are deliberate scope boundaries, not oversights:
 
-- **Reverse and loop mode do not exist.** They are `PadConfig` fields in M5, when
-  the DSP for them lands — a field nothing honours is worse than no field.
+- **Reverse and loop mode do not exist.** They are `PadConfig` fields waiting on
+  the DSP for them, now M5.5's varispeed — a field nothing honours is worse than
+  no field.
 - **A chop assigns slices to pads positionally**: slice *n* to pad *n*, and
   anything past sixteen is not on a pad at all. `:slot assign 17-24 1` reaches
   the rest in one line, and banks are M6.

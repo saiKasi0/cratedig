@@ -111,7 +111,7 @@ struct Measurement {
   double peak = 0.0;
   for (std::size_t frame = 0; frame < kMeasureFrames; ++frame) {
     const double phase = omega * static_cast<double>(settle + frame);
-    const double output =
+    const auto output =
         static_cast<double>(filter.process(coeffs, static_cast<float>(std::sin(phase))));
     cosine_sum += output * std::cos(phase);
     sine_sum += output * std::sin(phase);

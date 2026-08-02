@@ -3,9 +3,11 @@
 the terminal crate-digging DAW — pull samples in, chop them, play chops on pads,
 sequence, mix, export. keep it CLI smooth.
 
-**Status: pre-alpha (M3 — chop & trigger).** Loads a file, draws it, finds the
-transients, cuts them into slices, lays them across sixteen pads and plays them.
-No sequencer, mixer or export yet.
+**Status: pre-alpha (M5 — mixer & built-in DSP).** Loads a file, draws it, finds
+the transients, cuts them into slices, lays them across sixteen pads and plays
+them; records patterns and chains them into a song; and mixes the result through
+sixteen channel strips with four-band EQ, a compressor, four buses and a master
+limiter. No recording, no export and one file at a time yet.
 
 ## Quick start
 
@@ -36,12 +38,24 @@ of it.
 Then make it play itself:
 
 ```
-tab                    bring up the pattern lane
+t                      bring up the pattern lane, and write the selected pad
 [ ]                    move the step cursor
-t                      write the selected pad onto that step
 space                  play / stop
 :bpm 92.5              set the tempo
 :song 1 2              chain pattern 1 into pattern 2
+```
+
+Then mix it:
+
+```
+:mix                   open the mixer
+[ ]                    page: channels 1-8, 9-16, buses a-d
+h l · j k              pick a strip · ride its fader
+m · s · b              mute · solo · send it to the next bus
+:gain 3 -6             or say it outright
+:eq 3 2 800 -4 1.2     band 2 of pad 3: 800 Hz, -4 dB, Q 1.2
+:comp 3 -18 4          threshold -18 dB, 4:1
+:limit on              a brick wall on the master, off by default
 ```
 
 ### If you have no sound card
@@ -66,7 +80,7 @@ rather than pretending.
 | `h` `l` · `H` `L` | scroll the view · scroll by a full screen |
 | `+` `-` · `0` | zoom · fit the whole file |
 | `g` `G` | jump to the start · the end |
-| `tab` | switch the right-hand panel |
+| `\` | switch the right-hand panel |
 | `.` | stop every sounding voice, and the transport |
 | `esc` | quit |
 

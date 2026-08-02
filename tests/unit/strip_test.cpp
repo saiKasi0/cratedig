@@ -37,8 +37,9 @@ std::shared_ptr<const rt::Sample> strip_sample(std::uint8_t pad) {
   for (std::uint16_t channel = 0; channel < kChannels; ++channel) {
     std::span<float> data = sample->mutable_channel(channel);
     for (std::size_t frame = 0; frame < data.size(); ++frame) {
-      const auto mixed =
-          static_cast<float>(((frame * 53) + (pad * 311) + (channel * 1'009)) % 8'191);
+      const auto mixed = static_cast<float>(((frame * 53) + (static_cast<std::size_t>(pad) * 311) +
+                                             (static_cast<std::size_t>(channel) * 1'009)) %
+                                            8'191);
       data[frame] = ((mixed / 4'095.5F) - 1.0F) * (channel == 0 ? 0.62F : 0.44F);
     }
   }
@@ -256,7 +257,10 @@ TEST_CASE("a strip fader is not the pad's own gain", "[unit]") {
     REQUIRE(current != nullptr);
     rt::PadConfig next = *current;
     next.gain = 0.5F;
-    REQUIRE(retuned.publish_pad_config(std::make_shared<const rt::PadConfig>(std::move(next))));
+    // Built before the REQUIRE rather than moved inside it: clang-tidy reads the
+    // macro's expansion and cannot tell that the move is the last use.
+    const auto published = std::make_shared<const rt::PadConfig>(next);
+    REQUIRE(retuned.publish_pad_config(published));
   });
 
   CHECK(identical(flat.channel(1, 0), changed.channel(1, 0)));

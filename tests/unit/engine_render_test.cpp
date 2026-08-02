@@ -1446,7 +1446,9 @@ std::shared_ptr<const rt::PadConfig> graph_config(std::uint8_t pad) {
     for (std::size_t frame = 0; frame < data.size(); ++frame) {
       // Irrational-looking but integer-derived: no libm call whose last bit
       // could differ between platforms, and no repeating value.
-      const auto mixed = static_cast<float>(((frame * 37) + (pad * 101) + (channel * 7)) % 9'973);
+      const auto mixed = static_cast<float>(((frame * 37) + (static_cast<std::size_t>(pad) * 101) +
+                                             (static_cast<std::size_t>(channel) * 7)) %
+                                            9'973);
       data[frame] = ((mixed / 4'986.5F) - 1.0F) * 0.31F;
     }
   }

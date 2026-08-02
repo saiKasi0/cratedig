@@ -405,7 +405,7 @@ namespace {
     return false;
   }
 
-  double value = static_cast<double>(units);
+  auto value = static_cast<double>(units);
   if (dot != std::string_view::npos) {
     const std::string_view fraction = text.substr(dot + 1);
     if (fraction.empty() || fraction.size() > 4) {

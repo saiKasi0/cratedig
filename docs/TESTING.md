@@ -79,6 +79,36 @@ could not have failed. The current one plays voices at a *fractional* rate ratio
 (44.1 kHz material on a 48 kHz engine), and asserts the output is not all zeros
 so that three identical hashes cannot be three identical silences.
 
+### What block-size invariance does *not* cover: live trigger placement
+
+`rt::PadEvent::frame_offset` is defined as an offset **from the start of the
+block the event is drained in**, and `drain_pad_events()` clamps it to
+`num_frames - 1`. So the same offset means a different absolute frame at a
+different block size: 259 lands at frame 259 in a 2048-frame block and at frame
+63 in a 64-frame one.
+
+That is the contract rather than a hole in it. Nothing real produces such an
+offset — a keyboard hit is 0, a MIDI hit is computed inside the block being
+drained, and a **sequenced** hit comes from the absolute step frame
+(`rt::step_frame`) and is therefore always inside its block, which is exactly why
+the sequencer's swung-pattern invariance test is meaningful.
+
+Written down because a test that staggers live triggers by hand will fail
+invariance for a reason that has nothing to do with the code under test. The M5
+mixer e2e did precisely that and the invariance check caught it.
+
+### An assertion the `dev` preset cannot make for you
+
+`dev` is RelWithDebInfo with `NDEBUG`, so every `assert()` in `src/` is compiled
+out — including `Engine::render()`'s check that the block fits
+`Config::max_block_frames`. A test that renders an oversized block therefore
+runs past the end of the graph buffers and produces output that is wrong and
+perfectly *reproducible*, which a golden hash will happily record.
+
+The `asan`, `tsan` and `ubsan` presets keep assertions. This is one of the
+reasons a golden must be checked on more than one preset before it is committed,
+not merely on the one that is fastest to run.
+
 That is what the 32.32 fixed-point voice phase exists for; see ARCHITECTURE.md.
 Negative-controlled by dropping the phase fraction at each block boundary, which
 fails both invariance tests and passes again when restored.
@@ -511,6 +541,38 @@ nothing ever drains it and the ninth edit of a session was refused for good.
 which is `127/127.0f == 1.0f` exactly, so the product in `amplitude * value` is
 exact and an FMA cannot round it differently. The file says it at length, and the
 rule it follows is the next section.
+
+### M5 acceptance, item by item
+
+`docs/ROADMAP.md` states three criteria for M5.
+
+| Criterion | Where it is proved |
+|---|---|
+| EQ within ±0.1 dB of analytic | `tests/unit/biquad_test.cpp` — measured magnitude against `\|H(e^jw)\|` evaluated from the same coefficients, every band type across 108 configurations × 9 probes |
+| mixer e2e hash stable | `tests/e2e/mixer_e2e_test.cpp` — committed FNV-1a golden, block-size invariance, run-to-run equality |
+| alias floor | moved to M5.2 with the saturation that aliases; there is nothing in M5 that oversamples |
+
+**How much of the mixer the golden covers, and why that much.** The rule above
+allows a committed constant only where the path has no `a*b+c`. Audited rather
+than assumed, by reading the three places the mixer does arithmetic:
+`apply_gain` is `samples[frame] *= gain`, `apply_balance` is
+`channels[c][f] *= left`, and `mix_into` is `out[frame] += in[frame]`. A lone
+multiply and a lone add are exactly specified by IEEE-754 and there is nothing to
+fuse — so the **entire level and routing half** is inside the rule, and the
+golden exercises strip gain, balance, mute, bus routing and bus gain rather than
+settling for a transparent chain.
+
+The three processors are outside it, each with a fused expression in its inner
+loop — `(b0*x) + (b1*x1) + …` in the biquad, `(coeff * (env - d)) + d` in the
+compressor, `(release_coeff * (gain - target)) + target` in the limiter. Engaged,
+they assert block-size invariance and run-to-run equality instead. That is also
+the property they are most able to break: all three carry state across blocks,
+and a filter reset at a block boundary still sounds approximately right.
+
+**Two of M5's own findings are in the sections above**, both caught while writing
+this file's golden rather than by inspection: live trigger placement is
+block-relative and therefore not invariant, and the `dev` preset compiles out the
+assertion that would have rejected an oversized block.
 
 ### M4.5, and what a test can and cannot claim
 

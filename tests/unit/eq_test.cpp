@@ -42,7 +42,8 @@ std::shared_ptr<const rt::Sample> eq_sample() {
   for (std::uint16_t channel = 0; channel < kChannels; ++channel) {
     std::span<float> data = sample->mutable_channel(channel);
     for (std::size_t frame = 0; frame < data.size(); ++frame) {
-      const auto mixed = static_cast<float>(((frame * 71) + (channel * 601)) % 6'143);
+      const auto mixed =
+          static_cast<float>(((frame * 71) + (static_cast<std::size_t>(channel) * 601)) % 6'143);
       data[frame] = ((mixed / 3'071.5F) - 1.0F) * 0.55F;
     }
   }
@@ -274,7 +275,11 @@ TEST_CASE("a shelf at maximum slope does not overshoot its plateau", "[unit]") {
       rt::make_eq_band(rt::EqBandType::kLowShelf, 500.0F, 12.0F, rt::kMaxEqSlope, kRate);
 
   double worst = -1'000.0;
-  for (double frequency = 20.0; frequency < 20'000.0; frequency *= 1.01) {
+  // An integer index over a geometric sweep, rather than a double multiplied
+  // in place: 694 steps of 1.01 covers 20 Hz to 20 kHz, and each frequency is
+  // computed from the index rather than from the previous one.
+  for (int step = 0; step < 694; ++step) {
+    const double frequency = 20.0 * std::pow(1.01, static_cast<double>(step));
     const double omega = 2.0 * std::acos(-1.0) * frequency / static_cast<double>(kRate);
     const std::complex<double> z = std::polar(1.0, -omega);
     const std::complex<double> numerator = static_cast<double>(band.coeffs.b0) +
@@ -437,7 +442,7 @@ TEST_CASE("an engaged EQ is invariant to block size", "[unit]") {
     REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 0, .velocity = 1.0F}));
 
     std::vector<float> out(kTotal * kChannels, 0.0F);
-    std::array<float, 2'048 * kChannels> scratch{};
+    std::array<float, std::size_t{2'048} * kChannels> scratch{};
     std::size_t done = 0;
     std::size_t next = 0;
     while (done < kTotal) {

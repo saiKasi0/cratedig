@@ -203,7 +203,7 @@ namespace detail {
 
   // Shelf alpha. The radicand is at least 2 for every gain because kMaxEqSlope
   // is 1, so (1/S - 1) is never negative -- see the note there.
-  const double slope = static_cast<double>(band.shape);
+  const auto slope = static_cast<double>(band.shape);
   const double radicand = ((amplitude + (1.0 / amplitude)) * ((1.0 / slope) - 1.0)) + 2.0;
   const double alpha = sine / 2.0 * std::sqrt(radicand);
   const double shelf = 2.0 * std::sqrt(amplitude) * alpha;

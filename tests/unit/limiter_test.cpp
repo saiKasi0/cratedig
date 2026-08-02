@@ -67,7 +67,8 @@ std::shared_ptr<const rt::Sample> hot_sample() {
   for (std::uint16_t channel = 0; channel < kChannels; ++channel) {
     std::span<float> data = sample->mutable_channel(channel);
     for (std::size_t frame = 0; frame < data.size(); ++frame) {
-      const auto mixed = static_cast<float>(((frame * 31) + (channel * 733)) % 4'001);
+      const auto mixed =
+          static_cast<float>(((frame * 31) + (static_cast<std::size_t>(channel) * 733)) % 4'001);
       data[frame] = ((mixed / 2'000.5F) - 1.0F) * 0.98F;
     }
   }
@@ -357,7 +358,7 @@ TEST_CASE("an engaged limiter is invariant to block size", "[unit]") {
     REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = 1, .velocity = 0.8F}));
 
     std::vector<float> out(kTotal * kChannels, 0.0F);
-    std::array<float, 2'048 * kChannels> scratch{};
+    std::array<float, std::size_t{2'048} * kChannels> scratch{};
     std::size_t done = 0;
     std::size_t next = 0;
     while (done < kTotal) {
