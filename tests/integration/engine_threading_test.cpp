@@ -150,16 +150,22 @@ TEST_CASE("Engine survives control, audio and janitor threads at once", "[stress
       saw_playing = saw_playing || state.playing;
       // Touch every field, so nothing is elided and every atomic is genuinely
       // read on this thread.
+      // `sink = sink + x` rather than `sink += x`. A COMPOUND ASSIGNMENT to a
+      // volatile was deprecated in C++20, and AppleClang 15 -- what the CI
+      // runners have -- makes that an error under -Werror. Newer clang does not
+      // warn at all, because P2327 un-deprecated exactly this case as a defect
+      // report against C++20, so the whole thing is invisible on a current
+      // toolchain and fatal on the one CI uses.
       volatile float sink = state.master_peak;
       for (const float level : state.pad_peak) {
-        sink += level;
+        sink = sink + level;
       }
       // The glow block too, and for the same reason: an atomic nobody reads on a
       // second thread is an atomic TSan has no opinion about, so a plain uint32_t
       // there would go unreported.
       for (const engine::PadGlow& glow : state.pad_glow) {
-        sink += glow.seconds_since_trigger + glow.velocity;
-        sink += glow.triggered ? 1.0F : 0.0F;
+        sink = sink + glow.seconds_since_trigger + glow.velocity;
+        sink = sink + (glow.triggered ? 1.0F : 0.0F);
       }
       static_cast<void>(sink);
       static_cast<void>(state.playhead_frame);
