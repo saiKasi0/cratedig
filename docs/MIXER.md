@@ -83,23 +83,49 @@ reason. Two specific traps it rules out:
 - **The limiter is off by default.** Lookahead is a delay, and a delay moves every golden
   while changing nothing anybody asked to change.
 
-The one hash movement M5 permits is the summation regrouping described next, which is
-arithmetic rather than gain.
+**M5 moves no committed hash.** That was not the expectation going in, and the section below
+is the measurement that replaced it.
 
-### Summation is regrouped, and that is visible
+### Summation is regrouped, and it turned out not to be visible
 
 Before M5, every voice summed into one output buffer in voice-slot order. Now each pad's
 voices sum into their own strip, strips into buses, buses into master. The same numbers,
-added in a different order — and **float addition is not associative**, so the result differs
-in the last bits.
+added in a different order — and **float addition is not associative**, so in general the
+result differs in the last bits. Over 2000 random six-voice sums, regrouping changed the
+result in **993 of them (49.6%)**.
 
-Measured, not assumed: over 2000 random six-voice sums, regrouping changed the result in
-**993 of them (49.6%)**.
+The plan for this milestone therefore budgeted a justified re-baseline of both M4 goldens.
+**Neither moved**, and the reason is worth stating because it is a property to keep rather
+than a coincidence to be relieved about:
 
-Both M4 goldens have deliberately overlapping voices, so both move. The justification is
-evidence: `tests/unit/engine_render_test.cpp` asserts the per-strip sum and the flat sum agree
-to within a ULP-scale bound (below −120 dBFS), which is what separates "the sum was regrouped"
-from "the graph is wrong". Nothing else in M5 may move a hash.
+- Adding into a buffer that starts at zero is **exact** — `0.0f + x == x` for every finite
+  `x`, and `+0.0f + -0.0f` is `+0.0f`, so no signed zero appears either. Every node in the
+  graph starts at zero, so the intermediate hops add nothing.
+- The graph walks **pads in ascending order**; the flat mix walked **voice slots**, which are
+  allocated lowest-free-first and therefore follow trigger order. When a session triggers in
+  ascending pad order — which both e2e suites do, and which anything playing a pattern
+  top-to-bottom does — the two orders coincide and the graph performs the *identical sequence
+  of additions*.
+- A bus with nothing routed to it contributes exactly `0.0f`, so summing all four costs
+  nothing in accuracy. Verified rather than reasoned: reversing the bus walk produces
+  bit-identical output.
+
+Regrouping is still real when trigger order and pad order disagree. Measured on six voices
+triggered in scrambled pad order: worst-case difference **1.19e-7**, which is one ULP at unity
+amplitude, or −138 dBFS.
+
+Both facts are pinned in `tests/unit/engine_render_test.cpp`:
+
+| Test | Claim |
+|---|---|
+| the mixer graph sums the same numbers the flat mix did | scrambled order agrees within 1e-6 (−120 dBFS) |
+| the graph is bit-exact when trigger order follows pad order | ascending order agrees **bit for bit** |
+
+They catch different things, which is why both exist: reversing the strip walk fails the
+second and passes the first. `rt::VoicePool::render_add()` — the pre-M5 signal path — is kept
+solely as the reference these are measured against.
+
+**Nothing in M5 may move a hash.** If one moves, that is the bug; do not re-baseline it.
 
 ## The strip
 
@@ -128,6 +154,25 @@ than stored, so there is no "solo count" to leak when a strip is reconfigured.
 
 Solo overrides mute — a soloed strip that is also muted is audible, because solo is a
 statement about what you want to hear now and mute is a statement about the mix.
+
+## The buses
+
+Four, named A–D, each summing the strips routed to it and passing the result to master at its
+own gain. No processing of their own in M5 — M5.2's sends return alongside them.
+
+**Every strip defaults to bus A** (`rt::kDefaultBus`), not "spread the sixteen pads across the
+four". A mixer sends everything to the main mix until you decide otherwise, and grouping pads
+is a musical judgement about one particular track: a default that guesses at drums/bass/music/
+vocals is wrong for every track that disagrees with it, and silently so.
+
+The other three buses are summed anyway, every block, whether anything reaches them or not.
+The graph's shape is fixed (`rt::kNumBuses`), so there is no topology to branch on in the
+callback, and — as measured above — an empty bus contributes exactly `0.0f` and costs nothing
+in accuracy.
+
+**The master is not a node.** It is the caller's output buffer, which `Engine::render()` has
+already cleared and which everything sums into. One buffer fewer, one copy fewer, and the
+offline bounce writes where the device would have.
 
 ## The EQ
 

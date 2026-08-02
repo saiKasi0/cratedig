@@ -261,12 +261,60 @@ class VoicePool {
   // The caller has already cleared the buffers. Adding rather than assigning is
   // what lets the engine keep the "zero, then accumulate" shape it will need
   // once there is more than one source.
+  //
+  // THE ENGINE NO LONGER CALLS THIS. Since M5 it renders pad by pad into strip
+  // buffers (render_pad below), because the mixer needs each pad's contribution
+  // on its own before the strips sum. This is kept, and is not dead code: it is
+  // the *pre-mixer signal path*, and the regrouping test in
+  // tests/unit/engine_render_test.cpp measures the graph against it. Float
+  // addition is not associative, so moving to per-strip summation changed the
+  // committed e2e hashes; the justification for that change is that these two
+  // agree to within a ULP-scale bound, and that claim needs both sides of it to
+  // exist. Deleting this would leave the graph with nothing to be checked
+  // against but itself.
   void render_add(std::span<float* const> channels, std::size_t num_frames) noexcept {
     if (channels.empty() || num_frames == 0) {
       return;
     }
 
     for (Voice& voice : m_voices) {
+      if (!voice.active) {
+        voice.peak = 0.0F;  // a silent voice must not hold a meter up
+        continue;
+      }
+      render_voice(voice, channels, num_frames);
+    }
+  }
+
+  // AUDIO THREAD. Mixes one pad's active voices into `channels`, additively.
+  //
+  // The per-pad half of render_add(), and what the mixer graph is built on: a
+  // strip is "this pad's voices", so the pool has to be able to produce exactly
+  // that. Called once per pad per block.
+  //
+  // Sixteen passes over sixteen voices rather than one pass with a routing
+  // table, deliberately. It is 256 predictable comparisons a block -- nothing,
+  // against the interpolation in the inner loop -- and it keeps the question of
+  // WHERE A PAD GOES in the engine, next to the buffers, instead of handing the
+  // pool a mapping it would then have to be trusted to apply correctly.
+  //
+  // Every voice is visited by exactly one pass, because Voice::pad is set from a
+  // PadConfig the engine already validated against kNumPads. That is what makes
+  // it safe for this and not render_add() to be the thing that clears a finished
+  // voice's meter, and the reason both halves of that invariant are asserted
+  // rather than assumed.
+  void render_pad(std::uint8_t pad, std::span<float* const> channels,
+                  std::size_t num_frames) noexcept {
+    assert(pad < kNumPads && "render_pad: pad out of range");
+    if (channels.empty() || num_frames == 0) {
+      return;
+    }
+
+    for (Voice& voice : m_voices) {
+      assert(voice.pad < kNumPads && "render_pad: a voice with no strip would never be rendered");
+      if (voice.pad != pad) {
+        continue;
+      }
       if (!voice.active) {
         voice.peak = 0.0F;  // a silent voice must not hold a meter up
         continue;

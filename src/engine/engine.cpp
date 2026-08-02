@@ -20,6 +20,87 @@ Engine::Engine(const Config& config) noexcept : m_config(config) {
   for (std::atomic<std::uint32_t>& glow : m_published.pad_glow) {
     glow.store(kNeverTriggered, std::memory_order_relaxed);
   }
+
+  // The mixer graph, allocated ONCE, here, on the control thread. This is the
+  // whole reason Config carries max_block_frames: render() asserts against it,
+  // so a buffer sized for it can never be overrun by a block the device asks
+  // for, and the audio thread never has to consider growing anything.
+  const auto channels = static_cast<std::size_t>(m_config.num_channels);
+  const auto frames = static_cast<std::size_t>(m_config.max_block_frames);
+  if (channels == 0 || frames == 0) {
+    // Degenerate config. Leave the graph empty; node_channels() reports that
+    // honestly and render()'s assertions catch the real problem, which is the
+    // config rather than the graph.
+    return;
+  }
+
+  m_graph_samples.assign(kNumGraphNodes * channels * frames, 0.0F);
+  m_graph_channels.resize(kNumGraphNodes * channels);
+  for (std::size_t index = 0; index < m_graph_channels.size(); ++index) {
+    m_graph_channels[index] = m_graph_samples.data() + (index * frames);
+  }
+}
+
+std::span<float* const> Engine::node_channels(std::size_t node) noexcept {
+  if (m_graph_channels.empty()) {
+    return {};
+  }
+  const auto channels = static_cast<std::size_t>(m_config.num_channels);
+  assert(node < kNumGraphNodes && "node_channels: node out of range");
+  return std::span<float* const>{m_graph_channels.data() + (node * channels), channels};
+}
+
+void Engine::clear_graph(std::size_t num_frames) noexcept {
+  for (float* channel : m_graph_channels) {
+    std::fill_n(channel, num_frames, 0.0F);
+  }
+}
+
+namespace {
+
+// AUDIO THREAD. destination += source, for num_frames of every channel both
+// have. Free rather than a member because it knows nothing about the engine:
+// it is the one arithmetic operation the whole graph is made of.
+void mix_into(std::span<float* const> destination, std::span<float* const> source,
+              std::size_t num_frames) noexcept {
+  const std::size_t channels = std::min(destination.size(), source.size());
+  for (std::size_t channel = 0; channel < channels; ++channel) {
+    float* out = destination[channel];
+    const float* in = source[channel];
+    for (std::size_t frame = 0; frame < num_frames; ++frame) {
+      out[frame] += in[frame];
+    }
+  }
+}
+
+}  // namespace
+
+void Engine::mix_graph(std::span<float* const> channels, std::size_t num_frames) noexcept {
+  if (m_graph_channels.empty()) {
+    return;
+  }
+
+  // Strips into buses. The routing is fixed at kDefaultBus until M5's T3 gives
+  // every strip a StripConfig to say otherwise; it is a function call rather
+  // than an inlined constant so that there is exactly ONE line to change then,
+  // and exactly one line to break when testing that this does anything.
+  for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+    mix_into(node_channels(rt::kNumPads + bus_for_strip(pad)), node_channels(pad), num_frames);
+  }
+
+  // Buses into master, in bus order. Every bus, including the three that
+  // nothing is routed to by default: adding a silent bus adds exactly 0.0f,
+  // which changes no sample and no hash, and a fixed walk is one fewer
+  // conditional in the callback and one fewer way for the graph to differ
+  // between a live run and an offline bounce.
+  for (std::size_t bus = 0; bus < rt::kNumBuses; ++bus) {
+    mix_into(channels, node_channels(rt::kNumPads + bus), num_frames);
+  }
+}
+
+std::uint8_t Engine::bus_for_strip(std::size_t pad) const noexcept {
+  static_cast<void>(pad);
+  return rt::kDefaultBus;
 }
 
 bool Engine::publish_pad_config(std::shared_ptr<const rt::PadConfig> config) noexcept {
@@ -417,6 +498,10 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
     std::fill_n(channel, num_frames, 0.0F);
   }
 
+  // The graph gets the same treatment, and for the same reason: everything
+  // downstream of a voice ACCUMULATES, so every node has to start at silence.
+  clear_graph(num_frames);
+
   // Reconfigurations before triggers, so a pad assigned and played in the same
   // UI frame sounds the new material rather than one block of the old.
   adopt_pad_configs();
@@ -443,10 +528,24 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
   // player made is the one they will notice missing.
   fire_sequencer_steps(num_frames);
 
-  m_voices.render_add(channels, num_frames);
+  // THE GRAPH. Each pad's voices into its own strip, then strips into buses and
+  // buses into the master -- which is `channels` itself, already cleared above.
+  //
+  // Pad order, ascending, every block. That is not incidental: it is the
+  // summation order, and float addition is not associative, so the order IS part
+  // of the output. Making it a plain ascending walk is what keeps an offline
+  // bounce bit-identical to a live render.
+  for (std::uint8_t pad = 0; pad < rt::kNumPads; ++pad) {
+    m_voices.render_pad(pad, node_channels(pad), num_frames);
+  }
+  mix_graph(channels, num_frames);
 
   // After the voices and before the position advances: the click is placed by
   // the same block_start the steps were, so it lands on the beat it marks.
+  //
+  // AT MASTER, after the bus sum -- docs/MIXER.md. It is a monitoring signal
+  // that belongs to the machine rather than to the music: giving it a strip
+  // would give it a fader, a mute and an EQ it has no business having.
   mix_metronome(channels, num_frames);
 
   // The transport advances by exactly the block it just rendered, whatever that

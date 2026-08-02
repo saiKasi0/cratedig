@@ -1,11 +1,14 @@
 #include "engine/engine.hpp"
 #include "rt/click.hpp"
+#include "rt/garbage_ring.hpp"
 #include "rt/pad_config.hpp"
 #include "rt/pad_event.hpp"
 #include "rt/sample.hpp"
+#include "rt/voice_pool.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -1417,4 +1420,148 @@ TEST_CASE("without a drain the handoff ring fills, which is why adopt_offline ex
   }
   CHECK(published == engine::Engine::kPadHandoffCapacity);
   CHECK(eng.rejected_pad_configs() > 0);
+}
+
+// ---------------------------------------------------------------------------
+// The mixer graph (M5), measured against the signal path it replaced.
+// ---------------------------------------------------------------------------
+//
+// Before M5 every voice summed into one output buffer in voice-slot order. Now
+// each pad's voices sum into their own strip, strips sum into buses and buses
+// into the master. The same numbers, added in a different order -- and float
+// addition is NOT associative, so that is a change to the output and not merely
+// a change to the code.
+//
+// rt::VoicePool::render_add() is the old path, kept for exactly this: the graph
+// needs something to be measured against that is not itself.
+namespace {
+
+// Distinct material per pad, so the sums below are of genuinely different
+// numbers. Values that repeat would make regrouping exact by accident and every
+// assertion here vacuous.
+std::shared_ptr<const rt::PadConfig> graph_config(std::uint8_t pad) {
+  auto sample = std::make_shared<rt::Sample>(44'100U, kChannels, std::size_t{4'000});
+  for (std::uint16_t channel = 0; channel < kChannels; ++channel) {
+    std::span<float> data = sample->mutable_channel(channel);
+    for (std::size_t frame = 0; frame < data.size(); ++frame) {
+      // Irrational-looking but integer-derived: no libm call whose last bit
+      // could differ between platforms, and no repeating value.
+      const auto mixed = static_cast<float>(((frame * 37) + (pad * 101) + (channel * 7)) % 9'973);
+      data[frame] = ((mixed / 4'986.5F) - 1.0F) * 0.31F;
+    }
+  }
+  return std::make_shared<const rt::PadConfig>(rt::PadConfig{
+      .sample = std::move(sample), .pad = pad, .gain = 0.4F + (0.03F * static_cast<float>(pad))});
+}
+
+// Renders `pads` through the engine's graph, and the same voices through the
+// flat pre-M5 sum, and returns both. Triggered in the order given, which is what
+// decides voice-slot order and therefore whether the two groupings differ.
+struct GraphComparison {
+  std::vector<float> graph;
+  std::vector<float> flat;
+};
+
+GraphComparison compare_paths(std::span<const std::uint8_t> pads, std::size_t frames) {
+  constexpr float kVelocity = 0.75F;
+
+  std::vector<std::shared_ptr<const rt::PadConfig>> configs;
+  configs.reserve(pads.size());
+
+  engine::Engine eng{test_config()};
+  for (const std::uint8_t pad : pads) {
+    std::shared_ptr<const rt::PadConfig> config = graph_config(pad);
+    REQUIRE(eng.publish_pad_config(config));
+    configs.push_back(std::move(config));
+  }
+  for (const std::uint8_t pad : pads) {
+    REQUIRE(eng.trigger_pad(rt::PadEvent{.pad = pad, .velocity = kVelocity}));
+  }
+
+  const std::array<std::size_t, 1> blocks{frames};
+  RenderCapture capture{frames, kChannels};
+  capture.render_in_blocks(eng, blocks);
+
+  // The oracle: the same configs, the same velocity, the same trigger order,
+  // summed flat. A separate pool rather than a flag on the engine -- a test
+  // switch inside the thing under test is not a control.
+  rt::VoicePool<engine::Engine::kMaxVoices> pool;
+  rt::GarbageRing<engine::Engine::kGarbageRingCapacity> garbage;
+  for (const std::shared_ptr<const rt::PadConfig>& config : configs) {
+    REQUIRE(pool.trigger(config, kVelocity, 48'000U, garbage, 0));
+  }
+
+  std::vector<float> flat(frames * kChannels, 0.0F);
+  std::array<float*, kChannels> flat_channels{};
+  for (std::uint16_t channel = 0; channel < kChannels; ++channel) {
+    flat_channels[channel] = flat.data() + (static_cast<std::size_t>(channel) * frames);
+  }
+  pool.render_add(std::span<float* const>{flat_channels}, frames);
+
+  const std::span<const float> rendered = capture.samples();
+  return GraphComparison{.graph = std::vector<float>{rendered.begin(), rendered.end()},
+                         .flat = std::move(flat)};
+}
+
+}  // namespace
+
+TEST_CASE("the mixer graph sums the same numbers the flat mix did", "[unit]") {
+  // Trigger order SCRAMBLED against pad order, which is what makes the two
+  // groupings genuinely different: the flat sum walks voice slots (and so
+  // trigger order), the graph walks pads. Six voices overlapping from frame 0.
+  constexpr std::array<std::uint8_t, 6> kPads{9, 2, 14, 0, 7, 4};
+  const GraphComparison result = compare_paths(kPads, 1'024);
+  REQUIRE(result.graph.size() == result.flat.size());
+
+  float worst = 0.0F;
+  float peak = 0.0F;
+  for (std::size_t index = 0; index < result.graph.size(); ++index) {
+    worst = std::max(worst, std::abs(result.graph[index] - result.flat[index]));
+    peak = std::max(peak, std::abs(result.flat[index]));
+  }
+
+  // It rendered something. A hash of silence agrees with a hash of silence.
+  CHECK(peak > 0.5F);
+
+  // THE BOUND, and the whole justification for M5 touching the signal path at
+  // all: regrouping a sum perturbs it by rounding error and nothing else. 1e-6
+  // is -120 dBFS, some 20 dB below the noise floor of 16-bit audio and far below
+  // anything a listener or a converter can represent.
+  //
+  // A larger difference is not "the sum was regrouped", it is a bug in the
+  // graph: a strip dropped, a bus counted twice, a voice rendered onto the wrong
+  // pad. Those miss by a fraction of full scale, not by a ULP.
+  CHECK(worst < 1.0e-6F);
+}
+
+TEST_CASE("the graph is bit-exact when trigger order follows pad order", "[unit]") {
+  // WHY THE M3 AND M4 GOLDENS DID NOT MOVE, pinned so that it stays true.
+  //
+  // The plan for this milestone predicted both committed e2e hashes would shift
+  // and budgeted a justified re-baseline for it. They did not shift, and this is
+  // the reason: adding to a zeroed buffer is exact, so when a pad's voices are
+  // contiguous in slot order AND pad order agrees with slot order, the graph
+  // performs the identical sequence of additions the flat mix did. Every voice
+  // in those two suites is triggered in ascending pad order, so the regrouping
+  // is a no-op there.
+  //
+  // Not a lucky accident to be shrugged at -- a property to keep. This fails if
+  // someone reorders the strip walk, or gives a silent bus a gain that is 1.0f
+  // to eight decimal places, and it fails HERE, next to the explanation, rather
+  // than as an unattributable hash mismatch in an e2e test.
+  constexpr std::array<std::uint8_t, 6> kPads{0, 2, 4, 7, 9, 14};
+  const GraphComparison result = compare_paths(kPads, 1'024);
+  REQUIRE(result.graph.size() == result.flat.size());
+
+  float peak = 0.0F;
+  for (const float value : result.flat) {
+    peak = std::max(peak, std::abs(value));
+  }
+  CHECK(peak > 0.5F);
+
+  // Bit-exact, not "close". std::memcmp rather than a loop of ==, because -0.0f
+  // and +0.0f compare equal and are different bits -- and a hash is taken over
+  // bits.
+  CHECK(std::memcmp(result.graph.data(), result.flat.data(), result.graph.size() * sizeof(float)) ==
+        0);
 }

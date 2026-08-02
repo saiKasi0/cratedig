@@ -10,6 +10,7 @@
 #include "rt/sample.hpp"
 #include "rt/sequencer.hpp"
 #include "rt/spsc_ring.hpp"
+#include "rt/strip.hpp"
 #include "rt/voice_pool.hpp"
 
 #include <array>
@@ -19,6 +20,7 @@
 #include <limits>
 #include <memory>
 #include <span>
+#include <vector>
 
 namespace engine {
 
@@ -466,6 +468,42 @@ class Engine {
   // exact frame.
   void fire_sequencer_steps(std::size_t num_frames) noexcept;
 
+  // The mixer graph's nodes, in the order they are laid out in m_graph_samples:
+  // sixteen strips and then four buses. The master is not among them -- it is
+  // the caller's output buffer, which is already zeroed and already the thing
+  // everything sums into.
+  static constexpr std::size_t kNumGraphNodes = rt::kNumPads + rt::kNumBuses;
+
+  // AUDIO THREAD. The channel pointers for one graph node, as render() and
+  // VoicePool want them.
+  //
+  // Returns an empty span when the graph was not allocated (zero channels or a
+  // zero block ceiling), which every consumer already treats as "nothing to do"
+  // -- rather than a span over a null pointer, which is undefined behaviour
+  // before anybody has a chance to check it.
+  [[nodiscard]] std::span<float* const> node_channels(std::size_t node) noexcept;
+
+  // AUDIO THREAD, at the top of every block. Zeroes the first num_frames of
+  // every strip and bus.
+  //
+  // EVERY node, including ones no voice will touch. Skipping the silent ones
+  // looks free and is not: from M5's EQ onwards a strip fed silence still has a
+  // decaying tail, and a skipped strip would truncate it -- a determinism bug
+  // wearing the costume of an optimisation. The perf pass is M8, and it should
+  // measure before it decides.
+  void clear_graph(std::size_t num_frames) noexcept;
+
+  // AUDIO THREAD, after the voices. Sums strips into buses and buses into
+  // `channels`, at unity.
+  void mix_graph(std::span<float* const> channels, std::size_t num_frames) noexcept;
+
+  // AUDIO THREAD. Which bus strip `pad` feeds.
+  //
+  // Constant until M5's StripConfig lands, and a function anyway: routing is the
+  // one thing about the graph that is going to become configurable, so it gets a
+  // seam now rather than sixteen call sites later.
+  [[nodiscard]] std::uint8_t bus_for_strip(std::size_t pad) const noexcept;
+
   // AUDIO THREAD, after the voices. Adds the metronome click, if it is on.
   //
   // Additive into the same buffers, so it is part of the output and therefore
@@ -512,6 +550,24 @@ class Engine {
   rt::HandoffRing<rt::SequencerState, kSequencerHandoffCapacity> m_sequencer_handoff;
   rt::VoicePool<kMaxVoices> m_voices;
   rt::GarbageRing<kGarbageRingCapacity> m_garbage;
+
+  // AUDIO THREAD ONLY after construction. The mixer graph's sample storage:
+  // kNumGraphNodes nodes, each num_channels wide and max_block_frames long, in
+  // ONE allocation made on the control thread in the constructor.
+  //
+  // A vector rather than a std::array because the size depends on Config, and
+  // one flat vector rather than a vector per node because the audio thread must
+  // never see a container it could be tempted to resize. Nothing after the
+  // constructor touches its size; render() only writes through the pointers
+  // below, which is why this is safe to reach from the callback at all.
+  //
+  // 320 KB at the defaults (20 nodes x 2 channels x 2048 frames x 4 bytes).
+  std::vector<float> m_graph_samples;
+
+  // Channel pointers into m_graph_samples, node-major: node n's channels are at
+  // [n * num_channels, (n + 1) * num_channels). Built once, so producing the
+  // span a node needs is a multiply rather than anything that could allocate.
+  std::vector<float*> m_graph_channels;
 
   // CONTROL THREAD ONLY: what this thread has published, so pad_config() can
   // answer without reading the audio thread's table. Not a cache of m_pads — it
