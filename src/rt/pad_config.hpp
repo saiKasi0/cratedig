@@ -4,6 +4,7 @@
 #include "rt/envelope.hpp"
 #include "rt/pad_event.hpp"
 #include "rt/sample.hpp"
+#include "rt/strip.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -123,6 +124,17 @@ struct PadConfig {
   std::uint8_t choke_group = 0;
 
   TriggerMode trigger = TriggerMode::kOneShot;
+
+  // THE MIXER HALF (M5). Fader, balance, mute, solo and bus routing.
+  //
+  // Nested here rather than in a strip table of its own, per the one-pointer
+  // rule above: a pad is one object, published in one swap. It is also read
+  // differently from everything else in this struct -- the voice captures the
+  // fields above AT TRIGGER TIME, while the engine reads this one PER BLOCK from
+  // whatever config the pad currently holds. That is what makes the fader move a
+  // voice that is already sounding, and it is why StripConfig::gain and
+  // PadConfig::gain are two fields rather than one (rt/strip.hpp).
+  StripConfig strip{};
 };
 
 static_assert(kNumPads <= 256, "PadConfig::pad is a uint8_t");

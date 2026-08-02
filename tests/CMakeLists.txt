@@ -35,6 +35,7 @@ add_executable(
   unit/sample_test.cpp
   unit/sequencer_test.cpp
   unit/spsc_ring_test.cpp
+  unit/strip_test.cpp
   unit/voice_pool_test.cpp
   unit/wave_view_test.cpp
   unit/waveform_test.cpp

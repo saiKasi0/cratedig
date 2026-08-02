@@ -73,34 +73,121 @@ void mix_into(std::span<float* const> destination, std::span<float* const> sourc
   }
 }
 
+// AUDIO THREAD. The fader. Both channels, one scalar.
+//
+// Applied unconditionally rather than skipped when it is unity. Multiplying by
+// exactly 1.0f is bit-exact for every finite value, so the branch would buy a
+// few multiplies at the price of a second code path through the strip -- and the
+// path taken at unity would then be the one no test with a fader on it covers.
+void apply_gain(std::span<float* const> channels, float gain, std::size_t num_frames) noexcept {
+  for (float* samples : channels) {
+    for (std::size_t frame = 0; frame < num_frames; ++frame) {
+      samples[frame] *= gain;
+    }
+  }
+}
+
+// AUDIO THREAD. Balance, on a stereo strip.
+//
+// A NO-OP AT ANY OTHER CHANNEL COUNT, deliberately. Left and right is what
+// balance means; there is no honest reading of it for one channel or for five,
+// and inventing one -- "apply left to the even channels" -- would be a rule
+// nobody asked for that silences half a mono strip when panned.
+void apply_balance(std::span<float* const> channels, float balance,
+                   std::size_t num_frames) noexcept {
+  if (channels.size() != 2) {
+    return;
+  }
+  const float left = rt::balance_left(balance);
+  const float right = rt::balance_right(balance);
+  for (std::size_t frame = 0; frame < num_frames; ++frame) {
+    channels[0][frame] *= left;
+    channels[1][frame] *= right;
+  }
+}
+
+// AUDIO THREAD. Loudest magnitude in the buffer, across every channel.
+//
+// Every channel, unlike rt::Voice::peak which measures channel 0 only: a pad
+// meter is one bar next to one pad, but a strip that has been panned hard right
+// must not read as silent because channel 0 is.
+[[nodiscard]] float peak_of(std::span<float* const> channels, std::size_t num_frames) noexcept {
+  float peak = 0.0F;
+  for (const float* samples : channels) {
+    for (std::size_t frame = 0; frame < num_frames; ++frame) {
+      const float value = samples[frame];
+      peak = std::max(peak, value < 0.0F ? -value : value);
+    }
+  }
+  return peak;
+}
+
 }  // namespace
+
+rt::StripConfig Engine::strip_config(std::size_t pad) const noexcept {
+  const std::shared_ptr<const rt::PadConfig>& config = m_pads[pad];
+  return config == nullptr ? rt::StripConfig{} : config->strip;
+}
+
+bool Engine::any_soloed() const noexcept {
+  for (const std::shared_ptr<const rt::PadConfig>& config : m_pads) {
+    if (config != nullptr && config->strip.solo) {
+      return true;
+    }
+  }
+  return false;
+}
 
 void Engine::mix_graph(std::span<float* const> channels, std::size_t num_frames) noexcept {
   if (m_graph_channels.empty()) {
     return;
   }
 
-  // Strips into buses. The routing is fixed at kDefaultBus until M5's T3 gives
-  // every strip a StripConfig to say otherwise; it is a function call rather
-  // than an inlined constant so that there is exactly ONE line to change then,
-  // and exactly one line to break when testing that this does anything.
+  // Derived once for the whole block from all sixteen strips, not stored.
+  // Solo is a property of the SET -- "is anything soloed" -- so a stored count
+  // would be one more thing to keep in step every time a pad is reconfigured,
+  // reloaded or cleared, and a leaked count silences the machine.
+  const bool soloed = any_soloed();
+
   for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
-    mix_into(node_channels(rt::kNumPads + bus_for_strip(pad)), node_channels(pad), num_frames);
+    const rt::StripConfig strip = strip_config(pad);
+    const std::span<float* const> buffer = node_channels(pad);
+
+    // THE FIXED CHAIN: gain -> EQ -> compressor -> balance (docs/MIXER.md).
+    // The EQ and the compressor arrive in the next two tasks and insert BETWEEN
+    // these two calls. Two passes rather than one folded scalar precisely so
+    // that there is a gap to insert into: the order is a specification, and
+    // folding it now would mean unfolding it later and getting it wrong quietly.
+    //
+    // Run for every strip including inaudible ones. A muted strip whose EQ
+    // stopped advancing would jump when unmuted, and skipping a silent strip
+    // would truncate a filter's tail -- a determinism bug dressed as a saving.
+    // Only the mix below is skipped, because that is the part that means
+    // "audible".
+    apply_gain(buffer, rt::clamp_strip_gain(strip.gain), num_frames);
+    apply_balance(buffer, rt::clamp_strip_balance(strip.balance), num_frames);
+
+    // POST-FADER, and zero when the strip is not reaching the mix. This meter
+    // sits next to the fader and answers "what is this strip contributing",
+    // which for a muted strip is nothing. Telemetry::pad_peak is the other
+    // question -- "did this pad play" -- and still reports the hit.
+    const bool audible = rt::strip_audible(strip, soloed);
+    m_strip_peak[pad] = audible ? peak_of(buffer, num_frames) : 0.0F;
+    if (!audible) {
+      continue;
+    }
+    mix_into(node_channels(rt::kNumPads + rt::clamp_strip_bus(strip.bus)), buffer, num_frames);
   }
 
-  // Buses into master, in bus order. Every bus, including the three that
-  // nothing is routed to by default: adding a silent bus adds exactly 0.0f,
-  // which changes no sample and no hash, and a fixed walk is one fewer
-  // conditional in the callback and one fewer way for the graph to differ
-  // between a live run and an offline bounce.
+  // Buses into master, in bus order. Every bus, including any that nothing is
+  // routed to: adding a silent bus adds exactly 0.0f, which changes no sample
+  // and no hash, and a fixed walk is one fewer conditional in the callback and
+  // one fewer way for the graph to differ between a live run and a bounce.
   for (std::size_t bus = 0; bus < rt::kNumBuses; ++bus) {
-    mix_into(channels, node_channels(rt::kNumPads + bus), num_frames);
+    const std::span<float* const> buffer = node_channels(rt::kNumPads + bus);
+    m_bus_peak[bus] = peak_of(buffer, num_frames);
+    mix_into(channels, buffer, num_frames);
   }
-}
-
-std::uint8_t Engine::bus_for_strip(std::size_t pad) const noexcept {
-  static_cast<void>(pad);
-  return rt::kDefaultBus;
 }
 
 bool Engine::publish_pad_config(std::shared_ptr<const rt::PadConfig> config) noexcept {
@@ -127,6 +214,26 @@ bool Engine::set_pad_sample(std::uint8_t pad, std::shared_ptr<const rt::Sample> 
   // thread, which is where building the new object is supposed to happen.
   return publish_pad_config(std::make_shared<const rt::PadConfig>(
       rt::PadConfig{.sample = std::move(sample), .pad = pad}));
+}
+
+bool Engine::set_strip(std::uint8_t pad, const rt::StripConfig& strip) noexcept {
+  if (pad >= rt::kNumPads) {
+    return false;
+  }
+  // Read-modify-publish over the WHOLE PadConfig, which is the one-pointer rule
+  // doing its job rather than getting in the way: there is no path that mutates
+  // a published config, so a fader move is a new object like every other edit.
+  // The sample and the slice come along by copy, which is what keeps a pad
+  // playing the same material after its fader moves.
+  const std::shared_ptr<const rt::PadConfig> current = pad_config(pad);
+  rt::PadConfig next = current == nullptr ? rt::PadConfig{.pad = pad} : *current;
+  next.strip = strip;
+  return publish_pad_config(std::make_shared<const rt::PadConfig>(std::move(next)));
+}
+
+rt::StripConfig Engine::strip(std::uint8_t pad) const noexcept {
+  const std::shared_ptr<const rt::PadConfig> config = pad_config(pad);
+  return config == nullptr ? rt::StripConfig{} : config->strip;
 }
 
 std::shared_ptr<const rt::PadConfig> Engine::pad_config(std::uint8_t pad) const noexcept {
@@ -641,6 +748,20 @@ void Engine::publish_telemetry(std::span<float* const> channels, std::size_t num
   m_published.master_peak.store(std::max(master, previous_master - fall),
                                 std::memory_order_relaxed);
 
+  // The mixer's meters, already measured in mix_graph() where audibility was
+  // known. Same fall as every other meter in the program, from the same
+  // constant, so nothing on screen decays at a rate of its own.
+  for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
+    const float previous = m_published.strip_peak[pad].load(std::memory_order_relaxed);
+    m_published.strip_peak[pad].store(std::max(m_strip_peak[pad], previous - fall),
+                                      std::memory_order_relaxed);
+  }
+  for (std::size_t bus = 0; bus < rt::kNumBuses; ++bus) {
+    const float previous = m_published.bus_peak[bus].load(std::memory_order_relaxed);
+    m_published.bus_peak[bus].store(std::max(m_bus_peak[bus], previous - fall),
+                                    std::memory_order_relaxed);
+  }
+
   // relaxed everywhere: the UI wants a recent value, not a synchronised one, and
   // an acquire/release pair here would put a barrier in the audio thread's hot
   // path to make a meter one frame fresher.
@@ -669,9 +790,14 @@ Telemetry Engine::telemetry() const noexcept {
       static_cast<std::uint8_t>((step >> kTransportPatternShift) & kTransportFieldMask);
 
   snapshot.master_peak = m_published.master_peak.load(std::memory_order_relaxed);
+  for (std::size_t bus = 0; bus < rt::kNumBuses; ++bus) {
+    snapshot.bus_peak[bus] = m_published.bus_peak[bus].load(std::memory_order_relaxed);
+  }
+
   const auto rate = static_cast<float>(m_config.sample_rate == 0 ? 1U : m_config.sample_rate);
   for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {
     snapshot.pad_peak[pad] = m_published.pad_peak[pad].load(std::memory_order_relaxed);
+    snapshot.strip_peak[pad] = m_published.strip_peak[pad].load(std::memory_order_relaxed);
 
     const std::uint32_t glow = m_published.pad_glow[pad].load(std::memory_order_relaxed);
     if (glow == kNeverTriggered) {

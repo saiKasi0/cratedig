@@ -77,7 +77,20 @@ struct Telemetry {
   float master_peak = 0.0F;
 
   // Per-pad level, same fall behaviour. Indexed by pad.
+  //
+  // WHAT THE PAD PLAYED, measured on the voices before the mixer touches them.
+  // Not the same question as strip_peak below, and both are wanted: this one
+  // drives the pad grid, where a muted pad should still acknowledge the hit.
   std::array<float, rt::kNumPads> pad_peak{};
+
+  // WHAT THE STRIP CONTRIBUTED, measured after the fader and the balance, and
+  // zero when the strip is muted or soloed out. This is the meter beside the
+  // fader on the MIX screen: it answers "is this reaching the mix", which for a
+  // muted strip is no, however hard the pad was hit.
+  std::array<float, rt::kNumPads> strip_peak{};
+
+  // Per-bus level, after every strip routed to it has summed in.
+  std::array<float, rt::kNumBuses> bus_peak{};
 
   // Per-pad trigger acknowledgement. Indexed by pad. See PadGlow above for why
   // this is not the same thing as pad_peak.
@@ -234,6 +247,23 @@ class Engine {
   [[nodiscard]] std::shared_ptr<const rt::PadConfig> pad_config(std::uint8_t pad) const noexcept;
 
   [[nodiscard]] std::shared_ptr<const rt::Sample> pad_sample(std::uint8_t pad) const noexcept;
+
+  // CONTROL THREAD. Replaces one pad's mixer settings, keeping everything else
+  // about the pad.
+  //
+  // A fader move goes through the same handoff protocol as loading a sample,
+  // because a StripConfig lives inside the PadConfig and a published PadConfig
+  // is immutable (rt/pad_config.hpp). That is not ceremony: it is what makes
+  // moving a fader while sixteen voices are sounding a pointer swap rather than
+  // a race.
+  //
+  // Returns false if the handoff ring is full, exactly like publish_pad_config,
+  // in which case the strip is unchanged.
+  [[nodiscard]] bool set_strip(std::uint8_t pad, const rt::StripConfig& strip) noexcept;
+
+  // CONTROL THREAD. What this thread last published for that pad's strip, with
+  // the same one-block-ahead caveat as pad_config().
+  [[nodiscard]] rt::StripConfig strip(std::uint8_t pad) const noexcept;
 
   // CONTROL THREAD. Queues a pad hit for the next block.
   //
@@ -407,6 +437,8 @@ class Engine {
 
     std::atomic<float> master_peak{0.0F};
     std::array<std::atomic<float>, rt::kNumPads> pad_peak{};
+    std::array<std::atomic<float>, rt::kNumPads> strip_peak{};
+    std::array<std::atomic<float>, rt::kNumBuses> bus_peak{};
 
     // Written on trigger and aged once per block. Initialised in the Engine
     // constructor rather than here, because a default-constructed
@@ -497,12 +529,16 @@ class Engine {
   // `channels`, at unity.
   void mix_graph(std::span<float* const> channels, std::size_t num_frames) noexcept;
 
-  // AUDIO THREAD. Which bus strip `pad` feeds.
+  // AUDIO THREAD. This pad's mixer settings, or the defaults if nothing has been
+  // published to it. An unloaded pad has a strip like any other -- it is simply
+  // one with nothing running through it.
+  [[nodiscard]] rt::StripConfig strip_config(std::size_t pad) const noexcept;
+
+  // AUDIO THREAD, once per block. Whether ANY strip is soloed.
   //
-  // Constant until M5's StripConfig lands, and a function anyway: routing is the
-  // one thing about the graph that is going to become configurable, so it gets a
-  // seam now rather than sixteen call sites later.
-  [[nodiscard]] std::uint8_t bus_for_strip(std::size_t pad) const noexcept;
+  // Derived rather than stored, because solo is a property of the set: the
+  // question every strip has to ask is not "am I soloed" but "is anything".
+  [[nodiscard]] bool any_soloed() const noexcept;
 
   // AUDIO THREAD, after the voices. Adds the metronome click, if it is on.
   //
@@ -568,6 +604,13 @@ class Engine {
   // [n * num_channels, (n + 1) * num_channels). Built once, so producing the
   // span a node needs is a multiply rather than anything that could allocate.
   std::vector<float*> m_graph_channels;
+
+  // AUDIO THREAD ONLY. This block's post-fader levels, measured in mix_graph()
+  // where audibility is already known and read by publish_telemetry() a few
+  // lines later. Plain floats: one thread writes them and the same thread reads
+  // them, so an atomic would buy nothing.
+  std::array<float, rt::kNumPads> m_strip_peak{};
+  std::array<float, rt::kNumBuses> m_bus_peak{};
 
   // CONTROL THREAD ONLY: what this thread has published, so pad_config() can
   // answer without reading the audio thread's table. Not a cache of m_pads — it

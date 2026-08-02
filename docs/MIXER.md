@@ -131,7 +131,15 @@ solely as the reference these are measured against.
 
 ### Gain
 
-Linear, applied to both channels. Default 1.0.
+Linear, applied to both channels. Default 1.0, range **[0, 4]** — silence to +12 dB, which is
+past any mix decision and short of the range where one bad number makes the output painful.
+
+**Out-of-range values fall back to the default, they are not clamped to the nearest bound.**
+`std::clamp` would map an infinity to the ceiling and a NaN to whichever bound it compared
+first, turning "this number is meaningless" into "play this as loud as the mixer allows". The
+same rule applies to balance and to the bus index, and it is the discipline
+`rt::VoicePool::step_for` already uses: these values crossed a thread boundary and the audio
+thread does not get to abort on bad input.
 
 ### Balance
 
@@ -145,6 +153,12 @@ One control in [−1, +1], 0 at centre.
 Exactly 1.0 on both channels at centre; a hard pan silences the other side. Linear rather than
 `cos/sin` for the transparency reason above — this is a balance control on a stereo signal,
 not a panner placing a mono source in a field.
+
+**A no-op at any channel count other than two.** Left and right is what balance means; there
+is no honest reading of it for one channel or for five, and inventing one — "apply the left
+gain to the even channels" — is a rule nobody asked for that silences half a mono strip the
+moment it is panned. Placing a mono source in a stereo field is a different job and, if it is
+ever wanted, a different control.
 
 ### Mute and solo
 
@@ -356,6 +370,21 @@ which depends on the device, while `render()`'s output does not.
 Peak with a fall time of `Engine::kPeakFallSeconds` (0.4 s), reusing the existing constant so
 every meter in the program falls at the same rate. Gain reduction is metered separately, as a
 linear gain rather than a dB value, converted at the boundary like everything else.
+
+**Strip peaks are post-fader, and read zero when the strip is muted or soloed out.** That is
+not the same question `Telemetry::pad_peak` answers, and both are wanted:
+
+| Meter | Question | Muted pad, hit hard |
+|---|---|---|
+| `pad_peak` | did this pad *play*? | non-zero — the grid acknowledges the hit |
+| `strip_peak` | is this strip *reaching the mix*? | zero — it is not |
+
+The strip meter sits beside the fader on the MIX screen, where "muted but showing level" would
+be a lie about where the sound is going. The pad meter sits on the grid, where a hit that
+lights nothing looks like a dropped trigger.
+
+Strip peaks measure **every channel**, unlike `rt::Voice::peak`, which measures channel 0 only
+to keep the innermost loop cheap. A strip panned hard right must not read as silent.
 
 ## M5.2, and where it attaches
 
