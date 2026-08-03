@@ -6,6 +6,7 @@
 #include "rt/pad_event.hpp"
 #include "rt/sequencer.hpp"
 #include "rt/strip.hpp"
+#include "tui/completion.hpp"
 
 #include <array>
 #include <cstddef>
@@ -383,6 +384,26 @@ struct MixState {
   bool any_solo = false;
 };
 
+// The Tab menu's state: what is on offer and which one is selected.
+//
+// The entries are a copy rather than a reference into the completion table
+// because paths are in here too and those are built per keystroke. Cheap: the
+// longest set is thirty-three short strings, rebuilt only when Tab is pressed.
+struct CompletionState {
+  std::vector<Completion> entries;
+  std::size_t cursor = 0;
+
+  // Where in the typed line the selection goes. See tui::CompletionSet.
+  std::size_t replace_from = 0;
+
+  // Showing. Distinct from `entries.empty()` so that closing the menu and
+  // having nothing to offer stay separable -- the first is a thing the person
+  // did and the second is a thing the line is.
+  bool active = false;
+
+  [[nodiscard]] bool showing() const noexcept { return active && !entries.empty(); }
+};
+
 struct UiState {
   std::string version;
 
@@ -450,6 +471,21 @@ struct UiState {
   // prompt competing for space with a keymap is a prompt you cannot read.
   bool command_active = false;
   std::string command_text;
+
+  // What Tab is offering, if it has been pressed.
+  //
+  // OPENED BY TAB RATHER THAN SHOWN WHILE TYPING, which is the one real choice
+  // in this feature. A menu that appeared on its own would put thirty-three
+  // verbs on screen the instant you pressed `:` -- everything matches an empty
+  // line -- and then shrink as you typed, which is a lot of movement in exchange
+  // for a list you did not ask for. Tab is what a person at a terminal presses
+  // when they want to know, and it costs nothing when they do not.
+  //
+  // CAPTURED, NOT RECOMPUTED. Once open the entries stay as they were and Tab
+  // cycles the cursor, because applying the selection changes the line and
+  // recomputing from the changed line would give a set of one -- the thing just
+  // applied -- and cycling would stop after the first press.
+  CompletionState completion;
 
   // What the last command said. It takes the mode line's whole right-hand side,
   // displacing both the counters and the keymap: an answer to something the

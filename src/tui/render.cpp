@@ -892,8 +892,47 @@ std::size_t wave_columns_for(std::size_t terminal_columns) noexcept {
   return terminal_columns > 2 ? terminal_columns - 2 : 0;
 }
 
+namespace {
+
+// Every screen, before the completion menu is accounted for. See render().
+[[nodiscard]] ftxui::Element render_screen(const UiState& state, std::size_t terminal_columns,
+                                           std::size_t terminal_rows);
+
+}  // namespace
+
+// THE MENU IS SUBTRACTED FROM THE BUDGET, not drawn on top of it.
+//
+// Every screen builds `vbox({header, ..., filler(), mode_line})` sized to the
+// terminal, so rows appended below the mode line do not push the panels up --
+// they run off the bottom, and the first thing to go is the menu's own caption.
+// Taking the height off the screen first is what makes the panels shrink
+// instead, which is what a person expects: the waveform gets shorter while the
+// menu is up and comes back when it closes.
 ftxui::Element render(const UiState& state, std::size_t terminal_columns,
                       std::size_t terminal_rows) {
+  // What the screen can spare: everything above the floor it needs to stay
+  // legible. The menu fits itself into this rather than the screen giving way.
+  const std::size_t spare = terminal_rows > kMinRows ? terminal_rows - kMinRows : 0;
+  const std::size_t menu = detail::completion_rows(state.completion, spare);
+  if (menu == 0) {
+    return render_screen(state, terminal_columns, terminal_rows);
+  }
+  // PINNED TO AN EXACT HEIGHT, which the subtraction alone does not achieve.
+  // Every screen ends in a `filler()`, and a filler is greedy: handed to an
+  // outer vbox it expands to whatever space is going and pushes the menu off
+  // the bottom of the terminal -- which looked exactly like the clipping this
+  // wrapper was written to fix, one layer further out.
+  return ftxui::vbox({
+      render_screen(state, terminal_columns, terminal_rows - menu) |
+          ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, static_cast<int>(terminal_rows - menu)),
+      detail::completion_menu(state.completion, terminal_columns, spare),
+  });
+}
+
+namespace {
+
+ftxui::Element render_screen(const UiState& state, std::size_t terminal_columns,
+                             std::size_t terminal_rows) {
   // The size floor is checked here and only here, so both screens get the same
   // legible message rather than one of them getting a mess.
   if (terminal_columns < kMinColumns || terminal_rows < kMinRows) {
@@ -940,5 +979,7 @@ ftxui::Element render(const UiState& state, std::size_t terminal_columns,
       mode_line(state, terminal_columns),
   });
 }
+
+}  // namespace
 
 }  // namespace tui

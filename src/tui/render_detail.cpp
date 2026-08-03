@@ -5,6 +5,7 @@
 
 #include <ftxui/dom/elements.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <iomanip>
@@ -131,6 +132,133 @@ std::string paint_at(std::string_view row, std::size_t column, std::string_view 
   return before + glyph + utf8_split(rest, glyph_cells).second;
 }
 
+// The Tab menu, drawn under the prompt as the COMMAND mockup has it.
+//
+// UNDER rather than over, which is where the mockup puts it and is also the
+// only place it can go: the mode line is the last row of every screen's vbox,
+// so anything above it would have to displace a panel, and a menu that resized
+// the waveform every time you pressed Tab would be a menu nobody pressed twice.
+namespace {
+
+// How many entries fit, given the rows the caller can spare.
+//
+// THE MENU SHRINKS RATHER THAN VANISHING. The first version dropped it whole
+// when the screen would have gone below its floor, which at the design size of
+// 30 rows meant a bare `:` -- thirty-three verbs wanting eleven rows against a
+// budget of ten -- silently showed nothing at all. Fewer rows and an honest
+// "n more" is the answer; all-or-nothing is not.
+[[nodiscard]] std::size_t visible_entries(const CompletionState& completion, std::size_t max_rows) {
+  if (!completion.showing() || max_rows < 3) {
+    return 0;  // under three there is no room for a rule, one entry and a caption
+  }
+  // Two go to the rule and the caption.
+  const std::size_t spare = max_rows - 2;
+  std::size_t visible = std::min({kMaxCompletionRows, completion.entries.size(), spare});
+
+  // The "n more" line needs a row of its own, and taking it from the entries is
+  // what keeps the total inside the budget rather than one over it.
+  if (completion.entries.size() > visible && visible + 1 > spare) {
+    --visible;
+  }
+  return visible;
+}
+
+}  // namespace
+
+std::size_t completion_rows(const CompletionState& completion, std::size_t max_rows) {
+  const std::size_t visible = visible_entries(completion, max_rows);
+  if (visible == 0) {
+    return 0;
+  }
+  // The rule, the entries, the "n more" line when there is one, and the caption.
+  // Derived from the SAME visible_entries() the menu draws, so the two cannot
+  // disagree -- a height that under-reported would clip the caption off the
+  // bottom of the terminal, which is what this whole wrapper exists to prevent.
+  return 1 + visible + (completion.entries.size() > visible ? 1 : 0) + 1;
+}
+
+ftxui::Element completion_menu(const CompletionState& completion, std::size_t columns,
+                               std::size_t max_rows) {
+  // The widest phrase, so the details line up in a column. Measured over the
+  // WHOLE set rather than the visible window: a column that moved as you cycled
+  // would be a column, moving.
+  std::size_t widest = 0;
+  for (const Completion& entry : completion.entries) {
+    widest = std::max(widest, utf8_cells(entry.text));
+  }
+
+  const std::size_t rows = visible_entries(completion, max_rows);
+
+  // Scroll to keep the selection visible, exactly as BROWSE's listing does.
+  std::size_t first = 0;
+  if (completion.cursor >= rows) {
+    first = completion.cursor - rows + 1;
+  }
+
+  ftxui::Elements lines;
+  std::string rule;
+  for (std::size_t cell = 0; cell < columns; ++cell) {
+    rule += "\u2500";
+  }
+  lines.push_back(ftxui::text(rule) | ftxui::color(theme::muted()));
+
+  for (std::size_t index = first; index < completion.entries.size() && lines.size() <= rows;
+       ++index) {
+    const Completion& entry = completion.entries[index];
+    const bool selected = index == completion.cursor;
+
+    // THE MARKER IS OUTSIDE WHAT GETS CLIPPED. Clipping the assembled row --
+    // prefix and all -- is what the first version did, and a left-clipped path
+    // then ate the very glyph that says which row is selected.
+    const std::string prefix = std::string{"  "} + (selected ? "\u258c " : "  ");
+    const std::size_t room = columns > utf8_cells(prefix) + 1 ? columns - utf8_cells(prefix) : 1;
+
+    std::string body = entry.text;
+    if (entry.detail.empty()) {
+      // A PATH, and a path clips from the LEFT -- the rule BROWSE's header
+      // already uses, because `.../breaks/amen.wav` says more than
+      // `/Users/someone/Music/Sam...`. No padding either: aligning to the widest
+      // entry is for the detail column, and one path among paths has none.
+      if (utf8_cells(body) > room) {
+        body = "\u2026" + utf8_split(body, utf8_cells(body) - (room - 1)).second;
+      }
+    } else {
+      while (utf8_cells(body) < widest + 2) {
+        body.push_back(' ');
+      }
+      body += entry.detail;
+      if (utf8_cells(body) > room) {
+        body = utf8_split(body, room).first;  // a verb's identity is its first word
+      }
+    }
+
+    ftxui::Element line = ftxui::text(prefix + body);
+    lines.push_back(selected ? line | ftxui::color(theme::accent()) | ftxui::bold
+                             : line | ftxui::color(theme::muted()));
+  }
+
+  // How many did not fit, said rather than left to be discovered -- a menu that
+  // silently showed eight of thirty-three would read as "there are eight".
+  if (completion.entries.size() > rows) {
+    lines.push_back(
+        ftxui::text("    " + std::to_string(completion.entries.size() - rows) + " more") |
+        ftxui::color(theme::muted()));
+  }
+
+  // TAB AND SHIFT-TAB, not j and k, and that is a departure the mockup forced
+  // rather than one chosen. Its caption row reads `j k select`; `j` and `k` are
+  // letters you are in the middle of typing. No verb here contains either, so
+  // verbs alone would have survived it -- but paths are completed with the same
+  // menu, and `kits/`, `kick.wav` and `jungle/` are exactly the names a crate is
+  // full of. A menu you cannot use while typing the thing it is completing is
+  // not a menu.
+  lines.push_back(
+      ftxui::text("  tab next \u00b7 shift-tab back \u00b7 enter run \u00b7 esc close") |
+      ftxui::color(theme::muted()));
+
+  return ftxui::vbox(std::move(lines));
+}
+
 ftxui::Element mode_line(const UiState& state, std::size_t columns, std::string_view prefix,
                          const std::vector<std::string>& facts,
                          std::span<const std::string_view> hint_tiers, std::size_t min_fact_cells) {
@@ -155,13 +283,34 @@ ftxui::Element mode_line(const UiState& state, std::size_t columns, std::string_
       // a prompt that has stopped accepting input.
       typed = utf8_split(typed, utf8_cells(typed) - room).second;
     }
-    return ftxui::hbox({
+    ftxui::Elements prompt{
         ftxui::text(" "),
         ftxui::text(":") | ftxui::color(theme::accent()),
         ftxui::text(typed) | ftxui::color(theme::bright()),
         ftxui::text("█") | ftxui::color(theme::accent()),
         ftxui::filler(),
-    });
+    };
+
+    // A NOTE ON THE PROMPT'S OWN LINE, right-aligned.
+    //
+    // The message branch below is unreachable while the prompt is up -- this one
+    // returns first -- so anything set_message() said during a command was
+    // simply invisible. That went unnoticed until Tab wanted to answer "no
+    // command starts with that", and a Tab that says nothing is exactly the
+    // confusion that cost M5 a wrong finding about Tab in the first place.
+    //
+    // Right-aligned rather than on a row of its own: a row would have to come
+    // out of the screen's budget the way the menu does, and this is one short
+    // sentence that fits in the space the typed line is not using.
+    if (!state.message.empty()) {
+      const std::size_t used = utf8_cells(typed) + 3;
+      const std::size_t spare = columns > used + 2 ? columns - used - 2 : 0;
+      if (utf8_cells(state.message) <= spare) {
+        prompt.push_back(ftxui::text(state.message + " ") |
+                         ftxui::color(state.message_is_error ? theme::accent() : theme::muted()));
+      }
+    }
+    return ftxui::hbox(std::move(prompt));
   }
 
   // What the last command said, in place of everything else. See UiState for

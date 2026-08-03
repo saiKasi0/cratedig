@@ -15,6 +15,7 @@
 #include "ingest/slices.hpp"
 #include "rt/sample.hpp"
 #include "rt/strip.hpp"
+#include "tui/completion.hpp"
 #include "tui/render.hpp"
 #include "tui/theme.hpp"
 #include "tui/ui_state.hpp"
@@ -1462,4 +1463,76 @@ TEST_CASE("BROWSE scrolls to keep the cursor on screen", "[tui]") {
   }
   state.browser.cursor = 37;
   check_snapshot("browse_scrolled_100x20", state, 100, 20);
+}
+
+// -- the completion menu ------------------------------------------------------
+
+namespace {
+
+[[nodiscard]] tui::UiState completing(int columns, const std::string& typed, tui::CompletionSet set,
+                                      std::size_t cursor = 0) {
+  // The cursor moves BEFORE the line is built. Getting this backwards is what
+  // the first version did, and it produced a snapshot whose line read
+  // `chop grid` while the marker sat on `chop transient` -- a picture of a bug
+  // the program does not have, committed as the expected output.
+  set.cursor = cursor;
+
+  tui::UiState state = chopped_state(columns);
+  state.command_active = true;
+  state.completion.entries = set.entries;
+  state.completion.replace_from = set.replace_from;
+  state.completion.cursor = cursor;
+  state.completion.active = true;
+  state.command_text = set.apply(typed);
+  return state;
+}
+
+}  // namespace
+
+TEST_CASE("the completion menu lists what Tab is offering", "[tui]") {
+  // The line shows the SELECTION, not what was typed -- so that Enter runs what
+  // is on screen rather than what was on it a keystroke ago.
+  check_snapshot("complete_verbs_100x30", completing(100, "ch", tui::complete_verbs("ch")), 100,
+                 30);
+}
+
+TEST_CASE("the completion menu marks the selection as it cycles", "[tui]") {
+  check_snapshot("complete_second_100x30", completing(100, "ch", tui::complete_verbs("ch"), 1), 100,
+                 30);
+}
+
+TEST_CASE("a menu too tall for the terminal shrinks and says how much it hid", "[tui]") {
+  // The case that was silently blank before the menu learned to shrink: an empty
+  // line matches all thirty-three verbs, which wants eleven rows against a
+  // budget of ten at the design size.
+  check_snapshot("complete_all_100x30", completing(100, "", tui::complete_verbs("")), 100, 30);
+}
+
+TEST_CASE("a path completion clips from the left", "[tui]") {
+  // A path's identity is at its end. The verbs clip from the right, and the two
+  // are told apart by which has a detail column.
+  const tui::PathContext context = tui::path_being_typed("load /home/someone/Music/Samples/br");
+  const std::vector<std::string> names{
+      "/home/someone/Music/Samples/breakbeats_and_the_other_things_kept_here/"
+      "amen_brother_full_take_02.wav",
+      "/home/someone/Music/Samples/break.wav",
+  };
+  check_snapshot(
+      "complete_paths_100x30",
+      completing(100, "load /home/someone/Music/Samples/br", tui::complete_paths(context, names)),
+      100, 30);
+}
+
+TEST_CASE("the prompt carries its own note", "[tui]") {
+  // The message branch of mode_line() is unreachable while the prompt is up --
+  // the prompt returns first -- so anything a command said mid-typing was
+  // invisible. Found when Tab wanted to answer "nothing matches", which is a
+  // thing it MUST say: a Tab that does nothing is indistinguishable from a Tab
+  // the terminal ate, and this project has already spent a milestone believing
+  // exactly that.
+  tui::UiState state = chopped_state(100);
+  state.command_active = true;
+  state.command_text = "zzz";
+  state.message = "no command starts with that";
+  check_snapshot("prompt_note_100x30", state, 100, 30);
 }

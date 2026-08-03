@@ -34,6 +34,7 @@ add_executable(
   unit/onset_accuracy_test.cpp
   unit/onset_test.cpp
   unit/peak_pyramid_test.cpp
+  unit/completion_test.cpp
   unit/pool_test.cpp
   unit/result_test.cpp
   unit/rt_scope_test.cpp
@@ -173,6 +174,15 @@ if(Python3_FOUND)
   # reach: a snapshot renders a BrowserState a test built by hand, so every one
   # of them would still pass if no key produced one and nothing was read from
   # disk.
+  # The Tab menu's keymap: that Tab opens it, cycles it and completes a line the
+  # parser then accepts. Also the standing guard on the M5 mistake -- Tab was
+  # declared dead in three comments and one design decision before anyone
+  # pressed it, and this presses it.
+  add_test(NAME complete_pty_e2e
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_complete_session.py
+                   $<TARGET_FILE:cratedig>)
+  set_tests_properties(complete_pty_e2e PROPERTIES LABELS e2e TIMEOUT ${CRATEDIG_PTY_TIMEOUT})
+
   add_test(NAME browse_pty_e2e
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_browse_session.py
                    $<TARGET_FILE:cratedig>)

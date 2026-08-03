@@ -138,6 +138,15 @@ preview cannot light a pad or be silenced by one's mute.
 | `:files` · `:pool` | list the crate |
 | `:file N` | look at another loaded file |
 | `:unload [N]` | drop a file; pads holding it keep playing |
+| `:browse [dir]` | open BROWSE, on a directory or where the last load came from |
+| `:mix [buses]` | open MIX, on the channels or on the bus page |
+| `:gain P N` | strip P's fader, in dB (`:gain bus 1 -3` for a bus) |
+| `:pan P N` | place strip P, −100 (left) to 100 (right) |
+| `:mute P [on\|off]` · `:solo P [on\|off]` | bare form flips it |
+| `:bus P a`–`d` | route strip P to a bus |
+| `:eq P B F G S` | band B of strip P: frequency, gain in dB, shape; `:eq P B off` bypasses |
+| `:comp P T R A L` | strip P's compressor: threshold, ratio, attack, release; `:comp P off` |
+| `:limit [on\|off] [dB]` | the master limiter and its ceiling |
 | `:perform` | back to PERFORM |
 | `:bpm N` | tempo, 20–300, one or two decimals (`:bpm 92.5`) |
 | `:swing N` | shift the odd steps late by N% of a step, up to 75 |
@@ -151,6 +160,13 @@ preview cannot light a pad or be silenced by one's mute.
 | `:q` `:quit` | quit |
 
 `slice` is accepted anywhere `chop` is.
+
+**Tab completes.** At the `:` prompt it offers every command that starts with
+what you have typed, with a line each saying what it does; Tab and Shift-Tab (or
+the arrows) move through them and the line always shows the selection, so Enter
+runs what you can see. After `:load` or `:browse` it completes paths instead,
+offering directories and audio files from wherever you have got to. Esc closes
+the menu; Esc again closes the prompt.
 
 **MIDI.** A controller plugged in before start-up plays the pads at real
 velocity: note 36 is pad 1 (the General MIDI bass drum, which is what essentially
@@ -189,7 +205,8 @@ point of a status section.
 | **yt-dlp import** | M6, using a yt-dlp you install yourself (see `docs/LICENSING.md`). |
 | **Banks and a 32-pad mode** | M6. Sixteen pads at a time; `:slot assign 17-32 1` reaches further slices in one line. |
 | **Saturation, sends, reverb, delay** | M5.2. The mixer's graph already has the attachment points, which is why they can land without re-cutting it. |
-| **A file browser** | M5.5, in progress. `:load <path>` is the way in until then. |
+| **Configurable transient detection** | M5.7. `:chop transient` runs at one fixed threshold today; the profiles that let you say what counts as a hit come next. |
+| **Varispeed and BPM detection** | M5.7. The chipmunk/screwed knob, and a tempo read off the sample rather than typed. |
 | **Lua config and scripting** | M7. |
 
 ## Building and testing

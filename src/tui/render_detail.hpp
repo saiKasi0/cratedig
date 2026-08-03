@@ -101,6 +101,20 @@ using tui::kPadKeys;
 // `facts` are in priority order and are dropped from the end when the line runs
 // out of room; `hint_tiers` are longest first and the longest that still leaves
 // `min_fact_cells` for the facts wins.
+// How many rows the menu may take. Eight is the COMMAND mockup's six plus room,
+// and a cap rather than the whole set because "everything" is thirty-three verbs
+// and a menu taller than the waveform has stopped being a hint.
+inline constexpr std::size_t kMaxCompletionRows = 8;
+
+// The Tab menu, and how tall it is. Two functions that MUST agree: render()
+// subtracts the height from the screen's budget before drawing the panels, so a
+// height that under-reported would clip the caption off the bottom.
+// `max_rows` is what the caller can spare -- the terminal's height less the
+// floor every screen needs. The menu shrinks into it rather than being dropped.
+[[nodiscard]] std::size_t completion_rows(const CompletionState& completion, std::size_t max_rows);
+[[nodiscard]] ftxui::Element completion_menu(const CompletionState& completion, std::size_t columns,
+                                             std::size_t max_rows);
+
 [[nodiscard]] ftxui::Element mode_line(const UiState& state, std::size_t columns,
                                        std::string_view prefix,
                                        const std::vector<std::string>& facts,

@@ -10,6 +10,7 @@
 #include "rt/sample.hpp"
 #include "rt/sequencer.hpp"
 #include "tui/command.hpp"
+#include "tui/completion.hpp"
 #include "tui/keys.hpp"
 #include "tui/render.hpp"
 #include "tui/render_detail.hpp"
@@ -140,6 +141,11 @@ constexpr std::uint8_t kPad = 0;
 // bytes, which is what the Kitty protocol reports for them and what FTXUI's own
 // events are built from -- so one set of names covers both paths.
 constexpr std::uint32_t kTab = 9;
+
+// Shift-Tab has no character; FTXUI reports it as its own event and this is the
+// code the rest of the program knows it by. Above the functional-key floor for
+// the reason every other synthetic code is: printable() must never emit it.
+constexpr std::uint32_t kTabReverse = kFirstFunctionalKey + 16;
 constexpr std::uint32_t kReturn = 13;
 constexpr std::uint32_t kEscape = 27;
 constexpr std::uint32_t kSpace = 32;
@@ -185,11 +191,27 @@ constexpr std::uint32_t kBackspace = 127;
   if (event == ftxui::Event::Tab) {
     return KeyEvent{.key = kTab};
   }
+  if (event == ftxui::Event::TabReverse) {
+    return KeyEvent{.key = kTabReverse};
+  }
   if (event == ftxui::Event::ArrowLeft) {
     return KeyEvent{.key = kKeyArrowLeft};
   }
   if (event == ftxui::Event::ArrowRight) {
     return KeyEvent{.key = kKeyArrowRight};
+  }
+  // UP AND DOWN WERE MISSING UNTIL M5.5 T7, which is why every arrow binding on
+  // a vertical list -- BROWSE's listing, MIX's strips, the completion menu --
+  // did nothing on a terminal that does not speak the Kitty protocol. The
+  // horizontal pair had been here since M2 and the vertical pair simply was not,
+  // so `j`/`k` worked and the arrows beside them in the hint line did not.
+  // Measured with a probe that reports the code of every key: left and right
+  // arrived, up and down produced nothing at all.
+  if (event == ftxui::Event::ArrowUp) {
+    return KeyEvent{.key = kKeyArrowUp};
+  }
+  if (event == ftxui::Event::ArrowDown) {
+    return KeyEvent{.key = kKeyArrowDown};
   }
   return std::nullopt;  // mouse, resize, a sequence we do not bind
 }
@@ -1715,6 +1737,100 @@ int run_app(const AppOptions& options) {
   // Bindings compare key.character(), not key.key. The protocol reports the
   // UNSHIFTED key with the typed text alongside; FTXUI reports the text as the
   // key. character() is the one value both paths agree on.
+  auto close_completion = [&state]() {
+    state.completion.entries.clear();
+    state.completion.cursor = 0;
+    state.completion.active = false;
+  };
+
+  // Candidate paths for a partially typed one.
+  //
+  // ON THE CONTROL THREAD, where read_directory() already is, and NOT in
+  // completion.cpp: choosing among names is a pure function and reading a
+  // directory is I/O, so they are two functions in two places. Same split as
+  // BROWSE, for the same reason -- the pure half is the half worth testing and
+  // it should not need a filesystem to test.
+  auto path_candidates = [](const PathContext& context) {
+    std::vector<std::string> names;
+    const std::filesystem::path typed{context.partial};
+
+    // The directory to read, and the stem to match inside it. A partial that
+    // ends in a separator is a finished directory name -- `load /crate/` means
+    // "what is in /crate" -- while `/crate/br` means "what in /crate starts
+    // with br". std::filesystem::path gets this right via parent_path() only
+    // when the trailing separator is there, which is why it is tested first.
+    const bool whole_directory =
+        !context.partial.empty() &&
+        context.partial.back() == std::filesystem::path::preferred_separator;
+    const std::filesystem::path where = whole_directory           ? typed
+                                        : typed.has_parent_path() ? typed.parent_path()
+                                                                  : std::filesystem::path{"."};
+
+    std::error_code failed;
+    const std::filesystem::directory_iterator listing{where, failed};
+    if (failed) {
+      return names;  // an unreadable directory offers nothing, and says nothing
+    }
+
+    for (const std::filesystem::directory_entry& item : listing) {
+      std::error_code ignored;
+      const std::string name = item.path().filename().string();
+      if (name.empty() || name.front() == '.') {
+        continue;  // dotfiles are noise here for the reason they are in BROWSE
+      }
+      const bool directory = item.is_directory(ignored);
+      if (!directory && !looks_like_audio(item.path())) {
+        continue;
+      }
+      // Offered as it would be TYPED, not as the filesystem spells it: the
+      // partial the person wrote is the prefix, so `load ./b` must offer
+      // `./break.wav` rather than `break.wav`. Rebuilding from `where` keeps
+      // the two in step whatever they typed.
+      std::string full = (where / name).string();
+      if (directory) {
+        // A trailing separator, so a second Tab descends rather than stopping.
+        full.push_back(static_cast<char>(std::filesystem::path::preferred_separator));
+      }
+      names.push_back(std::move(full));
+    }
+    return names;
+  };
+
+  // Tab: open the menu if it is closed, move within it if it is open.
+  auto step_completion = [&](bool backwards) {
+    CompletionState& menu = state.completion;
+
+    if (!menu.showing()) {
+      const PathContext context = path_being_typed(state.command_text);
+      const CompletionSet set = context.is_path ? complete_paths(context, path_candidates(context))
+                                                : complete_verbs(state.command_text);
+      if (set.empty()) {
+        // Said out loud. A Tab that does nothing at all is indistinguishable
+        // from a Tab the terminal ate -- which this program has already spent a
+        // milestone believing.
+        set_message(context.is_path ? "nothing here to complete" : "no command starts with that",
+                    false);
+        return;
+      }
+      menu.entries = set.entries;
+      menu.replace_from = set.replace_from;
+      menu.cursor = 0;
+      menu.active = true;
+    } else {
+      const std::size_t count = menu.entries.size();
+      menu.cursor = backwards ? (menu.cursor + count - 1) % count : (menu.cursor + 1) % count;
+    }
+
+    // The line always shows the selection, so that Enter runs what you can see
+    // rather than what you last typed. Applied through the SET's own rule,
+    // which is why replace_from travels with the entries.
+    CompletionSet applied;
+    applied.entries = menu.entries;
+    applied.cursor = menu.cursor;
+    applied.replace_from = menu.replace_from;
+    state.command_text = applied.apply(state.command_text);
+  };
+
   auto handle_key = [&](const KeyEvent& key) -> bool {
     const std::uint32_t code = key.character();
     const bool press = key.action == KeyAction::kPress;
@@ -1736,8 +1852,18 @@ int run_app(const AppOptions& options) {
         return true;
       }
       if (code == kEscape) {
+        // ESC CLOSES THE MENU FIRST, then the prompt. Two steps because they
+        // are two things: having opened a menu by accident and wanting the
+        // whole line gone are different intentions, and one key that always did
+        // the second would make Tab a thing you had to be sure about before
+        // pressing.
+        if (state.completion.showing()) {
+          close_completion();
+          return true;
+        }
         state.command_active = false;
         state.command_text.clear();
+        close_completion();
         return true;
       }
       if (code == kReturn) {
@@ -1747,11 +1873,21 @@ int run_app(const AppOptions& options) {
         // with a stale `:` line in it.
         state.command_active = false;
         state.command_text.clear();
+        close_completion();
         execute(command);
+        return true;
+      }
+      if (code == kTab || code == kTabReverse || code == kKeyArrowDown || code == kKeyArrowUp) {
+        const bool backwards = code == kTabReverse || code == kKeyArrowUp;
+        step_completion(backwards);
         return true;
       }
       if (code == kBackspace) {
         pop_codepoint(state.command_text);
+        // Typing dismisses the menu. The set was captured when Tab was pressed
+        // and cycling it against a line that has since changed would offer
+        // things that no longer match what is on screen.
+        close_completion();
         return true;
       }
       // Anything that is not a printable character -- arrows, function keys,
@@ -1759,6 +1895,7 @@ int run_app(const AppOptions& options) {
       // a keystroke aimed at the prompt.
       if (const std::string typed = printable(code); !typed.empty()) {
         state.command_text += typed;
+        close_completion();
       }
       return true;
     }
@@ -1910,17 +2047,19 @@ int run_app(const AppOptions& options) {
       switch (code) {
         case '[':
         case ']': {
-          // PAGING IS ON `[` AND `]`, NOT ON TAB, and that is a measurement
-          // rather than a preference. Tab never reaches this handler: FTXUI
-          // consumes it before CatchEvent runs, which a probe confirmed by
-          // reporting the code of every other key and nothing for Tab. PERFORM's
-          // own Tab binding -- the sample/pattern panel switch, in this file
-          // since M2 -- is dead for the same reason and was never noticed
-          // because the PTY session only presses it conditionally.
+          // PAGING IS ON `[` AND `]`, and the reason recorded here in M5 was
+          // WRONG: it said Tab never reaches this handler because FTXUI consumes
+          // it before CatchEvent runs. It does reach it. A probe in M5.5 that
+          // reports the code of every key showed Tab arriving as 9 on a plain
+          // xterm, and the PERFORM panel switch it claimed was dead switches the
+          // panel. The M5 probe read a stale screen -- the same mistake its
+          // replacement made once before being written correctly.
           //
-          // `[` and `]` also read better here: EDIT already uses them to step
-          // through slices, and they are bidirectional where Tab only cycles one
-          // way through three pages.
+          // `[` and `]` stay, now on their own merits rather than on a false
+          // one: EDIT already uses them to step through slices, and they are
+          // bidirectional where Tab cycles one way through three pages. Tab
+          // itself is spent on completion at the `:` prompt, which is where a
+          // terminal user expects it.
           //
           // The cursor resets rather than being carried: strip 6 of a channel
           // page has no counterpart among four buses, and leaving it at 6 would
@@ -2199,20 +2338,16 @@ int run_app(const AppOptions& options) {
       quit();
       return true;
     }
-    // The right-hand panel, on BACKSLASH as well as on Tab.
+    // The right-hand panel, on Tab and on BACKSLASH.
     //
-    // Tab has been the binding since M2 and has never worked: FTXUI consumes it
-    // before CatchEvent runs, so it does not reach this function at all. Found
-    // in M5 while giving MIX a paging key -- a probe that reported the code of
-    // every unbound key showed `z` and `n` arriving and nothing for Tab. The
-    // PTY session only ever pressed Tab inside an `if`, so the assertion after
-    // it had been passing without exercising the key.
+    // M5 recorded that Tab "has never worked" because FTXUI consumes it before
+    // CatchEvent runs. THAT WAS WRONG, and the correction is left here because
+    // the claim reached three comments and one design decision before anyone
+    // pressed the key. Tab arrives as 9 on a plain xterm; this binding, in this
+    // file since M2, switches the panel. The M5 probe read a stale screen.
     //
-    // Tab is KEPT rather than deleted: it costs nothing, it is what the mockup's
-    // caption row says, and it will start working on its own the day the Kitty
-    // protocol is negotiated (where Tab arrives as a CSI-u sequence this
-    // program decodes itself -- see keys.cpp). Backslash is the one that works
-    // today, on every terminal.
+    // Backslash stays as the alias. It cost nothing to add and it is the one a
+    // person reaches for when their terminal has bound Tab to something else.
     if (code == kTab || code == '\\') {
       state.tab = state.tab == PanelTab::kSample ? PanelTab::kPattern : PanelTab::kSample;
       return true;
