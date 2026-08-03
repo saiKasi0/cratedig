@@ -270,6 +270,100 @@ TEST_CASE("Engine::render allocates nothing while pads are being reassigned", "[
   CHECK(eng.rejected_pad_configs() == 0);
 }
 
+TEST_CASE("Engine::render allocates nothing with sixteen pads on sixteen files", "[integration]") {
+  // M5.5's acceptance, the half this file owns: "a pad plays a slice of one file
+  // while its neighbour plays a slice of another, published live with no
+  // allocation on the audio thread".
+  //
+  // The reassignment test above already gives each config its own Sample, but it
+  // publishes them one at a time and renders two blocks between -- so at most a
+  // couple are sounding together and the pool is never holding sixteen distinct
+  // shared_ptrs at once. THAT is the arrangement M5.5 made possible and the one
+  // whose costs are worth checking: sixteen live references, sixteen voices
+  // reading sixteen different buffers, and an audition on top of them from a
+  // seventeenth.
+  if constexpr (!rt::kAllocationDetectionEnabled) {
+    SKIP("allocation detection is compiled out (TSan build) — see rt_scope.hpp");
+  }
+
+  // Before the engine, for the reason the test above spells out: locals die in
+  // reverse order and the engine releases its configs on the way out.
+  std::size_t destroyed_in_rt_scope = 0;
+
+  const engine::Engine::Config config{
+      .sample_rate = 48'000, .num_channels = kChannels, .max_block_frames = kMaxBlock, .seed = 0};
+  engine::Engine eng{config};
+
+  std::vector<std::vector<float>> storage(kChannels, std::vector<float>(kMaxBlock, 0.0F));
+  std::vector<float*> channels(kChannels);
+  for (std::uint16_t i = 0; i < kChannels; ++i) {
+    channels[i] = storage[i].data();
+  }
+
+  // Sixteen files, published before anything renders, so all sixteen are live
+  // together rather than one displacing the next.
+  for (std::uint8_t pad = 0; pad < rt::kNumPads; ++pad) {
+    auto sample = std::make_shared<rt::Sample>(48'000U, kChannels, std::size_t{4'000});
+    for (std::uint16_t channel = 0; channel < kChannels; ++channel) {
+      std::span<float> data = sample->mutable_channel(channel);
+      for (std::size_t frame = 0; frame < data.size(); ++frame) {
+        data[frame] = 0.02F * static_cast<float>((frame + pad + channel) % 23);
+      }
+    }
+    std::shared_ptr<const rt::PadConfig> pad_config{
+        new rt::PadConfig{.sample = std::move(sample), .pad = pad},
+        [&destroyed_in_rt_scope](const rt::PadConfig* victim) {
+          if (rt::in_rt_scope()) {
+            ++destroyed_in_rt_scope;
+          }
+          delete victim;  // NOLINT(cppcoreguidelines-owning-memory)
+        }};
+    // Outside the macro: REQUIRE can evaluate its expression twice to build a
+    // failure message, and the second read would be of a moved-from pointer.
+    const bool published = eng.publish_pad_config(std::move(pad_config));
+    REQUIRE(published);
+  }
+
+  // An audition too, from a file no pad holds -- the other thing M5.5 added, and
+  // the one that renders on its own voices beside all sixteen.
+  {
+    auto sample = std::make_shared<rt::Sample>(48'000U, kChannels, std::size_t{4'000});
+    for (std::uint16_t channel = 0; channel < kChannels; ++channel) {
+      std::span<float> data = sample->mutable_channel(channel);
+      for (std::size_t frame = 0; frame < data.size(); ++frame) {
+        data[frame] = 0.03F * static_cast<float>(frame % 31);
+      }
+    }
+    REQUIRE(eng.audition(
+        std::make_shared<const rt::PadConfig>(rt::PadConfig{.sample = std::move(sample)})));
+  }
+
+  const HandlerSwap swap;
+  for (std::uint8_t pad = 0; pad < rt::kNumPads; ++pad) {
+    static_cast<void>(
+        eng.trigger_pad(rt::PadEvent{.pad = pad, .velocity = 0.8F, .frame_offset = 0}));
+  }
+
+  // Long enough for the audition to be adopted and every voice well under way,
+  // and SHORT ENOUGH that none of them has finished: 2048 frames against 4000.
+  // The first version rendered 4096 and every voice had run out, which the
+  // anti-vacuity check below caught -- the allocation assertions would have
+  // passed over a block of silence.
+  for (int block = 0; block < 8; ++block) {
+    eng.render(std::span<float* const>{channels}, 256);
+  }
+
+  CHECK(HandlerSwap::count() == 0);
+  CHECK(destroyed_in_rt_scope == 0);
+
+  // Anti-vacuity: sixteen pads and an audition really were sounding, so the
+  // render above was doing the work the assertions describe rather than mixing
+  // silence.
+  CHECK(eng.active_voices() == rt::kNumPads);
+  CHECK(eng.active_auditions() == 1);
+  CHECK(eng.rejected_pad_configs() == 0);
+}
+
 TEST_CASE("Engine::render allocates nothing while the sequencer is republished", "[integration]") {
   // The sequencer is new audio-thread state, published through the same handoff
   // protocol as pad configs, so it inherits both halves of the same obligation:

@@ -204,7 +204,7 @@ across toolchains.
 |---|---|---|
 | `src/rt/` | SPSC rings, garbage ring, RT guard, `Result`, `Sample`, interpolator, voice pool, mixer graph, DSP primitives | nothing outside `src/rt/`; header-only where possible |
 | `src/engine/` | Engine facade, transport, sequencer, offline bounce | `src/rt/` |
-| `src/ingest/` | FFmpeg decode, resampling, peak pyramid, onset detection, yt-dlp subprocess | `src/rt/` types only |
+| `src/ingest/` | FFmpeg decode, resampling, peak pyramid, onset detection, the sample pool, yt-dlp subprocess | `src/rt/` types only |
 | `src/tui/` | FTXUI components: waveform, pad grid, mixer, command line. The **only** module that may include `ftxui/` headers | `src/engine/` via messages, `src/ingest/` for loading |
 | `src/lua/` | sol2 bindings, config loader, chop-algo and macro API | `src/engine/` |
 | `src/host/` | CLAP hosting; LV2 via lilv | `src/rt/` process interface |
@@ -657,14 +657,44 @@ Implemented:
   includes neither. Both backends are constructed on first use, so `--no-audio`
   initialises neither.
 - `src/tui/` — FTXUI. `waveform.cpp` (braille, no FTXUI dependency),
-  `ui_state.cpp` (the view model), `render.cpp` and `render_edit.cpp` (two pure
-  layout functions over one `UiState`), `render_detail.cpp` (what they share),
-  `keys.{hpp,cpp}` (the CSI-u decoder, and the one pad map -- a keyboard fact
-  rather than a layout one), `command.cpp` (the `:` grammar), `theme.hpp`,
-  `app.cpp`, `cli.cpp`.
+  `ui_state.cpp` (the view model), `render.cpp`, `render_edit.cpp`,
+  `render_mix.cpp` and `render_browse.cpp` (four pure layout functions over one
+  `UiState`), `render_detail.cpp` (what they share), `keys.{hpp,cpp}` (the CSI-u
+  decoder, and the one pad map -- a keyboard fact rather than a layout one),
+  `command.cpp` (the `:` grammar), `completion.cpp` (what Tab offers, also pure),
+  `theme.hpp`, `app.cpp`, `cli.cpp`.
 
-Not yet built: the sample pool and browser (M5.5), recording and the project file
-(M6). See `docs/ROADMAP.md`.
+Not yet built: recording, export and the project file (M6). See
+`docs/ROADMAP.md`.
+
+### The crate, as built (M5.5)
+
+`ingest::SamplePool` is the session's loaded files, on the **control thread and
+nowhere else**. The audio thread never sees it and never needs to: `rt::PadConfig`
+already carries its own `shared_ptr<const rt::Sample>`, so a pad playing a slice
+of one record while its neighbour plays another is a fact about what was
+published, not a change to the callback. That is why this milestone is a
+control-side model plus a UI and touched the audio thread only for the audition
+lane.
+
+Identity is a monotonic `FileId`, never reused, **not an index**. A pad names a
+file; if identity were positional, unloading anything would silently re-point
+every pad after it at the wrong material -- a bug that reads as a corrupt project
+rather than as a bad index. `remove()` therefore needs no coordination with the
+audio thread at all: dropping the pool's entry drops the pool's reference and no
+more, and anything still sounding holds its own.
+
+**The audition lane** is the one part that is not control-side. Every route to
+sound before M5.5 was a pad trigger -- the audio thread plays `m_pads[N]` -- so
+nothing could address material no pad held. A preview now travels on its own
+`HandoffRing` to its own two-voice pool, excluded from pad glow, telemetry and
+choke: it is not a pad and must not light one.
+
+Two voices rather than one, and rather than sixteen. An arriving preview
+*releases* the one before it, so replacing does not click; two is what that fade
+needs and one more would only let two previews sound at once, which is not what
+"let me hear this" means. `kStopAll` reaches the lane too -- the panic key means
+silence, and for one milestone it did not.
 
 ### The mixer graph, as built (M5)
 

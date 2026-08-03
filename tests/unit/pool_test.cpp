@@ -196,16 +196,23 @@ TEST_CASE("the pool reports how much audio it is holding", "[unit]") {
   ingest::SamplePool pool;
   CHECK(pool.total_frames() == 0);
 
+  // THE ADD IS OUTSIDE THE MACRO, and that is not style. Catch2's REQUIRE can
+  // evaluate its expression a second time to build the failure message, so a
+  // `std::move` inside one reads a moved-from object on exactly the path where
+  // something has already gone wrong. clang-tidy's bugprone-use-after-move found
+  // it; it had been here since the pool landed.
   auto mono = make_sample(1'000, 1);
   ingest::PeakPyramid mono_pyramid = ingest::PeakPyramid::build(*mono);
-  REQUIRE(pool.add(std::move(mono), std::filesystem::path{"/a.wav"}, ingest::SliceSet{},
-                   std::move(mono_pyramid)) != ingest::kNoFile);
+  const ingest::FileId mono_id = pool.add(std::move(mono), std::filesystem::path{"/a.wav"},
+                                          ingest::SliceSet{}, std::move(mono_pyramid));
+  REQUIRE(mono_id != ingest::kNoFile);
   CHECK(pool.total_frames() == 1'000);
 
   auto stereo = make_sample(500, 2);
   ingest::PeakPyramid stereo_pyramid = ingest::PeakPyramid::build(*stereo);
-  REQUIRE(pool.add(std::move(stereo), std::filesystem::path{"/b.wav"}, ingest::SliceSet{},
-                   std::move(stereo_pyramid)) != ingest::kNoFile);
+  const ingest::FileId stereo_id = pool.add(std::move(stereo), std::filesystem::path{"/b.wav"},
+                                            ingest::SliceSet{}, std::move(stereo_pyramid));
+  REQUIRE(stereo_id != ingest::kNoFile);
   CHECK(pool.total_frames() == 2'000);  // 1000 mono + 500 x 2
 }
 

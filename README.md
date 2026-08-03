@@ -3,12 +3,15 @@
 the terminal crate-digging DAW — pull samples in, chop them, play chops on pads,
 sequence, mix, export. keep it CLI smooth.
 
-**Status: pre-alpha (M5.5 — the crate).** Loads files, draws them, finds the
-transients, cuts them into slices, lays them across sixteen pads and plays them;
-records patterns and chains them into a song; mixes the result through sixteen
-channel strips with four-band EQ, a compressor, four buses and a master limiter;
-and holds several files at once, so one bank can mix a break, a vocal take and a
-one-shot.
+**Status: pre-alpha (M5.5 complete — the crate).** Loads files, draws them, finds
+the transients, cuts them into slices, lays them across sixteen pads and plays
+them; records patterns and chains them into a song; mixes the result through
+sixteen channel strips with four-band EQ, a compressor, four buses and a master
+limiter; and holds several files at once, so one bank can mix a break, a vocal
+take and a one-shot.
+
+Browse a folder, hear a file before you load it, see its waveform while it plays,
+mark a bit of it and put that bit on a pad. Tab completes commands and paths.
 
 **Not yet:** recording your own audio (M6 — see *What is not built* below),
 export, and yt-dlp import.

@@ -451,6 +451,11 @@ in two layers, because the sentence makes two different claims.
 |---|---|
 | `tests/e2e/chop_e2e_test.cpp` | Does the pipeline produce the right audio? Real ingest and engine code, no terminal, no device, no file. |
 | `tests/e2e/pty_chop_session.py` | Does typing those two words into the real binary do it? Real onset detection inside the real program. |
+| `tests/e2e/crate_e2e_test.cpp` | M5.5: do pads from two different files render correctly together, bit for bit? |
+| `tests/e2e/pty_crate_session.py` | Can a person load a second file, chop it, and keep the first one's pads? |
+| `tests/e2e/pty_browse_session.py` | Does the browser's keymap and directory reader work — move, descend, climb, preview, load? |
+| `tests/e2e/pty_grab_session.py` | Can a piece of a file reach a pad without the file ever being `:load`ed? |
+| `tests/e2e/pty_complete_session.py` | Does Tab complete verbs and paths, cycle, and produce a line the parser accepts? |
 
 Both build their own percussive loop — eight hits, 0.25 s apart, after 0.1 s of
 silence — from **integer arithmetic and no libm**, for the same reason
@@ -612,6 +617,55 @@ whether the release happened at all, while a new case covers the default. A
 second envelope case asserts the floor is a MINIMUM and not an override — the
 inverted version would turn every deliberate 200 ms release into a 0.7 ms
 declick, which is a worse bug than the click and one nobody would look for here.
+
+### An assertion that searches the whole screen finds the program's own answer
+
+The single most repeated mistake in this project's tests, five times across three
+milestones, and it always looks like a passing test.
+
+The mode line reports what just happened, in words. It says `master`, it says
+`gain -6.0`, it names the file that was just loaded, it quotes the number a
+command was given. So a session that presses a key and then searches the WHOLE
+screen for the thing it expects finds the program's own confirmation message and
+passes -- whether or not the panel, the grid or the listing it meant to check
+ever changed.
+
+Every instance:
+
+| Where | Searched for | Found instead |
+|---|---|---|
+| M5 T7 | `master` in the MIX render | the mode line naming the screen |
+| M5 T8 | `gain -6.0` after a verb | the verb's own confirmation |
+| M5.5 T3 | the pad grid's names | the right-hand panel naming the file |
+| M5.5, `:env` | `250` after setting a release | the mode line quoting the value |
+| M5.5 T6 | `two.wav` in the listing | the message saying it had loaded |
+
+The fix is always the same and is now the house rule: **bound every screen
+assertion to the panel that owns the claim.** Select rows by the box structure
+(`line.count("│") >= 4`), clip them to that panel's columns, and search inside
+that. `pty_browse_session.py` and `pty_grab_session.py` both do it and say why at
+the top.
+
+The same shape appears in snapshots: a snapshot whose only difference is a hint
+line is a snapshot that proved nothing about the panel above it.
+
+### A control that does not fire is a finding, not a formality
+
+Two of them in M5.5 said something the passing tests could not.
+
+Deleting `complete_verbs()`'s finished-phrase guard changed no test on any input
+-- because the prefix rule already covered it, a line longer than a phrase not
+being able to be that phrase's prefix. The guard was dead code that looked
+load-bearing, and it was removed rather than kept for comfort.
+
+Deleting the region-clearing in BROWSE also changed nothing -- but that one was a
+weak test rather than dead code. The check looked for the region's OPENING
+bracket, which the playhead is drawn over at frame 0, which is exactly where the
+test marks from. It reads the closing bracket now.
+
+The rule that separates them: when a control does not fire, find out **which** of
+the two it is before doing anything. One means delete the code; the other means
+fix the test.
 
 ### The PTY harness reconstructs a screen from a byte stream, and that is a measurement
 
