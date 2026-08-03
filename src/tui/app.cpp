@@ -1577,6 +1577,24 @@ int run_app(const AppOptions& options) {
   // the renderer, and the toggle in BROWSE and EDIT that depends on it.
   bool audition_settling = false;
 
+  // The decoded preview, kept so the waveform can be re-summarised when the
+  // terminal is resized without decoding the file again.
+  //
+  // HERE RATHER THAN IN UiState, which holds only what a renderer needs: the
+  // Sample and the pyramid are the inputs the summary is computed FROM, and
+  // putting them in the state a pure render function reads would invite that
+  // function to compute rather than draw. Same reason `bins` is a summary and
+  // the current file's Sample is not in UiState either.
+  struct Preview {
+    std::shared_ptr<const rt::Sample> sample;
+    ingest::PeakPyramid pyramid;
+    std::string name;
+
+    // The PATH, not just the name, because grabbing a region has to put the
+    // file in the crate and two directories can hold the same filename.
+    std::filesystem::path path;
+  } preview;
+
   auto frame = ftxui::Renderer([&] {
     const ftxui::Dimensions size = ftxui::Terminal::Size();
     const auto columns = static_cast<std::size_t>(std::max(size.dimx, 1));
@@ -1742,6 +1760,29 @@ int run_app(const AppOptions& options) {
                                state.bins);
     }
 
+    // The preview strip. Summarised per frame rather than per audition because
+    // its width follows the terminal's, and the pyramid it reads was built once
+    // when the sound started.
+    //
+    // THE WHOLE FILE, always, with no zoom: a preview answers "what is this",
+    // and a view you could scroll would be EDIT with fewer keys.
+    if (state.screen == Screen::kBrowse && preview.sample != nullptr) {
+      state.preview.name = preview.name;
+      state.preview.frames = preview.sample->num_frames();
+      state.preview.rate = preview.sample->sample_rate();
+      state.preview.bins.assign(bins_for_columns(preview_columns_for(columns)), ingest::PeakBin{});
+      preview.pyramid.summarize(*preview.sample, 0, 0, state.preview.frames, state.preview.bins);
+
+      const std::uint64_t at = engine.audition_playhead();
+      state.preview.playing = at != engine::Engine::kNoAuditionPlayhead;
+      if (state.preview.playing) {
+        state.preview.playhead = static_cast<std::size_t>(at);
+      }
+    } else if (state.screen != Screen::kBrowse) {
+      state.preview.bins.clear();
+      state.preview.frames = 0;
+    }
+
     return render(state, columns, rows);
   });
 
@@ -1756,6 +1797,82 @@ int run_app(const AppOptions& options) {
   // Bindings compare key.character(), not key.key. The protocol reports the
   // UNSHIFTED key with the typed text alongside; FTXUI reports the text as the
   // key. character() is the one value both paths agree on.
+  // "0.42s — 1.08s · 0.66s" for the mode line, or why there is nothing.
+  auto region_summary = [](const PreviewState& mark) {
+    if (!mark.has_region || mark.rate == 0) {
+      return std::string{"no region — i marks the start, o the end"};
+    }
+    const auto seconds = [&](std::size_t frame) {
+      return detail::with_precision(static_cast<double>(frame) / mark.rate, 2);
+    };
+    return "region " + seconds(mark.region_start) + "s — " + seconds(mark.region_end) + "s · " +
+           seconds(mark.region_end - mark.region_start) + "s · a pad key puts it on a pad";
+  };
+
+  // Puts the marked region on a pad.
+  //
+  // THE FILE JOINS THE CRATE, with that one region as its only slice. It is
+  // tempting to keep it out -- "just get a slice" sounds like "without loading
+  // the file" -- but the audio is already decoded and in memory the moment you
+  // previewed it, so nothing is saved by hiding it, and a pad naming a file the
+  // crate does not have could not be drawn, listed or serialised by M6. What
+  // "just a slice" buys you is that the file arrives with ONE cut instead of
+  // sixteen, which is the part that was actually in the way.
+  auto grab_region = [&](std::uint8_t pad) {
+    PreviewState& mark = state.preview;
+    if (preview.sample == nullptr || !mark.has_region) {
+      set_message("mark a region first — space to hear a file, then i and o", true);
+      return;
+    }
+
+    const ingest::Slice slice{.start_frame = mark.region_start, .end_frame = mark.region_end};
+
+    // Already in the crate: append the cut rather than adding the file twice.
+    // pool.add() deliberately leaves an existing entry alone, including its
+    // slices, so a second grab from the same file has to go this way.
+    ingest::FileId id = pool.find_path(preview.path);
+    std::size_t slice_index = 0;
+    if (id == ingest::kNoFile) {
+      ingest::SliceSet set;
+      set.slices.push_back(slice);
+      id = pool.add(preview.sample, preview.path, std::move(set), preview.pyramid);
+      if (id == ingest::kNoFile) {
+        set_message("could not add " + preview.name + " to the crate", true);
+        return;
+      }
+    } else {
+      ingest::PoolEntry* held = pool.find(id);
+      if (held == nullptr) {
+        set_message("could not add " + preview.name + " to the crate", true);
+        return;
+      }
+      held->slices.slices.push_back(slice);
+      slice_index = held->slices.size() - 1;
+    }
+
+    rt::PadConfig config{};
+    config.sample = preview.sample;
+    config.pad = pad;
+    config.start_frame = slice.start_frame;
+    config.end_frame = slice.end_frame;
+    if (!engine.publish_pad_config(std::make_shared<const rt::PadConfig>(std::move(config)))) {
+      set_message("pads are busy — try again", true);
+      return;
+    }
+
+    state.pads[pad].loaded = true;
+    state.pads[pad].has_slice = true;
+    state.pads[pad].file = id;
+    state.pads[pad].slice_index = slice_index;
+    state.pads[pad].name = slice_pad_name(slice_index + 1);
+
+    const double length =
+        mark.rate > 0 ? static_cast<double>(slice.end_frame - slice.start_frame) / mark.rate : 0.0;
+    set_message(preview.name + " " + detail::with_precision(length, 2) + "s → pad " +
+                    std::to_string(pad + 1),
+                false);
+  };
+
   auto close_completion = [&state]() {
     state.completion.entries.clear();
     state.completion.cursor = 0;
@@ -1994,6 +2111,93 @@ int run_app(const AppOptions& options) {
           return true;
         }
 
+        // -- the region, and grabbing it -------------------------------------
+        //
+        // "Browsing should have an ability to just get a slice from a sample":
+        // mark a bit of what you are previewing and put THAT on a pad, rather
+        // than loading the whole file and chopping it to get at one hit.
+        //
+        // `i` and `o` are the tape-op pair and are free here; `x`, `c`, `v` and
+        // `z` are NOT available for "clear" because they are pad keys, which is
+        // why that is on `-`.
+        case 'i':
+        case 'o': {
+          if (!state.preview.showing()) {
+            set_message("nothing to mark — press space to hear a file first", true);
+            return true;
+          }
+          PreviewState& mark = state.preview;
+          const bool in = code == 'i';
+
+          // AT THE PLAYHEAD, which is what makes this a tape-op flow: you hear
+          // the bit start and press `i`. With no audio device nothing advances,
+          // so the marker sits at 0 and `o` takes the end of the file -- which
+          // gives the whole file as a region rather than an empty one.
+          const std::size_t at = mark.playing ? mark.playhead : (in ? 0 : mark.frames);
+
+          if (in) {
+            mark.region_start = at;
+            if (!mark.has_region || mark.region_end <= at) {
+              mark.region_end = mark.frames;
+            }
+          } else {
+            mark.region_end = at > mark.region_start ? at : mark.frames;
+          }
+          mark.has_region = mark.region_end > mark.region_start;
+          set_message(region_summary(mark), !mark.has_region);
+          return true;
+        }
+
+        case '[':
+        case ']': {
+          // Nudge the out point. A sixteenth of the file a press: this is a
+          // browser, and frame-accurate work is what EDIT is for.
+          if (!state.preview.showing() || !state.preview.has_region) {
+            set_message("no region to trim — i and o mark one", true);
+            return true;
+          }
+          PreviewState& mark = state.preview;
+          const std::size_t step = mark.frames / 16 + 1;
+          if (code == '[') {
+            mark.region_end = mark.region_end > mark.region_start + step ? mark.region_end - step
+                                                                         : mark.region_start + 1;
+          } else {
+            mark.region_end = std::min(mark.frames, mark.region_end + step);
+          }
+          set_message(region_summary(mark), false);
+          return true;
+        }
+
+        case '-': {
+          state.preview.has_region = false;
+          set_message("region cleared", false);
+          return true;
+        }
+
+        case 'E': {
+          // LOAD IT AND GO AND CUT IT UP, for when the answer is not one region
+          // but the whole file. Everything EDIT does -- boundaries, nudging,
+          // auditioning a slice on no pad -- already exists, so this is a door
+          // to it rather than a second implementation of it.
+          //
+          // CAPITAL, because `e` is pad 7 and the pad keys are spent on grabbing
+          // a region. Named in the hint line, since a key nobody can find is a
+          // key that does not exist.
+          if (under == nullptr || under->is_directory) {
+            set_message("no file here to edit", true);
+            return true;
+          }
+          const std::filesystem::path here{browser.path};
+          execute(parse_command(std::string{"load "} + (here / under->name).string()));
+          if (entry() == nullptr) {
+            return true;  // the load failed and said why
+          }
+          state.screen = Screen::kEdit;
+          state.edit.slice = 0;
+          set_message("editing " + under->name, false);
+          return true;
+        }
+
         case kSpace: {
           // AUDITION BEFORE LOAD, which is the reason this screen needed the
           // audition path built first. Previewing a file you have not loaded is
@@ -2026,12 +2230,21 @@ int run_app(const AppOptions& options) {
                 true);
             return true;
           }
-          auto preview =
+          auto config =
               std::make_shared<const rt::PadConfig>(rt::PadConfig{.sample = load.sample, .pad = 0});
-          if (!engine.audition(std::move(preview))) {
+          if (!engine.audition(std::move(config))) {
             set_message("audition is busy — try again", true);
             return true;
           }
+
+          // The picture, built once here rather than per frame. Building a
+          // pyramid walks the whole file, which is the cost `:load` already pays
+          // and which must not be paid sixty times a second.
+          preview.sample = load.sample;
+          preview.pyramid = ingest::PeakPyramid::build(*load.sample);
+          preview.name = under->name;
+          preview.path = here / under->name;
+          state.preview.has_region = false;  // a new sound is a new selection
           state.auditioning = under->name;
           audition_settling = true;
           set_message("playing " + under->name + " — space again to stop", false);
@@ -2040,6 +2253,22 @@ int run_app(const AppOptions& options) {
 
         default:
           break;
+      }
+
+      // A PAD KEY PUTS THE MARKED REGION ON THAT PAD.
+      //
+      // The pads are otherwise off on this screen -- a browser that played a
+      // drum every time you moved down a listing would be unusable -- so the
+      // same sixteen keys are free to mean "put it here" instead of "play it".
+      // It is the map the whole program already uses, so it needs no new
+      // concept and no new row in the hint line beyond saying so.
+      //
+      // Only with a region marked. Without one the key says what to do rather
+      // than silently doing nothing, because a key that does nothing reads as
+      // broken -- the lesson `h`/`l` and the ADSR panel both taught.
+      if (const std::uint8_t pad = pad_for_key(code); pad < rt::kNumPads) {
+        grab_region(pad);
+        return true;
       }
       return true;
     }
@@ -2245,12 +2474,12 @@ int run_app(const AppOptions& options) {
           // have. Not copied from a pad's config: there is no pad, and borrowing
           // a neighbouring one's envelope would make the preview sound like
           // something the slice is not.
-          rt::PadConfig preview{};
-          preview.sample = file->sample;
-          preview.start_frame = slice.start_frame;
-          preview.end_frame = slice.end_frame;
+          rt::PadConfig config{};
+          config.sample = file->sample;
+          config.start_frame = slice.start_frame;
+          config.end_frame = slice.end_frame;
 
-          if (!engine.audition(std::make_shared<const rt::PadConfig>(std::move(preview)))) {
+          if (!engine.audition(std::make_shared<const rt::PadConfig>(std::move(config)))) {
             set_message("audition is busy — try again", true);
             return true;
           }

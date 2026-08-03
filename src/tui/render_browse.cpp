@@ -2,6 +2,7 @@
 #include "tui/render_detail.hpp"
 #include "tui/theme.hpp"
 #include "tui/ui_state.hpp"
+#include "tui/waveform.hpp"
 
 #include <ftxui/dom/elements.hpp>
 
@@ -9,6 +10,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -193,6 +195,78 @@ constexpr std::size_t kBothPanelsMinColumns = 78;
   return panel | ftxui::size(ftxui::WIDTH, ftxui::EQUAL, static_cast<int>(kCrateWidth));
 }
 
+// The preview strip: what you are hearing, drawn.
+//
+// ACROSS THE WHOLE WIDTH and under both panels, because a waveform squeezed into
+// a 65-column listing panel would be a waveform of about forty pixels. It is
+// also the one thing on this screen that is not about choosing -- the panels
+// answer "which file", this answers "what is in it" -- so it reads as its own
+// band rather than as a third column.
+[[nodiscard]] Element preview_panel(const PreviewState& preview, std::size_t width) {
+  const std::size_t inner = width > 2 ? width - 2 : 1;
+
+  Elements lines;
+  for (std::string& row : waveform_rows(preview.bins, WaveformGeometry{.rows = 3, .gain = 1.0F})) {
+    lines.push_back(ftxui::text(pad_to(std::move(row), inner)) | ftxui::color(theme::text()));
+  }
+
+  // The position line: the marker under the waveform, and the region's edges
+  // when one is marked.
+  //
+  // UNDER rather than drawn INTO the braille. A vertical bar painted over the
+  // waveform would replace audio with a cursor -- the same reason EDIT gives its
+  // amplitude labels their own gutter instead of painting them on the trace.
+  std::string marker(inner, ' ');
+  const auto column_of = [&](std::size_t frame) {
+    if (preview.frames == 0) {
+      return std::size_t{0};
+    }
+    const std::size_t at = frame < preview.frames ? frame : preview.frames - 1;
+    return std::min(inner - 1, at * inner / preview.frames);
+  };
+
+  if (preview.has_region) {
+    const std::size_t from = column_of(preview.region_start);
+    const std::size_t to = column_of(preview.region_end);
+    for (std::size_t column = from; column <= to && column < inner; ++column) {
+      // Different glyphs at the two ends, so the bar reads as a bracket rather
+      // than as a line with a tick at each end that could be either edge.
+      const char* glyph = column == from ? "\u258f" : (column == to ? "\u2595" : "\u2500");
+      marker = paint_at(marker, column, glyph);
+    }
+  }
+  if (preview.frames > 0) {
+    marker = paint_at(marker, column_of(preview.playhead), preview.playing ? "\u25b2" : "\u25b3");
+  }
+  lines.push_back(ftxui::text(marker) | ftxui::color(theme::accent()));
+
+  // The caption: what it is, how long, and where the marker is.
+  const double seconds =
+      preview.rate > 0 ? static_cast<double>(preview.frames) / preview.rate : 0.0;
+  const double at = preview.rate > 0 ? static_cast<double>(preview.playhead) / preview.rate : 0.0;
+  std::string title = " preview  " + preview.name + " \u00b7 " + with_precision(seconds, 2) + "s ";
+  std::string right = with_precision(at, 2) + "s ";
+  if (preview.has_region && preview.rate > 0) {
+    const double length =
+        static_cast<double>(preview.region_end - preview.region_start) / preview.rate;
+    right = "region " + with_precision(length, 2) + "s \u00b7 " + right;
+  }
+
+  // Sized to the panel for the reason the wave panel is: window() shrink-wraps
+  // its title otherwise, and the position ends up jammed against the word
+  // "preview" instead of against the far border.
+  Element caption = ftxui::hbox({
+                        ftxui::text(std::move(title)) | ftxui::color(theme::label()),
+                        ftxui::filler(),
+                        ftxui::text(std::move(right)) | ftxui::color(theme::muted()),
+                    }) |
+                    ftxui::size(ftxui::WIDTH, ftxui::EQUAL, static_cast<int>(width));
+
+  return ftxui::window(std::move(caption), ftxui::vbox(std::move(lines))) |
+         ftxui::color(theme::structure()) |
+         ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, static_cast<int>(kPreviewRows));
+}
+
 }  // namespace
 
 Element render_browse(const UiState& state, std::size_t terminal_columns,
@@ -201,7 +275,11 @@ Element render_browse(const UiState& state, std::size_t terminal_columns,
 
   // Header, two panels, mode line -- and a blank line under the header, the
   // shape every other screen here uses.
-  const std::size_t chrome = 5;
+  // The preview strip takes its rows off the panels rather than being squeezed
+  // in beside them, the same arrangement the completion menu uses: a waveform
+  // that shrank the listing to two entries would be a browser you cannot browse.
+  const bool previewing = state.preview.showing() && terminal_rows > kPreviewRows + 8;
+  const std::size_t chrome = 5 + (previewing ? kPreviewRows : 0);
   const std::size_t rows = terminal_rows > chrome + 2 ? terminal_rows - chrome : 3;
 
   const bool both = terminal_columns >= kBothPanelsMinColumns;
@@ -228,21 +306,42 @@ Element render_browse(const UiState& state, std::size_t terminal_columns,
   std::vector<std::string> facts;
   facts.push_back(std::to_string(browser.entries.size()) + " here");
 
-  static constexpr std::array<std::string_view, 3> kHints{
-      "jk move · l open · h up · space audition · enter load · esc back",
-      "jk move · l open · h up · space hear · enter load",
+  // Two sets, because the keys that matter change once you are listening to
+  // something: before that the screen is about finding a file, after it the
+  // screen is about taking a piece of one.
+  // MEASURED AGAINST kMinFactCells, not eyeballed. The first draft of these put
+  // `E edit` in and pushed `esc back` off the top tier at the design width --
+  // which the snapshots showed plainly. M4.5 learned the same thing: adding one
+  // key silently drops another off the grid.
+  static constexpr std::array<std::string_view, 3> kBrowsing{
+      "jk move · l/h dirs · space hear · enter load · E edit · esc back",
+      "jk move · l/h dirs · space hear · enter load · E edit",
       "jk · l/h · enter",
   };
+  static constexpr std::array<std::string_view, 3> kListening{
+      "space stop · i/o · [] trim · - clear · pad key grabs · esc back",
+      "space stop · i/o mark · [] trim · pad key grabs",
+      "i/o mark · pad key",
+  };
 
-  Element line = detail::mode_line(state, terminal_columns, "  browse    ", facts, kHints, 24);
+  Element line =
+      detail::mode_line(state, terminal_columns, "  browse    ", facts,
+                        state.preview.showing() ? std::span<const std::string_view>{kListening}
+                                                : std::span<const std::string_view>{kBrowsing},
+                        24);
 
-  return ftxui::vbox({
+  Elements body{
       header,
       ftxui::text(""),
       ftxui::hbox(std::move(panels)),
-      ftxui::filler(),
-      line,
-  });
+  };
+  if (previewing) {
+    body.push_back(preview_panel(state.preview, terminal_columns));
+  }
+  body.push_back(ftxui::filler());
+  body.push_back(line);
+
+  return ftxui::vbox(std::move(body));
 }
 
 }  // namespace tui

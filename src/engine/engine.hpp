@@ -312,6 +312,17 @@ class Engine {
   // deliberately separate from active_voices(), which counts pads.
   [[nodiscard]] std::size_t active_auditions() const noexcept;
 
+  // Where the preview has got to, in frames from the start of its sample.
+  // kNoAuditionPlayhead when nothing is being previewed.
+  //
+  // Frames from the START OF THE SAMPLE, not from the start of the region a
+  // preview may be playing: BROWSE draws the whole file and puts the marker on
+  // it, so a position relative to a region would have to be un-relativised by
+  // every caller that has one.
+  [[nodiscard]] std::uint64_t audition_playhead() const noexcept;
+
+  static constexpr std::uint64_t kNoAuditionPlayhead = std::numeric_limits<std::uint64_t>::max();
+
   // CONTROL THREAD. Replaces one pad's mixer settings, keeping everything else
   // about the pad.
   //
@@ -514,6 +525,15 @@ class Engine {
     std::atomic<std::uint64_t> dropped_triggers{0};
 
     std::atomic<std::uint64_t> playhead{kNothingPlaying};
+
+    // Where the preview has got to, in frames from the start of its sample, or
+    // kNothingPlaying.
+    //
+    // SEPARATE FROM `playhead`, which packs a pad number alongside the frame and
+    // walks only the pad voices. A preview has no pad -- that is the whole point
+    // of the audition lane -- so it cannot be folded into a word whose top bits
+    // name one. A plain frame count is all it needs.
+    std::atomic<std::uint64_t> audition_playhead{kNothingPlaying};
 
     std::atomic<float> master_peak{0.0F};
     std::array<std::atomic<float>, rt::kNumPads> pad_peak{};

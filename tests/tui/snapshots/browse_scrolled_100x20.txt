@@ -17,4 +17,4 @@ cratedig 0.0.1  browse                                                          
 │   take_36.wav                                           47 KB │ │                                │
 │ ▸ take_37.wav                                           47 KB │ │                                │
 ╰───────────────────────────────────────────────────────────────╯ ╰────────────────────────────────╯
-  browse    40 here                 jk move · l open · h up · space audition · enter load · esc back
+  browse    40 here                 jk move · l/h dirs · space hear · enter load · E edit · esc back

@@ -179,6 +179,15 @@ if(Python3_FOUND)
   # parser then accepts. Also the standing guard on the M5 mistake -- Tab was
   # declared dead in three comments and one design decision before anyone
   # pressed it, and this presses it.
+  # The other half of browsing: previewing a file, marking a piece of it and
+  # putting that piece on a pad. Separate from browse_pty_e2e because they fail
+  # for different reasons -- that one for navigation, this one for the preview,
+  # the region arithmetic and the crate bookkeeping.
+  add_test(NAME grab_pty_e2e
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_grab_session.py
+                   $<TARGET_FILE:cratedig>)
+  set_tests_properties(grab_pty_e2e PROPERTIES LABELS e2e TIMEOUT ${CRATEDIG_PTY_TIMEOUT})
+
   add_test(NAME complete_pty_e2e
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_complete_session.py
                    $<TARGET_FILE:cratedig>)

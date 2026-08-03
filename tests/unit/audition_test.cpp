@@ -132,3 +132,54 @@ TEST_CASE("stopping an audition that is not sounding is not an error", "[unit]")
   harness.render();
   CHECK(harness.auditions() == 0);
 }
+
+TEST_CASE("the audition playhead follows the preview", "[unit]") {
+  // What BROWSE draws the marker from. Separate from the pad playhead, which
+  // packs a pad number alongside the frame and walks only the pad voices -- a
+  // preview has no pad, which is the whole point of the lane.
+  Harness harness;
+  CHECK(harness.engine().audition_playhead() == engine::Engine::kNoAuditionPlayhead);
+
+  REQUIRE(harness.engine().audition(preview(kRate)));
+  harness.render();
+  const std::uint64_t first = harness.engine().audition_playhead();
+  REQUIRE(first != engine::Engine::kNoAuditionPlayhead);
+
+  harness.render();
+  const std::uint64_t second = harness.engine().audition_playhead();
+  CHECK(second > first);
+
+  // In frames of the SAMPLE, so a block of 512 moves it by about a block.
+  // Approximate rather than exact: the position is 32.32 fixed point and the
+  // voice may have started mid-block.
+  CHECK(second - first == kBlock);
+}
+
+TEST_CASE("the audition playhead goes away when the preview does", "[unit]") {
+  // Otherwise BROWSE would leave a marker crawling across a file nobody is
+  // hearing.
+  Harness harness;
+  REQUIRE(harness.engine().audition(preview(kRate)));
+  harness.render();
+  REQUIRE(harness.engine().audition_playhead() != engine::Engine::kNoAuditionPlayhead);
+
+  REQUIRE(harness.engine().stop_audition());
+  // Long enough for the release to finish.
+  for (int block = 0; block < 200; ++block) {
+    harness.render();
+  }
+  CHECK(harness.engine().active_auditions() == 0);
+  CHECK(harness.engine().audition_playhead() == engine::Engine::kNoAuditionPlayhead);
+}
+
+TEST_CASE("a preview that runs out stops reporting a position", "[unit]") {
+  // The short-file case: nothing stopped it, it simply ended.
+  Harness harness;
+  REQUIRE(harness.engine().audition(preview(kBlock)));
+  harness.render();
+  for (int block = 0; block < 200; ++block) {
+    harness.render();
+  }
+  CHECK(harness.engine().active_auditions() == 0);
+  CHECK(harness.engine().audition_playhead() == engine::Engine::kNoAuditionPlayhead);
+}

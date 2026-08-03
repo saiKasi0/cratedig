@@ -113,7 +113,7 @@ keyboard. `f` is pad 12, so "fit" is `0` — the one digit the map does not clai
 | `[` `]` | previous / next slice |
 | `h` `l` | nudge the slice **start** back / forward one frame — the readout shows the frame number, so a single press is visible |
 | `H` `L` | nudge the slice **end** |
-| `space` | play the slice — through its pad if it has one, auditioned if it has not |
+| `space` | play the slice — through its pad if it has one, auditioned if it has not; press again to stop |
 | `z` | zoom in; once there is no more to see, reframe the slice |
 | `u` | undo the last nudge |
 | `esc` | back to PERFORM |
@@ -121,6 +121,35 @@ keyboard. `f` is pad 12, so "fit" is `0` — the one digit the map does not clai
 A chop of more than sixteen leaves the rest on no pad. They are still editable,
 drawable and now **playable**: `space` auditions them on their own voices, so a
 preview cannot light a pad or be silenced by one's mute.
+
+**BROWSE** — `:browse`, or `:browse ~/Music`
+
+| | |
+|---|---|
+| `j` `k` | move through the listing |
+| `l` `Enter` | open a directory · load a file into the crate |
+| `h` | up a directory — landing on the one you came out of |
+| `space` | hear the file under the cursor, and **press again to stop it** |
+| `i` `o` | mark the start / end of a region, at the playhead |
+| `[` `]` | trim the region's end, a sixteenth of the file a press |
+| `-` | forget the region |
+| a pad key | put the marked region on that pad |
+| `E` | load the file and open EDIT on it |
+| `esc` | back to PERFORM |
+
+Previewing draws the file underneath the listing with a marker showing where the
+sound has got to, so you can see the shape of what you are hearing.
+
+**Taking a piece rather than the whole record.** Mark a region with `i` and `o`,
+then press a pad key: that region goes on that pad, and the file joins the crate
+carrying **one** cut instead of sixteen. The audio was already decoded to preview
+it, so nothing is saved by keeping the file out of the crate — and a pad naming a
+file the crate does not have could not be drawn, listed or saved. What you avoid
+is the chopping.
+
+The pads are otherwise off in BROWSE — a browser that played a drum every time
+you moved down a listing would be unusable — which is what frees those sixteen
+keys to mean "put it here". `E` is capital because `e` is pad 7.
 
 ## Commands
 

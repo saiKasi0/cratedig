@@ -404,6 +404,41 @@ struct CompletionState {
   [[nodiscard]] bool showing() const noexcept { return active && !entries.empty(); }
 };
 
+// The file BROWSE is previewing, summarised for drawing.
+//
+// A VISUAL OF WHAT YOU ARE HEARING, which is what a browser is missing without
+// it: the listing says a file is 47 KB and nothing else, and 47 KB of loop and
+// 47 KB of silence-then-a-crash look identical until you have waited through
+// both.
+//
+// Held separately from `bins` -- the current file's waveform, which PERFORM and
+// EDIT draw -- because a preview is deliberately NOT the current file. The whole
+// point of auditioning is hearing something you have not loaded, so the two are
+// different sounds and must be able to be on screen at once.
+struct PreviewState {
+  std::string name;
+  std::size_t frames = 0;
+  std::uint32_t rate = 48'000;
+
+  std::vector<ingest::PeakBin> bins;
+
+  // Where the sound has got to, in frames from the start of the file, and
+  // whether it is still going. Two fields rather than a sentinel because the
+  // marker is drawn at its last position when the sound stops -- a preview that
+  // finished should leave the picture where it ended rather than jumping the
+  // marker home.
+  std::size_t playhead = 0;
+  bool playing = false;
+
+  // The region marked for grabbing, in frames. `has_region` because an unset
+  // region and a region starting at frame 0 are different things.
+  std::size_t region_start = 0;
+  std::size_t region_end = 0;
+  bool has_region = false;
+
+  [[nodiscard]] bool showing() const noexcept { return frames > 0 && !bins.empty(); }
+};
+
 struct UiState {
   std::string version;
 
@@ -472,6 +507,9 @@ struct UiState {
   // Cleared by the frame loop when the sound ends, so the key does not report a
   // preview that finished on its own thirty seconds ago.
   std::string auditioning;
+
+  // What BROWSE is previewing. See PreviewState.
+  PreviewState preview;
 
   bool playing = false;
   std::size_t playhead_frame = 0;

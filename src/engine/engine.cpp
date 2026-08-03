@@ -394,6 +394,10 @@ std::size_t Engine::active_auditions() const noexcept {
   return m_audition_voices.active_count();
 }
 
+std::uint64_t Engine::audition_playhead() const noexcept {
+  return m_published.audition_playhead.load(std::memory_order_relaxed);
+}
+
 bool Engine::send_transport(const rt::TransportCommand& command) noexcept {
   return m_transport_commands.try_push(command);
 }
@@ -979,6 +983,24 @@ void Engine::publish_telemetry(std::span<float* const> channels, std::size_t num
       playhead = (static_cast<std::uint64_t>(voice.pad) << kPlayheadPadShift) | frame;
     }
   }
+
+  // The preview's position, on the same walk and for the same reason: the UI
+  // draws a marker on a waveform and needs to know where it is.
+  //
+  // The NEWEST voice wins, matching the pad playhead. During a replace both are
+  // briefly active -- the old one releasing, the new one starting -- and the
+  // marker must follow the sound that was just asked for rather than the one
+  // fading out behind it.
+  std::uint64_t audition_playhead = kNothingPlaying;
+  std::uint64_t newest_audition = 0;
+  for (const rt::Voice& voice : m_audition_voices.voices()) {
+    if (voice.active &&
+        (audition_playhead == kNothingPlaying || voice.started_at >= newest_audition)) {
+      newest_audition = voice.started_at;
+      audition_playhead = static_cast<std::uint64_t>(voice.phase >> rt::kPhaseFractionBits);
+    }
+  }
+  m_published.audition_playhead.store(audition_playhead, std::memory_order_relaxed);
 
   const auto elapsed_frames =
       static_cast<std::uint32_t>(num_frames > kGlowFrameMax ? kGlowFrameMax : num_frames);

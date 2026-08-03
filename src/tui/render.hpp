@@ -42,6 +42,18 @@ inline constexpr std::size_t kMinRows = 20;
 // BROWSE: the file listing and the crate. A fourth pure function of the same
 // UiState -- a screen rather than a panel, for the reason render_browse.cpp
 // gives.
+// Columns the BROWSE preview waveform occupies: the terminal less its borders.
+//
+// A function rather than a constant because the strip spans the whole width --
+// it is the one part of that screen not split between two panels.
+[[nodiscard]] constexpr std::size_t preview_columns_for(std::size_t terminal_columns) noexcept {
+  return terminal_columns > 4 ? terminal_columns - 4 : 1;
+}
+
+// Rows the preview strip takes when it is showing: a border, three waveform
+// rows and the position line.
+inline constexpr std::size_t kPreviewRows = 6;
+
 [[nodiscard]] ftxui::Element render_browse(const UiState& state, std::size_t terminal_columns,
                                            std::size_t terminal_rows);
 

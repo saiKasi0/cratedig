@@ -1536,3 +1536,76 @@ TEST_CASE("the prompt carries its own note", "[tui]") {
   state.message = "no command starts with that";
   check_snapshot("prompt_note_100x30", state, 100, 30);
 }
+
+// -- the BROWSE preview strip -------------------------------------------------
+
+namespace {
+
+[[nodiscard]] tui::UiState previewing(int columns, int rows) {
+  tui::UiState state = browse_state(columns);
+
+  // Four bursts and four gaps, so the picture is obviously a picture of
+  // something rather than a band of ink.
+  state.preview.name = "amen_brother.wav";
+  state.preview.frames = 96'000;
+  state.preview.rate = 48'000;
+  const std::size_t count =
+      tui::bins_for_columns(tui::preview_columns_for(static_cast<std::size_t>(columns)));
+  state.preview.bins.assign(count, ingest::PeakBin{});
+  for (std::size_t bin = 0; bin < count; ++bin) {
+    const float level = (bin / (count / 8 + 1)) % 2 == 0 ? 0.85F : 0.04F;
+    state.preview.bins[bin] = ingest::PeakBin{.min = -level, .max = level};
+  }
+  state.preview.playhead = 36'000;
+  state.preview.playing = true;
+  static_cast<void>(rows);
+  return state;
+}
+
+}  // namespace
+
+TEST_CASE("BROWSE draws what is being previewed", "[tui]") {
+  // The visual the browser was missing: a listing says a file is 47 KB and
+  // nothing else, and 47 KB of loop and 47 KB of silence-then-a-crash look
+  // identical until you have waited through both.
+  check_snapshot("browse_preview_100x30", previewing(100, 30), 100, 30);
+}
+
+TEST_CASE("the preview marker stays where a finished sound left it", "[tui]") {
+  // Hollow rather than filled, and NOT reset to zero: a preview that ended
+  // should leave the picture where it ended rather than jumping the marker home
+  // and implying it is about to start again.
+  tui::UiState state = previewing(100, 30);
+  state.preview.playing = false;
+  check_snapshot("browse_preview_stopped_100x30", state, 100, 30);
+}
+
+TEST_CASE("the preview gives way on a short terminal", "[tui]") {
+  // The listing is what BROWSE is for. The strip takes its rows off the panels,
+  // so below the point where both fit it is the strip that goes -- the same
+  // order of sacrifice the crate panel follows on a narrow one.
+  check_snapshot("browse_preview_min_100x20", previewing(100, 20), 100, 20);
+}
+
+TEST_CASE("BROWSE shows the region marked for grabbing", "[tui]") {
+  // "Browsing should have an ability to just get a slice from a sample": the
+  // bracket under the waveform is that slice, and a pad key puts it on a pad.
+  tui::UiState state = previewing(100, 30);
+  state.preview.region_start = 24'000;
+  state.preview.region_end = 60'000;
+  state.preview.has_region = true;
+  check_snapshot("browse_region_100x30", state, 100, 30);
+}
+
+TEST_CASE("a region marked from the very start still shows both edges", "[tui]") {
+  // The playhead is drawn over the bracket, so a region starting at frame 0 with
+  // the sound at frame 0 puts two glyphs in one cell. The opening bracket loses,
+  // which is right -- but the closing one must still be there to say how far the
+  // region reaches.
+  tui::UiState state = previewing(100, 30);
+  state.preview.playhead = 0;
+  state.preview.region_start = 0;
+  state.preview.region_end = 48'000;
+  state.preview.has_region = true;
+  check_snapshot("browse_region_from_zero_100x30", state, 100, 30);
+}

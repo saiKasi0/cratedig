@@ -27,4 +27,4 @@ cratedig 0.0.1  browse                                                          
 │                                                               │ │                                │
 │                                                               │ │                                │
 ╰───────────────────────────────────────────────────────────────╯ ╰────────────────────────────────╯
-  browse    0 here                  jk move · l open · h up · space audition · enter load · esc back
+  browse    0 here                  jk move · l/h dirs · space hear · enter load · E edit · esc back
