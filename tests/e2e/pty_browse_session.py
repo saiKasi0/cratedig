@@ -102,7 +102,7 @@ def crate(screen: str) -> list[str]:
     return panel_rows(screen, CRATE_FIRST_COLUMN, COLUMNS - 1)
 
 
-def move_to(name: str, send, listing_now) -> bool:
+def move_to(name: str, send, listing_now, key: str = "j") -> bool:
     """Walk the cursor down to `name`. Bounded, and that bound is not cosmetic.
 
     The first version of this was `while name not in cursor_line(...)`, and the
@@ -114,7 +114,7 @@ def move_to(name: str, send, listing_now) -> bool:
     for _ in range(MAX_CURSOR_MOVES):
         if name in cursor_line(listing_now()):
             return True
-        if not send("j"):
+        if not send(key):
             return False
     return False
 
@@ -246,6 +246,34 @@ def main() -> int:
         # Auditioning is not loading: the crate must not have grown.
         if "two.wav" in "\n".join(crate(screen_now())):
             failures.append("auditioning two.wav put it in the crate — it must only preview")
+
+    if alive:
+        # SPACE STOPS WHAT SPACE STARTED, reported as "browsing has no
+        # deselection ability". The key only ever played: a preview ran to its
+        # end whatever you did, pressing space again stacked a SECOND copy over
+        # the first, and the panic key did not reach the audition lane either --
+        # so there was no way to stop one at all.
+        alive = send(" ")
+        if "stopped two.wav" not in screen_now():
+            failures.append("space a second time did not stop the preview")
+
+        # And a third press plays it again, rather than the toggle latching off.
+        alive = send(" ")
+        if "playing two.wav" not in screen_now():
+            failures.append("space a third time did not replay it")
+
+    if alive:
+        # Moving to another file and pressing space plays THAT one rather than
+        # stopping this one -- on a different entry the useful thing is to hear
+        # it, not to press space twice.
+        if not move_to("one.wav", send, lambda: listing(screen_now()), key="k"):
+            failures.append("could not move the cursor onto one.wav")
+        alive = send(" ")
+        if "playing one.wav" not in screen_now():
+            failures.append("space on a different file did not switch the preview to it")
+        alive = send(" ")
+        if not move_to("two.wav", send, lambda: listing(screen_now())):
+            failures.append("could not move back onto two.wav")
 
     if alive:
         # Load it. The crate panel is the observable, not the mode line.

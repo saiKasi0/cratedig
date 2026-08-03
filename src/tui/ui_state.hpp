@@ -462,6 +462,17 @@ struct UiState {
   std::array<PadState, rt::kNumPads> pads;
   std::uint8_t selected_pad = 0;
 
+  // What is being previewed, or empty when nothing is.
+  //
+  // A LABEL RATHER THAN A FLAG, because it is what makes the preview key a
+  // TOGGLE rather than a retrigger: pressing space on the thing already sounding
+  // stops it, and pressing it on anything else starts that instead. A bool could
+  // only answer the first half.
+  //
+  // Cleared by the frame loop when the sound ends, so the key does not report a
+  // preview that finished on its own thirty seconds ago.
+  std::string auditioning;
+
   bool playing = false;
   std::size_t playhead_frame = 0;
   std::uint8_t playhead_pad = 0;

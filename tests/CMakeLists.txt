@@ -34,6 +34,7 @@ add_executable(
   unit/onset_accuracy_test.cpp
   unit/onset_test.cpp
   unit/peak_pyramid_test.cpp
+  unit/audition_test.cpp
   unit/completion_test.cpp
   unit/pool_test.cpp
   unit/result_test.cpp

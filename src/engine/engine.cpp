@@ -439,6 +439,23 @@ void Engine::adopt_auditions() noexcept {
   }
 
   while (m_audition_handoff.try_take(m_retiring_audition)) {
+    // AN AUDITION REPLACES THE AUDITION.
+    //
+    // Without this, pressing the preview key twice left TWO copies sounding on
+    // top of each other -- measured, not supposed -- and moving to another file
+    // and previewing that played it over the first. A preview means "let me hear
+    // THIS", which has one answer at a time.
+    //
+    // Released rather than cut, which is why two voices are still worth having:
+    // the old one fades through its envelope while the new one starts, so
+    // replacing does not click.
+    //
+    // IT CANNOT BE DONE FROM THE INTERFACE, which is where it was tried first.
+    // adopt_auditions() runs BEFORE drain_pad_events() in render(), so a stop
+    // and a play published in the same frame arrive in the wrong order and the
+    // stop kills the sound it was meant to precede.
+    m_audition_voices.stop_all();
+
     // ARRIVING IS PLAYING. There is no second message: an audition is "let me
     // hear this now", and a config that had landed but not yet sounded would be
     // a state with nothing to do and everything to handle.
@@ -575,6 +592,11 @@ void Engine::drain_pad_events(Ring& ring, std::size_t num_frames) noexcept {
     }
     if (event.kind == rt::PadEventKind::kStopAll) {
       m_voices.stop_all();
+      // AND THE AUDITION, because the panic key means silence. It did not until
+      // M5.5: `.` and `:stop` released every pad voice and left a preview
+      // ringing, which -- since nothing in the interface called stop_audition()
+      // either -- meant there was no way to stop one at all.
+      m_audition_voices.stop_all();
       continue;
     }
 

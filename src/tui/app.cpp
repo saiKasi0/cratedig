@@ -1573,6 +1573,10 @@ int run_app(const AppOptions& options) {
     }
   };
 
+  // One frame of grace for a just-published audition. See the state sync inside
+  // the renderer, and the toggle in BROWSE and EDIT that depends on it.
+  bool audition_settling = false;
+
   auto frame = ftxui::Renderer([&] {
     const ftxui::Dimensions size = ftxui::Terminal::Size();
     const auto columns = static_cast<std::size_t>(std::max(size.dimx, 1));
@@ -1657,6 +1661,21 @@ int run_app(const AppOptions& options) {
     state.current_file = current;
 
     state.active_voices = engine.active_voices();
+
+    // A preview that ran to its end is no longer the thing space would stop.
+    // Without this the toggle would refuse to replay the last file you heard.
+    //
+    // ONE FRAME OF GRACE, because publishing an audition and the engine adopting
+    // it are not the same moment. This runs on every event; adopt_offline() runs
+    // only on the refresh tick, so with no audio device the count is still zero
+    // when the frame right after the keystroke asks. Without the grace the
+    // label was cleared before it could ever match, and the toggle needed THREE
+    // presses to stop -- play, play, stop -- which is what it did when measured.
+    if (audition_settling) {
+      audition_settling = false;
+    } else if (engine.active_auditions() == 0) {
+      state.auditioning.clear();
+    }
     state.xruns = device.xrun_count();
     state.dropped =
         engine.dropped_events() + engine.dropped_triggers() + engine.dropped_midi_events();
@@ -1983,6 +2002,21 @@ int run_app(const AppOptions& options) {
           if (under == nullptr || under->is_directory) {
             return true;
           }
+
+          // SPACE STOPS WHAT SPACE STARTED. Reported as "browsing has no
+          // deselection": the key only ever played, so a preview ran to its end
+          // whatever you did, and there was no way to silence one -- the panic
+          // key did not reach the audition lane either.
+          //
+          // On the SAME entry, because on a different one the useful thing is to
+          // hear that one, not to stop this one and press space again.
+          if (state.auditioning == under->name) {
+            static_cast<void>(engine.stop_audition());
+            state.auditioning.clear();
+            set_message("stopped " + under->name, false);
+            return true;
+          }
+
           const std::filesystem::path here{browser.path};
           const ingest::SampleLoad load =
               ingest::load_sample(here / under->name, options.sample_rate);
@@ -1998,7 +2032,9 @@ int run_app(const AppOptions& options) {
             set_message("audition is busy — try again", true);
             return true;
           }
-          set_message("playing " + under->name, false);
+          state.auditioning = under->name;
+          audition_settling = true;
+          set_message("playing " + under->name + " — space again to stop", false);
           return true;
         }
 
@@ -2192,6 +2228,17 @@ int run_app(const AppOptions& options) {
             set_message("nothing to audition", true);
             return true;
           }
+
+          // A toggle here too, for the reason it is one in BROWSE: a preview you
+          // cannot stop is one you have to wait out.
+          const std::string label = "slice " + std::to_string(state.edit.slice + 1);
+          if (state.auditioning == label) {
+            static_cast<void>(engine.stop_audition());
+            state.auditioning.clear();
+            set_message("stopped " + label, false);
+            return true;
+          }
+
           const ingest::Slice& slice = file->slices.slices[state.edit.slice];
 
           // Built from the file and the slice, with the defaults a pad would
@@ -2207,9 +2254,10 @@ int run_app(const AppOptions& options) {
             set_message("audition is busy — try again", true);
             return true;
           }
-          set_message("auditioning slice " + std::to_string(state.edit.slice + 1) +
-                          " (on no pad — :slot assign " + std::to_string(state.edit.slice + 1) +
-                          " <pad> to keep it)",
+          state.auditioning = label;
+          audition_settling = true;
+          set_message("auditioning " + label + " (on no pad — :slot assign " +
+                          std::to_string(state.edit.slice + 1) + " <pad> to keep it)",
                       false);
           return true;
         }
