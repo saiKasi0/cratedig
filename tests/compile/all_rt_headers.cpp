@@ -11,6 +11,7 @@
 #include "rt/handoff_ring.hpp"
 #include "rt/interpolator.hpp"
 #include "rt/pad_config.hpp"
+#include "rt/recorder.hpp"
 #include "rt/result.hpp"
 #include "rt/sample.hpp"
 #include "rt/spsc_ring.hpp"
@@ -18,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <utility>
 
 namespace {
@@ -71,6 +73,31 @@ static_assert(rt::Sample::kGuardAfter >= rt::kHermiteTapsAfter);
   static_cast<void>(garbage.retire(std::move(handle)));
   static_cast<void>(ring.rejected_count());
   static_cast<void>(ring.size_approx());
+}
+
+// The recorder is reached from the audio callback and owns two rings and a span
+// of chunks, so its whole write path has to build without exceptions too.
+[[maybe_unused]] void instantiate_recorder_members(rt::Recorder& recorder,
+                                                   std::span<rt::RecordChunk> pool,
+                                                   std::span<float> preroll,
+                                                   std::span<const float* const> block) noexcept {
+  recorder.reset(pool, preroll, 0, 2);
+  recorder.arm(rt::RecordSource::kInput, 0.5F, 0);
+  recorder.start(rt::RecordSource::kMaster);
+  recorder.capture(block, 0);
+  recorder.stop();
+  std::uint16_t index = 0;
+  if (recorder.try_collect(index)) {
+    static_cast<void>(recorder.chunk(index).channel(0));
+    recorder.recycle(index);
+  }
+  static_cast<void>(recorder.state());
+  static_cast<void>(recorder.is_recording());
+  static_cast<void>(recorder.source());
+  static_cast<void>(recorder.source_peak());
+  static_cast<void>(recorder.frames_captured());
+  static_cast<void>(recorder.dropped_frames());
+  static_cast<void>(recorder.chunks_available());
 }
 
 [[maybe_unused]] void instantiate_ring_members(ProbeRing& ring, std::uint64_t& slot) noexcept {
