@@ -202,6 +202,9 @@ enum class Screen : std::uint8_t {
   kEdit,
   kMix,
   kBrowse,
+
+  // Tuning a transient chop while watching it change.
+  kChop,
 };
 
 // One line of the browser's directory listing.
@@ -439,6 +442,49 @@ struct PreviewState {
   [[nodiscard]] bool showing() const noexcept { return frames > 0 && !bins.empty(); }
 };
 
+// The live re-chop preview: the parameters, and what they currently produce.
+//
+// WHY THIS SCREEN EXISTS. docs/ROADMAP.md puts it plainly -- chopping is judged
+// by eye and ear, and a parameter you have to re-run a command to evaluate is
+// one nobody tunes. `:chop transient` answers with a number; this answers with
+// the picture, and changes it under your fingers.
+//
+// The expensive half of detection is NOT in here. ingest::OnsetAnalysis is
+// computed once when the screen opens and lives in app.cpp; only the picking
+// runs per keystroke. Measured on three minutes of stereo: analysing is 82.8 ms
+// and picking is 3.9 ms, so the difference is between a screen that responds
+// within a frame and one that stutters on every press.
+struct ChopState {
+  // What is adjustable, in the order they are shown.
+  enum class Field : std::uint8_t { kSensitivity, kGap, kLowCut, kCount };
+
+  float lambda = 1.6F;
+  double gap_seconds = 0.030;
+  float low_cut = 0.0F;
+
+  Field field = Field::kSensitivity;
+
+  // What those settings currently produce. Boundaries in source frames.
+  std::vector<std::size_t> boundaries;
+
+  // The detection function, summarised to one value a column, and the same for
+  // the threshold that was applied to it. THE THING TO LOOK AT when a chop comes
+  // out wrong -- a peak below the line is a hit that was not taken, and a run of
+  // line above peaks is a passage the detector has given up on.
+  std::vector<float> flux;
+  std::vector<float> threshold;
+
+  // The file being tuned, so the screen can say so and the boundaries mean
+  // something.
+  std::size_t frames = 0;
+  std::uint32_t rate = 48'000;
+  std::string name;
+
+  // Re-analysis is only needed when the low cut moves. Set by the keymap,
+  // cleared once app.cpp has done it.
+  bool needs_analysis = false;
+};
+
 struct UiState {
   std::string version;
 
@@ -510,6 +556,9 @@ struct UiState {
 
   // What BROWSE is previewing. See PreviewState.
   PreviewState preview;
+
+  // The live re-chop preview. See ChopState.
+  ChopState chop;
 
   bool playing = false;
   std::size_t playhead_frame = 0;

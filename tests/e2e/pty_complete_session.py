@@ -151,8 +151,8 @@ def main() -> int:
         rows = menu_rows(screen_now())
         if not rows:
             failures.append("Tab did not open the menu — the key never reached the program")
-        elif len(rows) != 5:
-            failures.append(f"expected the five chop phrases, got {len(rows)}: {rows}")
+        elif len(rows) != 6:
+            failures.append(f"expected the six chop phrases, got {len(rows)}: {rows}")
         if "chop grid" not in selected_row(screen_now()):
             failures.append(f"the first offer is not selected: {selected_row(screen_now())!r}")
 
@@ -186,19 +186,30 @@ def main() -> int:
 
     if alive:
         # Cycling WRAPS, so the last entry is reachable going backwards.
+        #
+        # Read from the menu rather than named. Hardcoding "chop reset" here
+        # broke the day a sixth chop phrase was added -- and what is being
+        # checked is the WRAP, not which verb happens to be last.
+        last = menu_rows(screen_now())[-1].strip()
         alive = send(SHIFT_TAB)
-        if "chop reset" not in selected_row(screen_now()):
-            failures.append(f"cycling does not wrap: {selected_row(screen_now())!r}")
+        if last.lstrip("▌ ") not in selected_row(screen_now()):
+            failures.append(
+                f"cycling does not wrap: expected {last!r}, got {selected_row(screen_now())!r}")
 
     if alive:
         # Typing dismisses it. The set was captured when Tab was pressed, and
         # cycling it against a line that has since changed would offer things
         # that no longer match what is on screen.
+        typed_before = prompt_line(screen_now())
         alive = send(" ")
         if menu_rows(screen_now()):
             failures.append("typing did not dismiss the menu")
-        if prompt_line(screen_now()) != " :chop reset █":
-            failures.append(f"typing did not reach the line: {prompt_line(screen_now())!r}")
+        # The line gains the space, whatever the selected phrase was.
+        expected = typed_before.replace("█", " █")
+        if prompt_line(screen_now()) != expected:
+            failures.append(
+                f"typing did not reach the line: expected {expected!r}, "
+                f"got {prompt_line(screen_now())!r}")
 
     if alive:
         # And a FINISHED phrase offers nothing. `chop reset ` -- the trailing

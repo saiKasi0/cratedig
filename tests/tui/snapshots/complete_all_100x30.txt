@@ -24,7 +24,7 @@
     chop transient beat  one cut a beat, at the session tempo                                       
     chop transient bar   one cut a bar — riffs whole                                                
     chop reset           back to one slice                                                          
+    chop tune            adjust the chop while watching it                                          
     slot assign          bind slices to pads                                                        
-    edit                 open EDIT on a slice                                                       
-    28 more                                                                                         
+    29 more                                                                                         
   tab next · shift-tab back · enter run · esc close                                                 

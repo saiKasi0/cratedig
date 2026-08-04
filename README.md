@@ -159,6 +159,7 @@ keys to mean "put it here". `E` is capital because `e` is pad 7.
 | | |
 |---|---|
 | `:chop transient [strum\|beat\|bar]` | cut at detected onsets, as fine as you ask |
+| `:chop tune` | open CHOP and adjust the chop while watching it change |
 | `:chop grid N` | cut into N equal pieces |
 | `:chop reset` | back to the whole file on pad 1 |
 | `:slot assign S P` | put slice S on pad P; either may be a range (`1-8 1`) |
@@ -192,6 +193,14 @@ keys to mean "put it here". `E` is capital because `e` is pad 7.
 | `:q` `:quit` | quit |
 
 `slice` is accepted anywhere `chop` is.
+
+**Tuning it by eye.** `:chop tune` opens a screen showing the waveform with every
+cut marked, the detection function underneath with the threshold drawn on it, and
+sensitivity, minimum gap and low cut as knobs. The slice count and the cuts move
+as you turn them. `enter` applies the chop, `esc` leaves the file alone. It is
+worth opening when a chop comes out wrong, because the detection curve says *why*:
+a peak below the threshold line is a hit that was not taken, and a stretch of line
+sitting over every peak is a passage the detector has given up on.
 
 **How fine a chop.** `:chop transient` cuts at every attack it can find — on a
 fast riff that is roughly one slice per strum. `beat` and `bar` cut less often,

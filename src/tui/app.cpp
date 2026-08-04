@@ -972,6 +972,52 @@ int run_app(const AppOptions& options) {
   // Runs a parsed command. Everything it touches -- the engine's handoff ring,
   // the slice set, the UiState -- belongs to this thread, which is what makes a
   // command a plain function call rather than a message.
+  // The expensive half of onset detection, kept while CHOP is open.
+  //
+  // Recomputed only when the low cut moves, because that is the only adjustable
+  // that reaches the FFT. Measured on three minutes of stereo: analysing is
+  // 82.8 ms and picking is 3.9 ms, so re-analysing per keystroke would put a
+  // tenth of a second between a key and the screen on ordinary material.
+  ingest::OnsetAnalysis chop_analysis;
+
+  // What the last pick produced, at analysis resolution. Summarised to the
+  // terminal's width in the renderer, where the width is known -- the same split
+  // the BROWSE preview uses, and the reason UiState carries pictures rather than
+  // the data they are drawn from.
+  ingest::OnsetResult chop_result;
+
+  // The parameters CHOP is showing, as OnsetParams.
+  auto chop_params = [&state]() {
+    ingest::OnsetParams params;
+    params.threshold_lambda = state.chop.lambda;
+
+    // THE FLOOR MOVES WITH IT, and that is what makes this a control at all.
+    //
+    // The threshold is `delta + lambda * median(flux)`. On sparse material --
+    // hits with silence between them, which is most of what anyone chops -- the
+    // local median is near zero, so the whole threshold IS delta and lambda
+    // scales nothing. Measured on a twelve-hit fixture: sweeping lambda from 1.3
+    // to 2.2 gave 24 slices at every step.
+    //
+    // So the field drives both, in proportion. At the detector's own default of
+    // 1.6 this is exactly its own default delta, so nothing about `:chop
+    // transient` moves; away from it, the control works on dense and sparse
+    // material alike.
+    constexpr float kDefaultLambda = 1.6F;
+    constexpr float kDefaultDelta = 0.04F;
+    params.threshold_delta = kDefaultDelta * (state.chop.lambda / kDefaultLambda);
+
+    params.min_gap_seconds = state.chop.gap_seconds;
+    params.hf_emphasis = state.chop.low_cut;
+    return params;
+  };
+
+  // Re-picks. Cheap by construction -- see OnsetAnalysis.
+  auto repick_chop = [&]() {
+    chop_result = ingest::pick_onsets(chop_analysis, chop_params());
+    state.chop.boundaries = chop_result.frames;
+  };
+
   auto execute = [&](const Command& command) {
     switch (command.kind) {
       case CommandKind::kNone:
@@ -980,6 +1026,33 @@ int run_app(const AppOptions& options) {
       case CommandKind::kError:
         set_message(command.message, true);
         break;
+
+      case CommandKind::kChopTune: {
+        ingest::PoolEntry* file = entry();
+        if (file == nullptr) {
+          set_message("nothing loaded to chop", true);
+          break;
+        }
+
+        // The analysis runs ONCE, here, on the control thread. It is the
+        // expensive half and the screen's whole reason for existing is that
+        // nothing after it is.
+        state.chop.lambda = 1.6F;
+        state.chop.gap_seconds = 0.030;
+        state.chop.low_cut = 0.0F;
+        state.chop.field = ChopState::Field::kSensitivity;
+        state.chop.frames = file->sample->num_frames();
+        state.chop.rate = file->sample->sample_rate();
+        state.chop.name = file->name;
+        state.chop.needs_analysis = false;
+
+        chop_analysis = ingest::analyse_onsets(*file->sample, chop_params());
+        repick_chop();
+
+        state.screen = Screen::kChop;
+        set_message("tuning the chop — enter applies it, esc leaves it alone", false);
+        break;
+      }
 
       case CommandKind::kChopTransient:
       case CommandKind::kChopGrid: {
@@ -1764,8 +1837,16 @@ int run_app(const AppOptions& options) {
       // columns on the amplitude gutter -- so which one is up decides both the
       // span summarised and the number of bins to summarise it into. Using one
       // pair for both would stretch whichever screen lost.
+      // CHOP always shows the WHOLE file: it is about where every cut lands,
+      // and a zoomed view would hide the ones outside it while still counting
+      // them.
       const bool editing = state.screen == Screen::kEdit;
-      const WaveView& view = editing ? state.edit.view : state.view;
+      WaveView whole_file;
+      whole_file.first_frame = 0;
+      whole_file.frames_visible = drawn->sample->num_frames();
+      const WaveView& view = state.screen == Screen::kChop ? whole_file
+                             : editing                     ? state.edit.view
+                                                           : state.view;
       const std::size_t wave_columns =
           editing ? edit_wave_columns_for(columns) : wave_columns_for(columns);
       state.bins.assign(bins_for_columns(wave_columns), ingest::PeakBin{});
@@ -1794,6 +1875,31 @@ int run_app(const AppOptions& options) {
     } else if (state.screen != Screen::kBrowse) {
       state.preview.bins.clear();
       state.preview.frames = 0;
+    }
+
+    // The detection function, summarised to one value a column.
+    //
+    // The MAXIMUM of each column's analysis frames rather than the mean: a peak
+    // one frame wide is exactly what an onset looks like, and averaging it away
+    // would draw a picture in which the thing being detected is invisible.
+    if (state.screen == Screen::kChop && !chop_result.flux.empty()) {
+      // TWO LEVELS A CHARACTER COLUMN, because envelope_rows() takes one per
+      // BRAILLE dot column and there are two of those in a cell. Sized to the
+      // cells alone, the curve drew across half the panel and left the rest
+      // blank -- which looked like a file that stopped halfway.
+      const std::size_t cells = (columns > 2 ? columns - 2 : 1) * kDotColumnsPerCell;
+      state.chop.flux.assign(cells, 0.0F);
+      state.chop.threshold.assign(cells, 0.0F);
+      for (std::size_t column = 0; column < cells; ++column) {
+        const std::size_t first = column * chop_result.flux.size() / cells;
+        const std::size_t last =
+            std::max(first + 1, (column + 1) * chop_result.flux.size() / cells);
+        for (std::size_t at = first; at < last && at < chop_result.flux.size(); ++at) {
+          state.chop.flux[column] = std::max(state.chop.flux[column], chop_result.flux[at]);
+          state.chop.threshold[column] =
+              std::max(state.chop.threshold[column], chop_result.threshold[at]);
+        }
+      }
     }
 
     return render(state, columns, rows);
@@ -2282,6 +2388,103 @@ int run_app(const AppOptions& options) {
       if (const std::uint8_t pad = pad_for_key(code); pad < rt::kNumPads) {
         grab_region(pad);
         return true;
+      }
+      return true;
+    }
+
+    // CHOP HAS ITS OWN KEYMAP, for the reason BROWSE and MIX do: the pad keys
+    // would play drums over the thing you are listening for.
+    if (state.screen == Screen::kChop) {
+      if (!typing) {
+        return true;
+      }
+      if (code == kEscape) {
+        // LEAVES IT ALONE. Esc is cancel here, not "apply and go" -- the whole
+        // screen is a preview, and a preview that committed itself on the way
+        // out would be an edit you did not ask for.
+        state.screen = Screen::kPerform;
+        set_message("chop unchanged", false);
+        return true;
+      }
+      if (code == ':') {
+        state.command_active = true;
+        state.command_text.clear();
+        return true;
+      }
+
+      ChopState& chop = state.chop;
+      const auto fields = static_cast<std::size_t>(ChopState::Field::kCount);
+
+      switch (code) {
+        case 'j':
+        case kKeyArrowDown:
+          chop.field =
+              static_cast<ChopState::Field>((static_cast<std::size_t>(chop.field) + 1) % fields);
+          return true;
+
+        case 'k':
+        case kKeyArrowUp:
+          chop.field = static_cast<ChopState::Field>(
+              (static_cast<std::size_t>(chop.field) + fields - 1) % fields);
+          return true;
+
+        case 'h':
+        case 'l':
+        case 'H':
+        case 'L':
+        case kKeyArrowLeft:
+        case kKeyArrowRight: {
+          const bool up = code == 'l' || code == 'L' || code == kKeyArrowRight;
+          const bool coarse = code == 'H' || code == 'L';
+          const float step = coarse ? 5.0F : 1.0F;
+
+          switch (chop.field) {
+            case ChopState::Field::kSensitivity:
+              // Clamped ABOVE ZERO: a lambda of 0 leaves only the absolute
+              // floor, which on quiet material fires on every ripple.
+              chop.lambda = std::clamp(chop.lambda + (up ? 0.05F : -0.05F) * step, 0.2F, 6.0F);
+              break;
+
+            case ChopState::Field::kGap:
+              chop.gap_seconds =
+                  std::clamp(chop.gap_seconds + ((up ? 0.005 : -0.005) * static_cast<double>(step)),
+                             0.005, 4.0);
+              break;
+
+            case ChopState::Field::kLowCut:
+              chop.low_cut = std::clamp(chop.low_cut + (up ? 0.02F : -0.02F) * step, 0.0F,
+                                        ingest::kMaxHfEmphasis);
+              // THE ONLY ADJUSTABLE THAT REACHES THE FFT, so the only one that
+              // costs an analysis. Flagged rather than done here, because the
+              // keymap has no business running an 80 ms computation inside a
+              // keystroke handler.
+              chop.needs_analysis = true;
+              break;
+
+            case ChopState::Field::kCount:
+              break;
+          }
+          repick_chop();
+          return true;
+        }
+
+        case kReturn: {
+          // APPLY. The preview becomes the file's slices, and the pads follow.
+          ingest::PoolEntry* file = entry();
+          if (file == nullptr) {
+            set_message("nothing loaded to chop", true);
+            return true;
+          }
+          file->slices = ingest::slices_at(*file->sample, chop.boundaries);
+          show_slices(file->slices, state);
+          static_cast<void>(apply_slices(engine, *file, file->slices, state));
+          state.screen = Screen::kPerform;
+          set_message("chop: " + std::to_string(file->slices.size()) + " slices", false);
+          return true;
+        }
+
+        default:
+          break;
       }
       return true;
     }
@@ -2813,6 +3016,17 @@ int run_app(const AppOptions& options) {
       // there is no audio thread to race with -- see Engine::adopt_offline().
       if (!audio_running) {
         engine.adopt_offline();
+      }
+
+      // The low cut moved, so the FFT half has to run again. HERE rather than in
+      // the keystroke handler: it is ~80 ms on ordinary material, and a keymap
+      // that stopped to compute would drop the keys pressed behind it.
+      if (state.chop.needs_analysis && state.screen == Screen::kChop) {
+        state.chop.needs_analysis = false;
+        if (const ingest::PoolEntry* file = entry(); file != nullptr) {
+          chop_analysis = ingest::analyse_onsets(*file->sample, chop_params());
+          repick_chop();
+        }
       }
       static_cast<void>(engine.collect_garbage());
 

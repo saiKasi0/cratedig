@@ -215,14 +215,16 @@ std::string_view name_of(ChopDensity density) noexcept {
   return "strum";
 }
 
-OnsetResult detect_onsets(const rt::Sample& sample, const OnsetParams& params) {
-  OnsetResult result;
-  result.hop = params.hop;
+OnsetAnalysis analyse_onsets(const rt::Sample& sample, const OnsetParams& params) {
+  OnsetAnalysis analysis;
+  analysis.hop = params.hop;
+  analysis.sample_rate = sample.sample_rate();
   if (sample.empty() || params.hop == 0) {
-    return result;
+    return analysis;
   }
 
-  const std::vector<float> mono = downmix(sample);
+  analysis.mono = downmix(sample);
+  const std::vector<float>& mono = analysis.mono;
   const std::size_t num_analysis = (mono.size() / params.hop) + 1;
 
   const Fft fft;
@@ -230,7 +232,7 @@ OnsetResult detect_onsets(const rt::Sample& sample, const OnsetParams& params) {
   std::vector<float> previous(kBins, 0.0F);
   std::vector<float> current(kBins, 0.0F);
 
-  result.flux.assign(num_analysis, 0.0F);
+  analysis.flux.assign(num_analysis, 0.0F);
 
   for (std::size_t frame = 0; frame < num_analysis; ++frame) {
     fill_window(mono, frame * params.hop, windowed);
@@ -253,16 +255,8 @@ OnsetResult detect_onsets(const rt::Sample& sample, const OnsetParams& params) {
     // bins. log() flattens the large narrow rise and preserves the small broad
     // one, so the two stop being confusable. log1p rather than log because bins
     // are legitimately zero and log(0) is not.
-    // The bin weight, when a profile asks for one. `1 + emphasis * (b / last)`,
-    // so emphasis 0 is a flat weight of 1 and the sum below is byte for byte the
-    // one this detector has always computed -- which is what keeps the drums
-    // profile, and every chop measured against it, exactly where it was.
     //
-    // The scale of the weights does not matter, only their ratio: the flux is
-    // normalised to a maximum of 1 immediately after this loop, so a uniformly
-    // larger sum changes nothing.
-    // Bins below this do not count at all. See OnsetParams::hf_emphasis for why
-    // it is a cut rather than a tilt.
+    // Bins below `first_bin` do not count at all. See OnsetParams::hf_emphasis.
     const float emphasis = std::clamp(params.hf_emphasis, 0.0F, kMaxHfEmphasis);
     const auto first_bin = static_cast<std::size_t>(emphasis * static_cast<float>(kBins));
 
@@ -275,20 +269,33 @@ OnsetResult detect_onsets(const rt::Sample& sample, const OnsetParams& params) {
     }
     // Frame 0 has no predecessor, so its "rise" is the whole spectrum appearing
     // out of nothing. Left at zero rather than reported as an enormous onset.
-    result.flux[frame] = frame == 0 ? 0.0F : sum;
+    analysis.flux[frame] = frame == 0 ? 0.0F : sum;
     previous.swap(current);
   }
 
   // Normalised so the parameters are properties of the ALGORITHM rather than of
   // the recording level. Without this, threshold_delta would have to be
   // re-chosen for every file.
-  const float loudest = *std::max_element(result.flux.begin(), result.flux.end());
+  const float loudest = *std::max_element(analysis.flux.begin(), analysis.flux.end());
   if (loudest > 0.0F) {
     const float scale = 1.0F / loudest;
-    for (float& value : result.flux) {
+    for (float& value : analysis.flux) {
       value *= scale;
     }
   }
+  return analysis;
+}
+
+OnsetResult pick_onsets(const OnsetAnalysis& analysis, const OnsetParams& params) {
+  OnsetResult result;
+  result.hop = analysis.hop;
+  if (analysis.flux.empty() || analysis.hop == 0) {
+    return result;
+  }
+
+  const std::vector<float>& mono = analysis.mono;
+  const std::size_t num_analysis = analysis.flux.size();
+  result.flux = analysis.flux;
 
   result.threshold.assign(num_analysis, 0.0F);
   std::vector<float> scratch;
@@ -299,7 +306,7 @@ OnsetResult detect_onsets(const rt::Sample& sample, const OnsetParams& params) {
   }
 
   const auto min_gap_frames =
-      static_cast<std::size_t>(params.min_gap_seconds * static_cast<double>(sample.sample_rate()));
+      static_cast<std::size_t>(params.min_gap_seconds * static_cast<double>(analysis.sample_rate));
 
   // Peak picking. A detection has to be all three of: a strict local maximum,
   // above the local threshold, and far enough from the previous detection.
@@ -319,7 +326,7 @@ OnsetResult detect_onsets(const rt::Sample& sample, const OnsetParams& params) {
       continue;
     }
 
-    std::size_t position = std::min(frame * params.hop, mono.size() - 1);
+    std::size_t position = std::min(frame * analysis.hop, mono.size() - 1);
     if (params.backtrack) {
       const std::size_t foot = backtrack_to_minimum(result.flux, frame, params.median_radius);
 
@@ -333,7 +340,7 @@ OnsetResult detect_onsets(const rt::Sample& sample, const OnsetParams& params) {
       // Half a window is 10.7 ms at the defaults, comfortably inside the 30 ms
       // refractory period, so this can never wander into the next hit.
       const std::size_t limit = position + (kWindowSize / 2);
-      position = refine_attack(mono, foot * params.hop, limit);
+      position = refine_attack(mono, foot * analysis.hop, limit);
     }
 
     if (have_previous && position < previous_onset + min_gap_frames) {
@@ -345,6 +352,10 @@ OnsetResult detect_onsets(const rt::Sample& sample, const OnsetParams& params) {
   }
 
   return result;
+}
+
+OnsetResult detect_onsets(const rt::Sample& sample, const OnsetParams& params) {
+  return pick_onsets(analyse_onsets(sample, params), params);
 }
 
 }  // namespace ingest

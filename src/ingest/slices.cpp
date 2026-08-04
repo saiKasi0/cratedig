@@ -140,16 +140,15 @@ std::size_t snap_to_zero_crossing(const rt::Sample& sample, std::size_t at, std:
   return at;
 }
 
-SliceSet chop_transient(const rt::Sample& sample, const OnsetParams& onset,
-                        const SnapParams& snap) {
+SliceSet slices_at(const rt::Sample& sample, std::span<const std::size_t> onsets,
+                   const SnapParams& snap) {
   SliceSet set;
   set.algorithm = ChopAlgorithm::kTransient;
   if (sample.empty()) {
     return set;
   }
 
-  const OnsetResult onsets = detect_onsets(sample, onset);
-  if (onsets.frames.empty()) {
+  if (onsets.empty()) {
     // No transients anywhere -- a pad, a drone, a field recording. One slice
     // covering everything is more useful than none, and it is what makes
     // `:chop transient` on unsuitable material behave like a no-op rather than
@@ -158,10 +157,15 @@ SliceSet chop_transient(const rt::Sample& sample, const OnsetParams& onset,
     return set;
   }
 
-  std::vector<std::size_t> boundaries = onsets.frames;
+  std::vector<std::size_t> boundaries(onsets.begin(), onsets.end());
   boundaries.push_back(sample.num_frames());  // the last slice runs to the end
   set.slices = slices_from_boundaries(sample, std::move(boundaries), snap);
   return set;
+}
+
+SliceSet chop_transient(const rt::Sample& sample, const OnsetParams& onset,
+                        const SnapParams& snap) {
+  return slices_at(sample, detect_onsets(sample, onset).frames, snap);
 }
 
 SliceSet chop_grid(const rt::Sample& sample, std::size_t parts, const SnapParams& snap) {

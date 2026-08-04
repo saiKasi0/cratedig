@@ -31,7 +31,7 @@ TEST_CASE("a prefix offers every phrase that extends it", "[unit]") {
   const tui::CompletionSet set = tui::complete_verbs("ch");
   REQUIRE(texts(set) == std::vector<std::string>{"chop grid", "chop transient",
                                                  "chop transient beat", "chop transient bar",
-                                                 "chop reset"});
+                                                 "chop reset", "chop tune"});
 
   // In table order, not alphabetical: `grid` before `transient` before `reset`
   // is the order you would try them in, and sorting would put `reset` first.
@@ -225,6 +225,7 @@ TEST_CASE("every phrase offered is a phrase the parser understands", "[unit]") {
       {"chop transient bar", ""},
       {"chop transient", ""},
       {"chop reset", ""},
+      {"chop tune", ""},
       {"slot assign", " 1 1"},
       {"edit", " 1"},
       {"env", " 1 r 250"},

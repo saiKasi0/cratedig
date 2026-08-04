@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace ingest {
@@ -99,6 +100,18 @@ struct SnapParams {
 // expects: leading silence or a count-in is not a chop.
 [[nodiscard]] SliceSet chop_transient(const rt::Sample& sample, const OnsetParams& onset = {},
                                       const SnapParams& snap = {});
+
+// The slicing half on its own, for onsets somebody already has.
+//
+// The live re-chop preview picks its own onsets on every keystroke and only
+// turns them into slices when you accept, so it needs this without the
+// detection in front of it. Same split as ingest::pick_onsets, one level up.
+//
+// An empty `onsets` gives ONE slice covering everything, which is what
+// chop_transient does on material with no transients: more useful than none,
+// and it makes an unsuitable file behave like a no-op rather than a failure.
+[[nodiscard]] SliceSet slices_at(const rt::Sample& sample, std::span<const std::size_t> onsets,
+                                 const SnapParams& snap = {});
 
 // Chop into `parts` equal pieces. What `:chop grid 16` does, and the right
 // answer for a loop that is already in time.

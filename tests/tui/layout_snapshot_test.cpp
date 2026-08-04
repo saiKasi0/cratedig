@@ -1609,3 +1609,66 @@ TEST_CASE("a region marked from the very start still shows both edges", "[tui]")
   state.preview.has_region = true;
   check_snapshot("browse_region_from_zero_100x30", state, 100, 30);
 }
+
+// -- CHOP, the live re-chop preview -------------------------------------------
+
+namespace {
+
+[[nodiscard]] tui::UiState tuning(int columns, int rows) {
+  tui::UiState state = chopped_state(columns);
+  state.screen = tui::Screen::kChop;
+  state.chop.name = "amen_brother.wav";
+  state.chop.frames = 96'000;
+  state.chop.rate = 48'000;
+  state.chop.lambda = 1.60F;
+  state.chop.gap_seconds = 0.030;
+  state.chop.low_cut = 0.0F;
+
+  // Eight cuts, evenly spread, so the boundary row is legible as a rhythm rather
+  // than as a smear.
+  for (std::size_t cut = 0; cut < 8; ++cut) {
+    state.chop.boundaries.push_back(cut * (96'000 / 8));
+  }
+
+  // A detection function with peaks where the cuts are, and a threshold that
+  // sits under the peaks and over the noise -- which is what a working chop
+  // looks like, and the picture the screen exists to show.
+  const auto cells = static_cast<std::size_t>(columns - 2) * tui::kDotColumnsPerCell;
+  state.chop.flux.assign(cells, 0.05F);
+  state.chop.threshold.assign(cells, 0.30F);
+  for (std::size_t cut = 0; cut < 8; ++cut) {
+    const std::size_t at = cut * cells / 8;
+    for (std::size_t spread = 0; spread < 3 && at + spread < cells; ++spread) {
+      state.chop.flux[at + spread] = 0.95F - (0.2F * static_cast<float>(spread));
+    }
+  }
+  static_cast<void>(rows);
+  return state;
+}
+
+}  // namespace
+
+TEST_CASE("CHOP shows the cuts, the detection function and the knobs", "[tui]") {
+  // The whole argument for this screen, in one picture: what it cut, why, and
+  // what to turn. A slice count alone says a chop is wrong without saying why.
+  check_snapshot("chop_100x30", tuning(100, 30), 100, 30);
+}
+
+TEST_CASE("CHOP marks which parameter the keys will move", "[tui]") {
+  tui::UiState state = tuning(100, 30);
+  state.chop.field = tui::ChopState::Field::kGap;
+  state.chop.gap_seconds = 0.180;
+  check_snapshot("chop_gap_100x30", state, 100, 30);
+}
+
+TEST_CASE("CHOP with nothing detected still draws its panels", "[tui]") {
+  // The degenerate case a person WILL reach by turning sensitivity up: no cuts,
+  // an empty detection function. It must read as "nothing found" rather than as
+  // a broken screen, because the next thing they do is turn it back.
+  tui::UiState state = tuning(100, 30);
+  state.chop.boundaries.clear();
+  state.chop.flux.clear();
+  state.chop.threshold.clear();
+  state.chop.lambda = 6.0F;
+  check_snapshot("chop_empty_100x30", state, 100, 30);
+}

@@ -160,6 +160,38 @@ struct OnsetResult {
   std::size_t hop = 0;
 };
 
+// The expensive half, kept so it can be reused.
+//
+// WHY THIS IS SPLIT OUT. Detection is one FFT per hop -- the whole cost -- and
+// then a couple of linear passes to threshold and pick. The live re-chop preview
+// changes sensitivity and gap on every keystroke, which only the second half
+// depends on; re-running the first would put a full analysis between a key and
+// the screen. ARCHITECTURE.md records 161 ms to chop a five-and-a-half-minute
+// file, so that is 161 ms a keypress on material people actually chop.
+//
+// Only `hop` and `hf_emphasis` reach this. Everything else in OnsetParams is
+// picking, and can be changed without touching it.
+struct OnsetAnalysis {
+  // The detection function, normalised so its maximum is 1.
+  std::vector<float> flux;
+
+  // The downmixed source, kept because sample-resolution attack refinement
+  // needs it and re-downmixing per keystroke would put back a cost this split
+  // exists to remove.
+  std::vector<float> mono;
+
+  std::size_t hop = 0;
+  std::uint32_t sample_rate = 0;
+};
+
+[[nodiscard]] OnsetAnalysis analyse_onsets(const rt::Sample& sample,
+                                           const OnsetParams& params = {});
+
+// The cheap half: threshold, pick, backtrack. Safe to run on every keystroke.
+[[nodiscard]] OnsetResult pick_onsets(const OnsetAnalysis& analysis,
+                                      const OnsetParams& params = {});
+
+// Both at once, which is what every non-interactive caller wants.
 [[nodiscard]] OnsetResult detect_onsets(const rt::Sample& sample, const OnsetParams& params = {});
 
 }  // namespace ingest

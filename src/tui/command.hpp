@@ -29,6 +29,7 @@ enum class CommandKind : std::uint8_t {
   kChopTransient,
   kChopGrid,  // `count` parts
   kChopReset,
+  kChopTune,    // open CHOP, the live re-chop preview
   kSlotAssign,  // `slice`..`slice_last` -> `pad`.., all 1-based as typed
   kPadGate,     // `pad` 1-based, or 0 meaning every pad
   kPadOneShot,  // ditto

@@ -185,6 +185,13 @@ if(Python3_FOUND)
   # putting that piece on a pad. Separate from browse_pty_e2e because they fail
   # for different reasons -- that one for navigation, this one for the preview,
   # the region arithmetic and the crate bookkeeping.
+  # The live re-chop preview: that a keystroke reaches the detector and the
+  # slice count moves. The snapshots draw a struct; only this presses a key.
+  add_test(NAME chop_tune_pty_e2e
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_chop_tune_session.py
+                   $<TARGET_FILE:cratedig>)
+  set_tests_properties(chop_tune_pty_e2e PROPERTIES LABELS e2e TIMEOUT ${CRATEDIG_PTY_TIMEOUT})
+
   add_test(NAME grab_pty_e2e
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_grab_session.py
                    $<TARGET_FILE:cratedig>)

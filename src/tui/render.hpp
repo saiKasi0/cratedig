@@ -54,6 +54,10 @@ inline constexpr std::size_t kMinRows = 20;
 // rows and the position line.
 inline constexpr std::size_t kPreviewRows = 6;
 
+// The live re-chop preview. See render_chop.cpp.
+[[nodiscard]] ftxui::Element render_chop(const UiState& state, std::size_t terminal_columns,
+                                         std::size_t terminal_rows);
+
 [[nodiscard]] ftxui::Element render_browse(const UiState& state, std::size_t terminal_columns,
                                            std::size_t terminal_rows);
 

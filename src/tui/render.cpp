@@ -947,6 +947,9 @@ ftxui::Element render_screen(const UiState& state, std::size_t terminal_columns,
   if (state.screen == Screen::kBrowse) {
     return render_browse(state, terminal_columns, terminal_rows);
   }
+  if (state.screen == Screen::kChop) {
+    return render_chop(state, terminal_columns, terminal_rows);
+  }
 
   const Layout layout = layout_for(terminal_rows);
   const std::size_t wave_columns = wave_columns_for(terminal_columns);

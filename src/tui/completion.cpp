@@ -43,6 +43,7 @@ constexpr std::array kPhrases{
     Phrase{"chop transient beat", "one cut a beat, at the session tempo"},
     Phrase{"chop transient bar", "one cut a bar — riffs whole"},
     Phrase{"chop reset", "back to one slice"},
+    Phrase{"chop tune", "adjust the chop while watching it"},
     Phrase{"slot assign", "bind slices to pads"},
     Phrase{"edit", "open EDIT on a slice"},
     Phrase{"env", "set a pad's attack, decay, sustain or release"},

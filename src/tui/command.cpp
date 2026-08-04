@@ -66,7 +66,7 @@ namespace {
 
 [[nodiscard]] Command parse_chop(const std::vector<std::string_view>& words) {
   if (words.size() < 2) {
-    return error("chop what? try: chop transient, chop transient beat, chop grid 16");
+    return error("chop what? try: chop transient, chop transient beat, chop tune, chop grid 16");
   }
   const std::string_view what = words[1];
 
@@ -86,6 +86,9 @@ namespace {
   }
   if (what == "reset") {
     return command_of(CommandKind::kChopReset);
+  }
+  if (what == "tune") {
+    return command_of(CommandKind::kChopTune);
   }
   if (what == "grid") {
     if (words.size() < 3) {
