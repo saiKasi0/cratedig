@@ -186,6 +186,8 @@ keys to mean "put it here". `E` is capital because `e` is pad 7.
 | `:limit [on\|off] [dB]` | the master limiter and its ceiling |
 | `:perform` | back to PERFORM |
 | `:bpm N` | tempo, 20–300, one or two decimals (`:bpm 92.5`) |
+| `:bpm detect` | read the tempo off the file that is showing |
+| `:tape R` | scale the tempo — `1.05` a nudge faster, `2` double time |
 | `:swing N` | shift the odd steps late by N% of a step, up to 75 |
 | `:pattern N` | select one of the sixteen patterns |
 | `:pattern length N` | 1–32 steps |
@@ -219,6 +221,21 @@ the arrows) move through them and the line always shows the selection, so Enter
 runs what you can see. After `:load` or `:browse` it completes paths instead,
 offering directories and audio files from wherever you have got to. Esc closes
 the menu; Esc again closes the prompt.
+
+**Tempo detection is a starting point, not an oracle.** `:bpm detect` reads the
+periodicity out of the onset detection function. The number it gives is a *real*
+period of the material — but which metrical level you meant is not something the
+signal decides: a pulse train at 172 BPM repeats exactly at 86, at 57 and at 344,
+and all of those are correct. It reports the one nearest where most music sits
+and says so with a `?` when it is unsure, so double or halve it if it picked the
+wrong level. Measured: a clean loop scores 0.96–0.99 confidence, eighteen seconds
+of real rock scores 0.34.
+
+**`:tape` changes the tempo, not the pitch**, and is named to say so. It scales
+the sequencer's BPM: the pattern runs faster and nothing already sounding bends.
+True master varispeed would mean a resampler in the audio callback, which would
+move every committed hash in the project for a feature nobody asked to enable.
+Per-pad `:pitch` is the one that actually retunes.
 
 **Pitching up aliases, and that is worth knowing before you reach for it.**
 Playing a sample `r` times faster folds everything above `sample_rate / (2r)`

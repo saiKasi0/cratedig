@@ -40,6 +40,8 @@ enum class CommandKind : std::uint8_t {
   // stopping is something you do WHILE listening, and a verb you have to finish
   // typing before it takes effect is the wrong shape for that.
   kBpm,            // `bpm_x100`, already range-checked
+  kBpmDetect,      // read the tempo off the file that is showing
+  kTapeSpeed,      // `decibels` carries the ratio; scales bpm_x100
   kSwing,          // `swing` percent
   kPatternSelect,  // `pattern`, 1-based as typed
   kPatternLength,  // `count` steps

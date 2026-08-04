@@ -249,6 +249,8 @@ TEST_CASE("every phrase offered is a phrase the parser understands", "[unit]") {
       {"comp", " 1 off"},
       {"limit", " on"},
       {"bpm", " 92"},
+      {"bpm detect", ""},
+      {"tape", " 1.05"},
       {"swing", " 55"},
       {"pattern", " 3"},
       {"pattern length", " 16"},

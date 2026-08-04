@@ -75,6 +75,8 @@ constexpr std::array kPhrases{
 
     // The sequencer.
     Phrase{"bpm", "set the tempo"},
+    Phrase{"bpm detect", "read the tempo off the file"},
+    Phrase{"tape", "scale the tempo — 1.05 is a nudge faster"},
     Phrase{"swing", "delay every other step"},
     Phrase{"pattern", "select a pattern by number"},
     Phrase{"pattern length", "how many steps it has"},

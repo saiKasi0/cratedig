@@ -249,7 +249,10 @@ namespace {
 
 [[nodiscard]] Command parse_bpm(const std::vector<std::string_view>& words) {
   if (words.size() < 2) {
-    return error("bpm needs a tempo, e.g. bpm 92.5");
+    return error("bpm needs a tempo, e.g. bpm 92.5, or bpm detect");
+  }
+  if (words[1] == "detect") {
+    return command_of(CommandKind::kBpmDetect);
   }
   std::uint32_t bpm = 0;
   if (!parse_bpm_x100(words[1], bpm)) {
@@ -804,6 +807,30 @@ namespace {
 // Attack, decay and release are milliseconds. Sustain is DECIBELS, because that
 // is what EDIT shows: the panel reads `s 0.0 dB`, and a verb that took a linear
 // 0..1 would set a number the screen then reported differently.
+// `tape 1.05` -- the master speed control.
+//
+// IT SCALES THE TEMPO, and the name is chosen to be honest about that rather
+// than to promise the other thing. Decided at M5.5 planning: resampling the
+// master output would be true varispeed and would move every committed hash in
+// the project for a feature nobody asked to enable, so this changes how fast the
+// pattern runs and nothing already sounding bends. `:tape 2` is double time, not
+// an octave up.
+[[nodiscard]] Command parse_tape(const std::vector<std::string_view>& words) {
+  if (words.size() < 2) {
+    return error("tape needs a speed, e.g. tape 1.05 or tape 1 to reset");
+  }
+  float ratio = 0.0F;
+  if (!parse_decimal(words[1], ratio)) {
+    return error("tape: " + std::string{words[1]} + " is not a speed");
+  }
+  if (!(ratio > 0.0F) || ratio > 4.0F) {
+    return error("tape: " + std::string{words[1]} + " is outside 0 to 4");
+  }
+  Command out = command_of(CommandKind::kTapeSpeed);
+  out.decibels = ratio;
+  return out;
+}
+
 // `reverse <pad> [on|off]`. Bare flips it, as every other toggle here does.
 [[nodiscard]] Command parse_reverse(const std::vector<std::string_view>& words) {
   if (words.size() < 2) {
@@ -939,6 +966,9 @@ Command parse_command(std::string_view line) {
   }
   if (verb == "bpm") {
     return parse_bpm(words);
+  }
+  if (verb == "tape") {
+    return parse_tape(words);
   }
   if (verb == "swing") {
     return parse_swing(words);

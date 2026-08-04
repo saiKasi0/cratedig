@@ -4,6 +4,7 @@
 #include "ingest/decoder.hpp"
 #include "ingest/peak_pyramid.hpp"
 #include "ingest/slices.hpp"
+#include "ingest/tempo.hpp"
 #include "io/audio_device.hpp"
 #include "rt/pad_config.hpp"
 #include "rt/pad_event.hpp"
@@ -47,6 +48,13 @@
 
 namespace tui {
 namespace {
+
+// Above this a detected tempo is stated plainly; below it, with a question mark.
+//
+// Measured rather than picked: a clean synthetic loop scores 0.96-0.99, and
+// eighteen seconds of real rock -- guitar over drums -- scores 0.34. Half is
+// between the two and on the honest side of it.
+constexpr float kTempoSureEnough = 0.6F;
 
 // What the browser lists.
 //
@@ -1287,6 +1295,49 @@ int run_app(const AppOptions& options) {
         edit_sequencer([&](rt::SequencerState& next) { next.bpm_x100 = command.bpm_x100; },
                        "bpm " + format_bpm(command.bpm_x100));
         break;
+
+      case CommandKind::kBpmDetect: {
+        const ingest::PoolEntry* file = entry();
+        if (file == nullptr) {
+          set_message("nothing loaded to read a tempo from", true);
+          break;
+        }
+        const ingest::TempoEstimate estimate =
+            ingest::detect_tempo(ingest::analyse_onsets(*file->sample));
+        if (!estimate.found()) {
+          set_message(file->name + ": no tempo in it — too short, or nothing periodic", true);
+          break;
+        }
+
+        // SAID WITH A QUALIFIER WHEN IT IS A GUESS. The confidence is a
+        // normalised autocorrelation, so a clean loop scores near 1 and real
+        // music with a guitar over it scores a third of that. Reporting both the
+        // same way would make the honest case look like the sure one.
+        const bool sure = estimate.confidence >= kTempoSureEnough;
+        edit_sequencer([&](rt::SequencerState& next) { next.bpm_x100 = estimate.bpm_x100; },
+                       file->name + ": " + format_bpm(estimate.bpm_x100) + " bpm" +
+                           (sure ? "" : "?  (a rough read — double or halve it if it is wrong)"));
+        break;
+      }
+
+      case CommandKind::kTapeSpeed: {
+        // TAPE SPEED SCALES THE TEMPO and says so. See parse_tape() for why it
+        // is not a resampler.
+        const std::uint32_t now = state.pattern.bpm_x100;
+        const auto scaled = static_cast<std::uint32_t>(
+            std::lround(static_cast<double>(now) * static_cast<double>(command.decibels)));
+        const std::uint32_t next_bpm = std::clamp(scaled, rt::kMinBpmX100, rt::kMaxBpmX100);
+        if (next_bpm != scaled) {
+          set_message("tape: " + format_bpm(scaled) + " bpm is outside " +
+                          format_bpm(rt::kMinBpmX100) + " to " + format_bpm(rt::kMaxBpmX100),
+                      true);
+          break;
+        }
+        edit_sequencer([&](rt::SequencerState& next) { next.bpm_x100 = next_bpm; },
+                       "tape " + detail::with_precision(static_cast<double>(command.decibels), 2) +
+                           "x — " + format_bpm(next_bpm) + " bpm (the pattern, not the pitch)");
+        break;
+      }
 
       case CommandKind::kSwing: {
         const std::size_t pattern = lane_pattern();

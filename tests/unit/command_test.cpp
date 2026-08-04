@@ -875,3 +875,21 @@ TEST_CASE("reverse takes a pad and an optional switch", "[command]") {
   CHECK(tui::parse_command("reverse 99").kind == tui::CommandKind::kError);
   CHECK(tui::parse_command("reverse 3 backwards").kind == tui::CommandKind::kError);
 }
+
+TEST_CASE("bpm detect and tape speed", "[command]") {
+  CHECK(tui::parse_command("bpm detect").kind == tui::CommandKind::kBpmDetect);
+
+  // Still a tempo otherwise, so `bpm detect` cannot have broken `bpm 92`.
+  const tui::Command typed = tui::parse_command("bpm 92.5");
+  REQUIRE(typed.kind == tui::CommandKind::kBpm);
+  CHECK(typed.bpm_x100 == 9'250);
+
+  const tui::Command tape = tui::parse_command("tape 1.05");
+  REQUIRE(tape.kind == tui::CommandKind::kTapeSpeed);
+  CHECK(tape.decibels == Catch::Approx(1.05F));
+
+  CHECK(tui::parse_command("tape").kind == tui::CommandKind::kError);
+  CHECK(tui::parse_command("tape 0").kind == tui::CommandKind::kError);
+  CHECK(tui::parse_command("tape 9").kind == tui::CommandKind::kError);
+  CHECK(tui::parse_command("tape fast").kind == tui::CommandKind::kError);
+}
