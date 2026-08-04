@@ -4,6 +4,8 @@
 #include "rt/sample.hpp"
 
 #include <cstddef>
+#include <cstdint>
+#include <string_view>
 #include <vector>
 
 namespace ingest {
@@ -22,6 +24,11 @@ namespace ingest {
 // linear because a real kick's pitch-falling decay does change the spectrum, and
 // on linear magnitudes it changes it enough to look like a second hit. See the
 // note at the flux loop in onset.cpp for the measurement.
+
+// The most of the spectrum a profile may discard. Beyond this there is too
+// little left to detect anything, and the detector returns nothing rather than
+// something worse -- see OnsetParams::hf_emphasis.
+inline constexpr float kMaxHfEmphasis = 0.85F;
 
 struct OnsetParams {
   // Frames between analysis windows. 256 at 48 kHz is 5.3 ms, which bounds how
@@ -50,6 +57,41 @@ struct OnsetParams {
   // faster than any drummer and slower than the ring of a single transient.
   double min_gap_seconds = 0.030;
 
+  // The fraction of the spectrum, from the bottom, that does not count toward
+  // the flux at all. 0 uses every bin; 0.4 ignores the lowest 40%.
+  //
+  // ZERO IS EXACTLY TODAY'S BEHAVIOUR, which is why it is the default: no
+  // existing detection moves and no committed chop changes.
+  //
+  // What it is for: a note attack on a sustained instrument puts its energy in
+  // the upper partials while the fundamental carries on unchanged, so a sum over
+  // every bin is dominated by low bins that did not move. Ignoring the bottom is
+  // what separates "a new note started" from "the same note is still ringing".
+  // Drums do not need it -- a drum is broadband and the flat sum already sees it.
+  //
+  // A CUT RATHER THAN A TILT, and that is a measurement. This began as a weight
+  // ramp, `1 + emphasis * (bin / last)`. Measured on sustained material it did
+  // NOTHING: at 0, 0.4, 0.8, 2.0 and even 6.0 it found the same 7 of 7 true
+  // onsets and varied the total by one. A smooth monotone reweighting does not
+  // move where the flux peaks, and peak position is all that survives
+  // normalisation and the adaptive threshold. Cutting the band does move it: on
+  // the same material 0.4 keeps 7 of 7 while dropping the spurious detections
+  // from three to one. A knob that does nothing is worse than no knob.
+  //
+  // NO SHIPPED DENSITY SETS IT, and that is also a measurement. On a real record
+  // -- distorted guitar, low E riff -- a cut of 0.2 pushed the first detection
+  // from 0.05 s to 1.45 s and a cut of 0.4 to 2.64 s: the opening was simply
+  // gone, because the band being discarded is the band the riff is in. It stays
+  // as a parameter because the sustained-material measurement is real and the
+  // live re-chop preview should be able to reach it. It is not a default
+  // anywhere.
+  //
+  // Clamped on use to [0, kMaxHfEmphasis]. Above 1 there are no bins left and
+  // the detector finds nothing at all -- which is precisely the "one slice
+  // covering the whole file" that docs/ROADMAP.md describes as the symptom of a
+  // chop gone wrong, and it must not be reachable by typing a number.
+  float hf_emphasis = 0.0F;
+
   // Move each detection back to where the attack actually starts.
   //
   // Flux peaks once the transient is well inside the analysis window, which is
@@ -58,6 +100,50 @@ struct OnsetParams {
   // obviously wrong. Off only for measuring what it is worth.
   bool backtrack = true;
 };
+
+// How fine a chop to make.
+//
+// DENSITY, NOT MATERIAL, and that is a correction. This began as
+// drums/melodic/mixed -- profiles named after what you were chopping -- because
+// that is what docs/ROADMAP.md asked for. Measured against a real record
+// (distorted guitar, ~172 BPM) the material names did not survive: the "melodic"
+// settings MISSED THE ENTIRE OPENING RIFF, because their band cut discards the
+// low bins a distorted E-based riff lives in, and the drums default cut almost
+// exactly one slice per strum. Nobody looking at that wanted a different
+// algorithm; they wanted the same one to cut less often.
+//
+// So the axis is musical: a slice per strum, per beat, or per bar. The first is
+// a property of the sound, the other two are properties of the tempo, which is
+// why params_for() needs one.
+enum class ChopDensity : std::uint8_t {
+  // Every attack the detector can find. The settings this detector has always
+  // had, so `:chop transient` with nothing after it is unchanged and no
+  // committed chop moves.
+  kStrum,
+
+  // No two slices closer than about a beat.
+  kBeat,
+
+  // Phrase-length pieces -- riffs whole, rather than rebuilt from parts.
+  kBar,
+};
+
+// Beats to a bar. Four, because the sequencer has no time signature yet and
+// pretending otherwise would be inventing a feature to justify a constant.
+inline constexpr int kBeatsPerBar = 4;
+
+// The parameters a density stands for at a given tempo.
+//
+// `bpm_x100` is the session's tempo, as `rt::SequencerState` carries it. kStrum
+// ignores it; the other two are defined in beats and cannot be expressed without
+// it. When M5.7's tempo detection lands it feeds this rather than replacing it.
+[[nodiscard]] OnsetParams params_for(ChopDensity density, std::uint32_t bpm_x100) noexcept;
+
+// The density a word names, or nothing. For the `:` grammar; here rather than in
+// the parser so the names and the parameters cannot drift apart.
+[[nodiscard]] bool density_from_name(std::string_view name, ChopDensity& out) noexcept;
+
+[[nodiscard]] std::string_view name_of(ChopDensity density) noexcept;
 
 struct OnsetResult {
   // Positions in source frames, ascending, no duplicates.

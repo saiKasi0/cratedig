@@ -151,8 +151,8 @@ def main() -> int:
         rows = menu_rows(screen_now())
         if not rows:
             failures.append("Tab did not open the menu — the key never reached the program")
-        elif len(rows) != 3:
-            failures.append(f"expected the three chop phrases, got {len(rows)}: {rows}")
+        elif len(rows) != 5:
+            failures.append(f"expected the five chop phrases, got {len(rows)}: {rows}")
         if "chop grid" not in selected_row(screen_now()):
             failures.append(f"the first offer is not selected: {selected_row(screen_now())!r}")
 

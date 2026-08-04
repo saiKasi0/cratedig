@@ -19,12 +19,12 @@
 ╰──────────┴──────────┴──────────┴──────────╯ ╰────────────────────────────────────────────────────╯
  :chop grid█                                                                                        
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-  ▌ chop grid       chop into n equal parts                                                         
-    chop transient  detect hits and cut there                                                       
-    chop reset      back to one slice                                                               
-    slot assign     bind slices to pads                                                             
-    edit            open EDIT on a slice                                                            
-    env             set a pad's attack, decay, sustain or release                                   
-    browse          find a file to load                                                             
-    26 more                                                                                         
+  ▌ chop grid            chop into n equal parts                                                    
+    chop transient       detect hits and cut there                                                  
+    chop transient beat  one cut a beat, at the session tempo                                       
+    chop transient bar   one cut a bar — riffs whole                                                
+    chop reset           back to one slice                                                          
+    slot assign          bind slices to pads                                                        
+    edit                 open EDIT on a slice                                                       
+    28 more                                                                                         
   tab next · shift-tab back · enter run · esc close                                                 

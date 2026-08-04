@@ -153,6 +153,68 @@ void fill_window(const std::vector<float>& mono, std::size_t centre, std::span<f
 
 }  // namespace
 
+OnsetParams params_for(ChopDensity density, std::uint32_t bpm_x100) noexcept {
+  OnsetParams params;  // kStrum is the struct's own defaults
+  if (density == ChopDensity::kStrum || bpm_x100 == 0) {
+    return params;
+  }
+
+  // 60 / (bpm_x100 / 100).
+  const double beat_seconds = 6'000.0 / static_cast<double>(bpm_x100);
+
+  // HALF A BEAT FOR "A SLICE PER BEAT", AND THAT IS NOT A ROUNDING.
+  //
+  // min_gap is a MINIMUM SPACING, not a grid: it says how close two slices may
+  // be, not where they go. Set to a whole beat it merges any pair straddling a
+  // beat line -- and real playing is never exactly on the line -- so it loses
+  // real hits rather than thinning them.
+  //
+  // Measured on a real record at ~172 BPM (beat 0.349 s), against 2.87 beats a
+  // second: a gap of 0.250 s gave 2.17 slices/s and 0.175 s gave 2.67/s. Half a
+  // beat lands nearest one-per-beat, because not every beat carries a detectable
+  // attack and the ones that do sometimes carry two.
+  constexpr double kBeatFraction = 0.5;
+
+  params.min_gap_seconds =
+      beat_seconds * kBeatFraction * (density == ChopDensity::kBar ? kBeatsPerBar : 1);
+
+  // And less willing, at the coarser setting. A bar-length chop that still fired
+  // on every weak attack would be a bar-length chop of whatever happened to be
+  // more than a bar apart, rather than of the strong hits.
+  if (density == ChopDensity::kBar) {
+    params.threshold_lambda = 2.6F;
+  }
+  return params;
+}
+
+bool density_from_name(std::string_view name, ChopDensity& out) noexcept {
+  if (name == "strum") {
+    out = ChopDensity::kStrum;
+    return true;
+  }
+  if (name == "beat") {
+    out = ChopDensity::kBeat;
+    return true;
+  }
+  if (name == "bar") {
+    out = ChopDensity::kBar;
+    return true;
+  }
+  return false;
+}
+
+std::string_view name_of(ChopDensity density) noexcept {
+  switch (density) {
+    case ChopDensity::kBeat:
+      return "beat";
+    case ChopDensity::kBar:
+      return "bar";
+    case ChopDensity::kStrum:
+      break;
+  }
+  return "strum";
+}
+
 OnsetResult detect_onsets(const rt::Sample& sample, const OnsetParams& params) {
   OnsetResult result;
   result.hop = params.hop;
@@ -191,8 +253,21 @@ OnsetResult detect_onsets(const rt::Sample& sample, const OnsetParams& params) {
     // bins. log() flattens the large narrow rise and preserves the small broad
     // one, so the two stop being confusable. log1p rather than log because bins
     // are legitimately zero and log(0) is not.
+    // The bin weight, when a profile asks for one. `1 + emphasis * (b / last)`,
+    // so emphasis 0 is a flat weight of 1 and the sum below is byte for byte the
+    // one this detector has always computed -- which is what keeps the drums
+    // profile, and every chop measured against it, exactly where it was.
+    //
+    // The scale of the weights does not matter, only their ratio: the flux is
+    // normalised to a maximum of 1 immediately after this loop, so a uniformly
+    // larger sum changes nothing.
+    // Bins below this do not count at all. See OnsetParams::hf_emphasis for why
+    // it is a cut rather than a tilt.
+    const float emphasis = std::clamp(params.hf_emphasis, 0.0F, kMaxHfEmphasis);
+    const auto first_bin = static_cast<std::size_t>(emphasis * static_cast<float>(kBins));
+
     float sum = 0.0F;
-    for (std::size_t bin = 0; bin < kBins; ++bin) {
+    for (std::size_t bin = first_bin; bin < kBins; ++bin) {
       const float rise = std::log1p(current[bin]) - std::log1p(previous[bin]);
       if (rise > 0.0F) {
         sum += rise;

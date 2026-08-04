@@ -249,8 +249,16 @@ TEST_CASE("extra words are ignored rather than fatal", "[command]") {
   // Trailing junk after a complete command is accepted. The alternative --
   // refusing -- means a stray keystroke at the end of a line throws away a
   // command that was otherwise perfectly clear.
-  CHECK(parse_command("chop transient now").kind == CommandKind::kChopTransient);
+  CHECK(parse_command("chop reset now").kind == CommandKind::kChopReset);
   CHECK(parse_command("slot assign 5 3 please").kind == CommandKind::kSlotAssign);
+
+  // AFTER the arguments, not instead of one. `chop transient now` USED to be
+  // this case and is not any more: the word after `transient` is the density,
+  // so `now` is a bad argument rather than trailing junk -- the same way
+  // `chop grid blah` has always been a bad count rather than an ignorable word.
+  // Junk after the density is still junk.
+  CHECK(parse_command("chop transient now").kind == CommandKind::kError);
+  CHECK(parse_command("chop transient beat please").kind == CommandKind::kChopTransient);
 }
 
 TEST_CASE("case matters", "[command]") {
@@ -781,4 +789,38 @@ TEST_CASE("env sets one segment of a pad's envelope", "[command]") {
   CHECK(parse_command("env 3 a").kind == CommandKind::kError);
   CHECK(parse_command("env 3 a -5").kind == CommandKind::kError);
   CHECK(parse_command("env 3 a 90000").kind == CommandKind::kError);
+}
+
+TEST_CASE("chop transient takes a density", "[command]") {
+  // `:chop transient` alone is unchanged -- the finest cut, which is what the
+  // verb has always done and what every committed chop was measured against.
+  const tui::Command bare = tui::parse_command("chop transient");
+  CHECK(bare.kind == tui::CommandKind::kChopTransient);
+  CHECK(bare.density == ingest::ChopDensity::kStrum);
+
+  for (const auto& [word, density] :
+       std::initializer_list<std::pair<const char*, ingest::ChopDensity>>{
+           {"strum", ingest::ChopDensity::kStrum},
+           {"beat", ingest::ChopDensity::kBeat},
+           {"bar", ingest::ChopDensity::kBar}}) {
+    const tui::Command command = tui::parse_command(std::string{"chop transient "} + word);
+    INFO("density: " << word);
+    CHECK(command.kind == tui::CommandKind::kChopTransient);
+    CHECK(command.density == density);
+  }
+
+  // `slice` is accepted wherever `chop` is, densities included.
+  CHECK(tui::parse_command("slice transient bar").density == ingest::ChopDensity::kBar);
+}
+
+TEST_CASE("an unknown density is refused by name", "[command]") {
+  // Named rather than silently ignored: a typo that quietly gave the default
+  // would be a chop you thought you had asked for and had not.
+  const tui::Command command = tui::parse_command("chop transient phrase");
+  REQUIRE(command.kind == tui::CommandKind::kError);
+  CHECK(command.message.find("phrase") != std::string::npos);
+  CHECK(command.message.find("strum") != std::string::npos);
+
+  // Junk AFTER a valid density is still ignored, per the policy above.
+  CHECK(tui::parse_command("chop transient beat extra").kind == tui::CommandKind::kChopTransient);
 }

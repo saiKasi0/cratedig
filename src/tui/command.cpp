@@ -66,12 +66,23 @@ namespace {
 
 [[nodiscard]] Command parse_chop(const std::vector<std::string_view>& words) {
   if (words.size() < 2) {
-    return error("chop what? try: chop transient, chop grid 16, chop reset");
+    return error("chop what? try: chop transient, chop transient beat, chop grid 16");
   }
   const std::string_view what = words[1];
 
   if (what == "transient") {
-    return command_of(CommandKind::kChopTransient);
+    Command out = command_of(CommandKind::kChopTransient);
+    if (words.size() >= 3) {
+      // HOW FINE, in musical units rather than seconds. `strum` is every attack
+      // the detector finds; `beat` and `bar` are derived from the session tempo,
+      // because "a slice per beat" is not a number of seconds until you know how
+      // long a beat is.
+      if (!ingest::density_from_name(words[2], out.density)) {
+        return error("chop transient: " + std::string{words[2]} +
+                     " is not a density; try strum, beat or bar");
+      }
+    }
+    return out;
   }
   if (what == "reset") {
     return command_of(CommandKind::kChopReset);

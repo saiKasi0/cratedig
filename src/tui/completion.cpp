@@ -40,6 +40,8 @@ constexpr std::array kPhrases{
     // Chopping.
     Phrase{"chop grid", "chop into n equal parts"},
     Phrase{"chop transient", "detect hits and cut there"},
+    Phrase{"chop transient beat", "one cut a beat, at the session tempo"},
+    Phrase{"chop transient bar", "one cut a bar — riffs whole"},
     Phrase{"chop reset", "back to one slice"},
     Phrase{"slot assign", "bind slices to pads"},
     Phrase{"edit", "open EDIT on a slice"},

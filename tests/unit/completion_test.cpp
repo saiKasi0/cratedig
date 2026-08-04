@@ -29,7 +29,9 @@ namespace {
 
 TEST_CASE("a prefix offers every phrase that extends it", "[unit]") {
   const tui::CompletionSet set = tui::complete_verbs("ch");
-  REQUIRE(texts(set) == std::vector<std::string>{"chop grid", "chop transient", "chop reset"});
+  REQUIRE(texts(set) == std::vector<std::string>{"chop grid", "chop transient",
+                                                 "chop transient beat", "chop transient bar",
+                                                 "chop reset"});
 
   // In table order, not alphabetical: `grid` before `transient` before `reset`
   // is the order you would try them in, and sorting would put `reset` first.
@@ -219,6 +221,8 @@ TEST_CASE("every phrase offered is a phrase the parser understands", "[unit]") {
 
   static constexpr Case kCases[]{
       {"chop grid", " 16"},
+      {"chop transient beat", ""},
+      {"chop transient bar", ""},
       {"chop transient", ""},
       {"chop reset", ""},
       {"slot assign", " 1 1"},

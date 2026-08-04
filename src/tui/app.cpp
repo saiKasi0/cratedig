@@ -994,11 +994,24 @@ int run_app(const AppOptions& options) {
         // of audio. Putting it on the worker lane is M6's ingest job; doing it
         // now would mean building most of that lane to earn a progress bar
         // nobody can see yet.
-        file->slices = transient ? ingest::chop_transient(*file->sample)
+        // The DENSITY, resolved against the session tempo. `beat` and `bar` are
+        // defined in beats, so the tempo on the transport is what turns them
+        // into a minimum gap -- and when M5.7's tempo detection lands it feeds
+        // this rather than replacing it.
+        file->slices = transient ? ingest::chop_transient(
+                                       *file->sample,
+                                       ingest::params_for(command.density, state.pattern.bpm_x100))
                                  : ingest::chop_grid(*file->sample, command.count);
         show_slices(file->slices, state);
 
-        const std::string what = transient ? "chop transient" : "chop grid";
+        // The density is named only when it is not the default. `:chop transient`
+        // answering "chop transient strum" would be quoting back a word nobody
+        // typed, and the finest cut is what the verb has always meant.
+        const std::string what =
+            transient ? (command.density == ingest::ChopDensity::kStrum
+                             ? std::string{"chop transient"}
+                             : "chop transient " + std::string{ingest::name_of(command.density)})
+                      : std::string{"chop grid"};
         const std::size_t count = file->slices.size();
         if (count == 0) {
           set_message(what + ": no transients found", true);

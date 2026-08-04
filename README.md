@@ -158,7 +158,7 @@ keys to mean "put it here". `E` is capital because `e` is pad 7.
 
 | | |
 |---|---|
-| `:chop transient` | cut at detected onsets |
+| `:chop transient [strum\|beat\|bar]` | cut at detected onsets, as fine as you ask |
 | `:chop grid N` | cut into N equal pieces |
 | `:chop reset` | back to the whole file on pad 1 |
 | `:slot assign S P` | put slice S on pad P; either may be a range (`1-8 1`) |
@@ -192,6 +192,13 @@ keys to mean "put it here". `E` is capital because `e` is pad 7.
 | `:q` `:quit` | quit |
 
 `slice` is accepted anywhere `chop` is.
+
+**How fine a chop.** `:chop transient` cuts at every attack it can find — on a
+fast riff that is roughly one slice per strum. `beat` and `bar` cut less often,
+and they mean it musically: they are derived from the tempo on the transport, so
+set `:bpm` first (tempo detection is M5.7's other half). Measured on an
+18-second, 172 BPM rock excerpt: `strum` gives 92 slices, `beat` 48, `bar` 13 —
+against 8ths, beats and bars at 5.7, 2.9 and 0.72 a second.
 
 **Tab completes.** At the `:` prompt it offers every command that starts with
 what you have typed, with a line each saying what it does; Tab and Shift-Tab (or

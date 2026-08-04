@@ -1,6 +1,8 @@
 #ifndef CRATEDIG_TUI_COMMAND_HPP
 #define CRATEDIG_TUI_COMMAND_HPP
 
+#include "ingest/onset.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -95,6 +97,10 @@ struct Command {
   CommandKind kind = CommandKind::kNone;
 
   std::size_t count = 0;  // chop grid, pattern length
+
+  // How fine `chop transient` should cut. Defaults to the finest, which is what
+  // the verb has always done, so `:chop transient` alone is unchanged.
+  ingest::ChopDensity density = ingest::ChopDensity::kStrum;
   std::size_t slice = 0;  // slot assign, 1-based as the user typed it
 
   // The last slice of a `slot assign` range, 1-based and INCLUSIVE. Equal to

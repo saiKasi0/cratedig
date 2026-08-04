@@ -1,7 +1,6 @@
  cratedig  0.0.1  perform                          long_form_drums.flac · 44100 Hz · stereo · 9.20s 
                                                                                                     
 ╭ wave ───────────────────────────────────────────────────────────── view 0.00s + 9.20s · at 3.07s ╮
-│                                                                                                  │
 │⡆    ⣦    ⢰⡀   ⢠⣄    ⣶    ⣤⡀   ⢰│    ⣦    ⢰⡄   ⢰⡄    ⣦    ⣶⡀   ⢰⡆    ⣶    ⣶    ⢰⡆    ⣤    ⢰⡀   ⢠⡄ │
 │⣿⣄   ⣿⣦⡀  ⢸⣷⡀  ⢸⣿⣆   ⣿⣧⡀  ⣿⣷⡀  ⢸│⣄   ⣿⣧⡀  ⢸⣷⣄  ⢸⣿⣄   ⣿⣦⡀  ⣿⣷⡀  ⢸⣿⣄   ⣿⣆   ⣿⣧⡀  ⢸⣿⣄   ⣿⣧⡀  ⢸⣷⡀  ⢸⣿⣄│
 │⣿⣿⣿⠶⠶⣿⣿⣿⠶⠶⢾⣿⣿⡷⠶⢾⣿⣿⣿⠶⠶⣿⣿⣿⠶⠶⣿⣿⣿⡷⠶⢾│⣿⣿⠶⠶⣿⣿⣿⠶⠶⢾⣿⣿⡷⠶⢾⣿⣿⡿⠶⠶⣿⣿⣿⠶⠶⢿⣿⣿⡷⠶⢾⣿⣿⣿⠶⠶⣿⣿⣿⠶⠶⣿⣿⣿⡷⠶⢾⣿⣿⣿⠶⠶⣿⣿⣿⠶⠶⢾⣿⣿⡷⠶⢾⣿⣿│
@@ -21,10 +20,11 @@
 ├──────────┼──────────┼──────────┼──────────┤ │ zoom       100.0% of file                          │
 │ 13 s13   │ 14 s14   │ 15 s15   │ 16 s16   │ │ playhead   3.07s · pad 1                           │
 ╰──────────┴──────────┴──────────┴──────────╯ ╰────────────────────────────────────────────────────╯
-                                                                                                    
  :chop grid█                                                                                        
 ────────────────────────────────────────────────────────────────────────────────────────────────────
-  ▌ chop grid       chop into n equal parts                                                         
-    chop transient  detect hits and cut there                                                       
-    chop reset      back to one slice                                                               
+  ▌ chop grid            chop into n equal parts                                                    
+    chop transient       detect hits and cut there                                                  
+    chop transient beat  one cut a beat, at the session tempo                                       
+    chop transient bar   one cut a bar — riffs whole                                                
+    chop reset           back to one slice                                                          
   tab next · shift-tab back · enter run · esc close                                                 
