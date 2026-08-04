@@ -804,6 +804,30 @@ namespace {
 // Attack, decay and release are milliseconds. Sustain is DECIBELS, because that
 // is what EDIT shows: the panel reads `s 0.0 dB`, and a verb that took a linear
 // 0..1 would set a number the screen then reported differently.
+// `reverse <pad> [on|off]`. Bare flips it, as every other toggle here does.
+[[nodiscard]] Command parse_reverse(const std::vector<std::string_view>& words) {
+  if (words.size() < 2) {
+    return error("reverse needs a pad, e.g. reverse 3 or reverse 3 off");
+  }
+  Command out = command_of(CommandKind::kPadReverse);
+  std::size_t pad = 0;
+  if (!parse_pad_number(words[1], pad)) {
+    return error("reverse: " + std::string{words[1]} + " is not a pad, 1 to 16");
+  }
+  out.pad = pad;
+
+  if (words.size() >= 3) {
+    if (words[2] == "on") {
+      out.toggle = Switch::kOn;
+    } else if (words[2] == "off") {
+      out.toggle = Switch::kOff;
+    } else {
+      return error("reverse: " + std::string{words[2]} + " is not on or off");
+    }
+  }
+  return out;
+}
+
 // `pitch <pad> +7` or `pitch <pad> 1.5`.
 //
 // SIGNED MEANS SEMITONES, unsigned means ratio, and that is the one genuinely
@@ -950,6 +974,9 @@ Command parse_command(std::string_view line) {
   }
   if (verb == "pitch") {
     return parse_pitch(words);
+  }
+  if (verb == "reverse") {
+    return parse_reverse(words);
   }
   if (verb == "env") {
     return parse_env(words);

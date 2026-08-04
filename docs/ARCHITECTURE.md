@@ -687,6 +687,16 @@ is a bit-exact copy; and a single tone *below* Nyquist/r cannot alias at all,
 however fast it is played, so a 6 kHz probe measured nothing but interpolator
 error. Aliasing needs content above `sample_rate / (2r)` to fold.
 
+**Reverse is a mirrored read, not a negative step**, which is why it is four
+lines. The phase accumulator is unsigned and every bound in `render_voice()` —
+the end-of-slice test, the declick ramps, the guard-frame reads — is written
+against it counting up; negating the step inverts all of them at once and wraps
+at zero. So the phase still runs forward from `start_frame` to `end_frame` and
+only the read position is mirrored, `(start + end - 1) - position`, in fixed
+point so the fraction mirrors with it. A slice therefore takes the same time
+backwards as forwards, which a negative step would not have given for any slice
+that does not start at frame zero.
+
 ### The crate, as built (M5.5)
 
 `ingest::SamplePool` is the session's loaded files, on the **control thread and

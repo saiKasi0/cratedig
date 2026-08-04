@@ -1630,6 +1630,29 @@ int run_app(const AppOptions& options) {
         break;
       }
 
+      case CommandKind::kPadReverse: {
+        const auto pad = static_cast<std::uint8_t>(command.pad - 1);
+        const std::shared_ptr<const rt::PadConfig> held = engine.pad_config(pad);
+        if (held == nullptr || held->sample == nullptr) {
+          set_message("pad " + std::to_string(command.pad) + " has nothing on it", true);
+          break;
+        }
+
+        rt::PadConfig next = *held;
+        next.reverse =
+            command.toggle == Switch::kToggle ? !held->reverse : command.toggle == Switch::kOn;
+
+        if (!engine.publish_pad_config(std::make_shared<const rt::PadConfig>(next))) {
+          set_message("pads are busy — the edit did not happen, try again", true);
+          break;
+        }
+        refresh_edit(last_columns);
+        set_message("pad " + std::to_string(command.pad) + " plays " +
+                        (next.reverse ? "backwards" : "forwards"),
+                    false);
+        break;
+      }
+
       case CommandKind::kPadEnvelope: {
         // THE ENGINE HAS HONOURED PadConfig::env SINCE M3 and nothing could set
         // it: EDIT drew the four segments and every one of them was the default,
@@ -2794,6 +2817,39 @@ int run_app(const AppOptions& options) {
         case 'u':
           undo_edit(last_columns);
           break;
+
+        case 'r': {
+          // REVERSE, on the slice under the cursor. `r` is pad 8 in PERFORM and
+          // free here, because EDIT turns the pad map off -- the same room that
+          // makes `z`, `u` and `-`/`=` available.
+          const ingest::PoolEntry* file = entry();
+          if (file == nullptr || state.edit.slice >= file->slices.size()) {
+            set_message("no slice to reverse", true);
+            break;
+          }
+          const std::uint8_t pad = pad_for_slice(state, state.current_file, state.edit.slice);
+          if (pad >= rt::kNumPads) {
+            set_message("slice " + std::to_string(state.edit.slice + 1) +
+                            " is on no pad — :slot assign it first",
+                        true);
+            break;
+          }
+          const std::shared_ptr<const rt::PadConfig> held = engine.pad_config(pad);
+          if (held == nullptr) {
+            break;
+          }
+          rt::PadConfig next = *held;
+          next.reverse = !held->reverse;
+          if (!engine.publish_pad_config(std::make_shared<const rt::PadConfig>(next))) {
+            set_message("pads are busy — try again", true);
+            break;
+          }
+          refresh_edit(last_columns);
+          set_message("pad " + std::to_string(pad + 1) + " plays " +
+                          (next.reverse ? "backwards" : "forwards"),
+                      false);
+          break;
+        }
 
         case '-':
         case '=': {

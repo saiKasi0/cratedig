@@ -37,8 +37,8 @@ namespace rt {
 // M3 fills in the playback half (slice range, envelope, choke group, tuning);
 // M5 adds the mixer half and M8 the insert chain, into this same struct rather
 // than into parallel ones -- see the PadConfig block in docs/ARCHITECTURE.md.
-// Reverse and loop mode are deliberately absent until the DSP for them lands in
-// M5: a field nothing honours is worse than no field.
+// Loop mode is deliberately absent until the DSP for it lands: a field nothing
+// honours is worse than no field. Reverse landed in M5.7 and is below.
 
 // What a note-off means for this pad.
 enum class TriggerMode : std::uint8_t {
@@ -113,6 +113,21 @@ struct PadConfig {
   // Playback speed, multiplied into the phase step. 2.0 is an octave up.
   // Retuning a chop resamples it -- there is no time-stretch until v2.
   float pitch_ratio = 1.0F;
+
+  // Play the slice backwards.
+  //
+  // NOT A NEGATIVE PHASE STEP, which is what "reverse" sounds like it should be
+  // and would have cost far more. The phase accumulator is UNSIGNED and every
+  // bound in render_voice() -- the end-of-slice test, the declick ramps, the
+  // guard-frame reads -- is written against it counting up. Negating the step
+  // inverts all of them at once and wraps at zero.
+  //
+  // So the phase still runs forward from start_frame to end_frame and only the
+  // READ POSITION is mirrored: `(start + end - 1) - position`, in fixed point, so
+  // the fractional part mirrors with it and interpolation stays correct between
+  // frames rather than only on them. Termination, declick and the guards are
+  // untouched, which is why this is a few lines rather than a rewrite.
+  bool reverse = false;
 
   // The shortest a RELEASE is allowed to take, whatever `env.release` says.
   //

@@ -84,6 +84,9 @@ enum class CommandKind : std::uint8_t {
   // semitones into one, so nothing downstream needs to know which was typed.
   kPadPitch,
 
+  // Play a pad's slice backwards. `toggle` as everywhere else -- bare flips it.
+  kPadReverse,
+
   kQuit,
 };
 

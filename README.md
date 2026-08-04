@@ -119,6 +119,7 @@ keyboard. `f` is pad 12, so "fit" is `0` — the one digit the map does not clai
 | `space` | play the slice — through its pad if it has one, auditioned if it has not; press again to stop |
 | `z` | zoom in; once there is no more to see, reframe the slice |
 | `-` `=` | pitch the slice's pad down / up a semitone |
+| `r` | play the slice's pad backwards |
 | `u` | undo the last nudge |
 | `esc` | back to PERFORM |
 
@@ -169,6 +170,7 @@ keys to mean "put it here". `E` is capital because `e` is pad 7.
 | `:edit [S]` | open EDIT, on slice S or on the current one |
 | `:env P a`/`d`/`s`/`r` `V` | pad P's envelope: attack, decay and release in ms, sustain in dB |
 | `:pitch P V` | play pad P faster or slower — `+7` is semitones, `1.5` is a ratio |
+| `:reverse P [on\|off]` | play pad P's slice backwards; bare flips it |
 | `:load <path>` | add a file to the crate — the rest of the line is the path, spaces and all |
 | `:files` · `:pool` | list the crate |
 | `:file N` | look at another loaded file |

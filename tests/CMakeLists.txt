@@ -39,6 +39,7 @@ add_executable(
   unit/completion_test.cpp
   unit/pitch_test.cpp
   unit/pool_test.cpp
+  unit/reverse_test.cpp
   unit/result_test.cpp
   unit/rt_scope_test.cpp
   unit/sample_test.cpp

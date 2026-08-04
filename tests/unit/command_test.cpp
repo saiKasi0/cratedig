@@ -861,3 +861,17 @@ TEST_CASE("a pitch out of range is refused by name", "[command]") {
   const tui::Command command = tui::parse_command("pitch 3 200");
   CHECK(command.message.find("semitones") != std::string::npos);
 }
+
+TEST_CASE("reverse takes a pad and an optional switch", "[command]") {
+  const tui::Command bare = tui::parse_command("reverse 3");
+  REQUIRE(bare.kind == tui::CommandKind::kPadReverse);
+  CHECK(bare.pad == 3);
+  CHECK(bare.toggle == tui::Switch::kToggle);  // bare flips, as every toggle here does
+
+  CHECK(tui::parse_command("reverse 3 on").toggle == tui::Switch::kOn);
+  CHECK(tui::parse_command("reverse 3 off").toggle == tui::Switch::kOff);
+
+  CHECK(tui::parse_command("reverse").kind == tui::CommandKind::kError);
+  CHECK(tui::parse_command("reverse 99").kind == tui::CommandKind::kError);
+  CHECK(tui::parse_command("reverse 3 backwards").kind == tui::CommandKind::kError);
+}

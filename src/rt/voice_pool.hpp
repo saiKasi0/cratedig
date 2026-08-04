@@ -84,6 +84,10 @@ struct Voice {
   // attribution even as the pad's config moves on underneath it.
   std::uint8_t pad = 0;
 
+  // Captured at trigger, like every other per-voice setting: a pad flipped to
+  // reverse while a hit is ringing must not turn that hit around mid-flight.
+  bool reverse = false;
+
   // Frames into the NEXT block before this voice begins sounding.
   //
   // This is what makes a trigger sample-accurate rather than block-quantised: a
@@ -184,6 +188,7 @@ class VoicePool {
     slot->started_at = m_next_sequence++;
     slot->peak = 0.0F;
     slot->pad = config->pad;
+    slot->reverse = config->reverse;
     slot->start_offset = frame_offset;
     slot->env.trigger(config->env);
     slot->active = true;
@@ -519,8 +524,23 @@ class VoicePool {
       }
 
       const float amplitude = voice.gain * voice.env.next() * declick_gain(voice, index);
-      const auto fraction = static_cast<float>(voice.phase & kPhaseFractionMask) * kPhaseToFloat;
-      const auto offset = static_cast<std::ptrdiff_t>(index);
+
+      // Where to READ, which is the only thing reverse changes. See
+      // PadConfig::reverse for why it is mirrored here rather than by negating
+      // the step.
+      //
+      // Mirrored in FIXED POINT so the fraction comes with it: at a phase of
+      // index+0.25 the reverse read is at (M-index)-0.25, which is
+      // (M-index-1)+0.75. Mirroring only the integer part would snap reverse
+      // playback to frame boundaries and pitch it subtly differently from
+      // forward.
+      const PhaseFixed read_phase =
+          voice.reverse ? (static_cast<PhaseFixed>(voice.start_frame + voice.end_frame - 1)
+                           << kPhaseFractionBits) -
+                              voice.phase
+                        : voice.phase;
+      const auto fraction = static_cast<float>(read_phase & kPhaseFractionMask) * kPhaseToFloat;
+      const auto offset = static_cast<std::ptrdiff_t>(read_phase >> kPhaseFractionBits);
 
       for (std::size_t channel = 0; channel < out_channels; ++channel) {
         // Mono feeds every output channel; a sample with fewer channels than the
