@@ -1,6 +1,7 @@
 #include "tui/command.hpp"
 
 #include "rt/limiter.hpp"
+#include "rt/pitch.hpp"
 #include "rt/sequencer.hpp"
 #include "rt/strip.hpp"
 
@@ -803,6 +804,50 @@ namespace {
 // Attack, decay and release are milliseconds. Sustain is DECIBELS, because that
 // is what EDIT shows: the panel reads `s 0.0 dB`, and a verb that took a linear
 // 0..1 would set a number the screen then reported differently.
+// `pitch <pad> +7` or `pitch <pad> 1.5`.
+//
+// SIGNED MEANS SEMITONES, unsigned means ratio, and that is the one genuinely
+// ambiguous thing in this grammar: `pitch 3 7` could be seven semitones or seven
+// times. The rule is docs/ROADMAP.md's, and the confirmation says BOTH units back
+// -- which is what actually removes the ambiguity, because the person sees
+// immediately whether they got the one they meant.
+[[nodiscard]] Command parse_pitch(const std::vector<std::string_view>& words) {
+  if (words.size() < 3) {
+    return error("pitch needs a pad and a speed, e.g. pitch 3 +7 or pitch 3 1.5");
+  }
+  Command out = command_of(CommandKind::kPadPitch);
+  std::size_t pad = 0;
+  if (!parse_pad_number(words[1], pad)) {
+    return error("pitch: " + std::string{words[1]} + " is not a pad, 1 to 16");
+  }
+  out.pad = pad;
+
+  const std::string_view value = words[2];
+  const bool semitones = !value.empty() && (value.front() == '+' || value.front() == '-');
+
+  float number = 0.0F;
+  if (!parse_decimal(value, number)) {
+    return error("pitch: " + std::string{value} + " is not a speed");
+  }
+
+  if (semitones) {
+    if (number < rt::kMinSemitones || number > rt::kMaxSemitones) {
+      return error("pitch: " + std::string{value} + " is outside " +
+                   std::to_string(static_cast<int>(rt::kMinSemitones)) + " to +" +
+                   std::to_string(static_cast<int>(rt::kMaxSemitones)) + " semitones");
+    }
+    out.decibels = rt::ratio_from_semitones(number);
+    return out;
+  }
+
+  if (number < rt::kMinPitchRatio || number > rt::kMaxPitchRatio) {
+    return error("pitch: " + std::string{value} +
+                 " is outside 1/64 to 64 — a signed number means semitones");
+  }
+  out.decibels = number;
+  return out;
+}
+
 [[nodiscard]] Command parse_env(const std::vector<std::string_view>& words) {
   if (words.size() < 4) {
     return error("env needs a pad, a segment and a value, e.g. env 3 r 120");
@@ -902,6 +947,9 @@ Command parse_command(std::string_view line) {
   }
   if (verb == "perform") {
     return command_of(CommandKind::kPerform);
+  }
+  if (verb == "pitch") {
+    return parse_pitch(words);
   }
   if (verb == "env") {
     return parse_env(words);

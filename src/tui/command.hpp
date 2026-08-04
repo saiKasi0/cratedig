@@ -79,6 +79,11 @@ enum class CommandKind : std::uint8_t {
   // carrying the value.
   kPadEnvelope,
 
+  // Playback speed for one pad. `decibels` carries the RATIO -- the field is
+  // reused rather than a fourth float added, and the parser has already turned
+  // semitones into one, so nothing downstream needs to know which was typed.
+  kPadPitch,
+
   kQuit,
 };
 

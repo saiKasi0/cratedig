@@ -47,6 +47,7 @@ constexpr std::array kPhrases{
     Phrase{"slot assign", "bind slices to pads"},
     Phrase{"edit", "open EDIT on a slice"},
     Phrase{"env", "set a pad's attack, decay, sustain or release"},
+    Phrase{"pitch", "play a pad faster or slower — +7 semitones or 1.5x"},
 
     // The crate.
     Phrase{"browse", "find a file to load"},

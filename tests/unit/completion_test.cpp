@@ -229,6 +229,7 @@ TEST_CASE("every phrase offered is a phrase the parser understands", "[unit]") {
       {"slot assign", " 1 1"},
       {"edit", " 1"},
       {"env", " 1 r 250"},
+      {"pitch", " 1 +7"},
       {"browse", ""},
       {"load", " /tmp/a.wav"},
       {"files", ""},

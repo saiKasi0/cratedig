@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 // The command line, parsed.
@@ -823,4 +824,40 @@ TEST_CASE("an unknown density is refused by name", "[command]") {
 
   // Junk AFTER a valid density is still ignored, per the policy above.
   CHECK(tui::parse_command("chop transient beat extra").kind == tui::CommandKind::kChopTransient);
+}
+
+TEST_CASE("pitch reads semitones and ratios", "[command]") {
+  // SIGNED MEANS SEMITONES, unsigned means a ratio. The one genuinely ambiguous
+  // rule in this grammar, which is why the confirmation says both units back.
+  const tui::Command up = tui::parse_command("pitch 3 +7");
+  REQUIRE(up.kind == tui::CommandKind::kPadPitch);
+  CHECK(up.pad == 3);
+  CHECK(up.decibels == Catch::Approx(1.4983F).margin(0.001));
+
+  const tui::Command down = tui::parse_command("pitch 3 -12");
+  REQUIRE(down.kind == tui::CommandKind::kPadPitch);
+  CHECK(down.decibels == Catch::Approx(0.5F).margin(0.001));
+
+  // Unsigned is a ratio, verbatim.
+  const tui::Command ratio = tui::parse_command("pitch 3 1.5");
+  REQUIRE(ratio.kind == tui::CommandKind::kPadPitch);
+  CHECK(ratio.decibels == Catch::Approx(1.5F));
+
+  // And the two agree on what a fifth is, which is the whole point of accepting
+  // both: `+7` and `1.4983` are the same speed.
+  CHECK(up.decibels == Catch::Approx(ratio.decibels).margin(0.01));
+}
+
+TEST_CASE("a pitch out of range is refused by name", "[command]") {
+  CHECK(tui::parse_command("pitch 3 +99").kind == tui::CommandKind::kError);
+  CHECK(tui::parse_command("pitch 3 200").kind == tui::CommandKind::kError);
+  CHECK(tui::parse_command("pitch 3 0").kind == tui::CommandKind::kError);
+  CHECK(tui::parse_command("pitch 3 zzz").kind == tui::CommandKind::kError);
+  CHECK(tui::parse_command("pitch 99 +7").kind == tui::CommandKind::kError);
+  CHECK(tui::parse_command("pitch 3").kind == tui::CommandKind::kError);
+
+  // The refusal for an out-of-range RATIO names the other unit, because a person
+  // typing `pitch 3 7` meaning seven semitones needs to know why 7 was refused.
+  const tui::Command command = tui::parse_command("pitch 3 200");
+  CHECK(command.message.find("semitones") != std::string::npos);
 }

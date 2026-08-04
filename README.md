@@ -118,6 +118,7 @@ keyboard. `f` is pad 12, so "fit" is `0` — the one digit the map does not clai
 | `H` `L` | nudge the slice **end** |
 | `space` | play the slice — through its pad if it has one, auditioned if it has not; press again to stop |
 | `z` | zoom in; once there is no more to see, reframe the slice |
+| `-` `=` | pitch the slice's pad down / up a semitone |
 | `u` | undo the last nudge |
 | `esc` | back to PERFORM |
 
@@ -167,6 +168,7 @@ keys to mean "put it here". `E` is capital because `e` is pad 7.
 | `:pad oneshot [N]` | pad N (or all of them) plays to the end of its slice |
 | `:edit [S]` | open EDIT, on slice S or on the current one |
 | `:env P a`/`d`/`s`/`r` `V` | pad P's envelope: attack, decay and release in ms, sustain in dB |
+| `:pitch P V` | play pad P faster or slower — `+7` is semitones, `1.5` is a ratio |
 | `:load <path>` | add a file to the crate — the rest of the line is the path, spaces and all |
 | `:files` · `:pool` | list the crate |
 | `:file N` | look at another loaded file |
@@ -215,6 +217,17 @@ the arrows) move through them and the line always shows the selection, so Enter
 runs what you can see. After `:load` or `:browse` it completes paths instead,
 offering directories and audio files from wherever you have got to. Esc closes
 the menu; Esc again closes the prompt.
+
+**Pitching up aliases, and that is worth knowing before you reach for it.**
+Playing a sample `r` times faster folds everything above `sample_rate / (2r)`
+back down into the audible band, and the interpolator cannot prevent it — a
+4-point Hermite interpolates, it does not decimate. Measured, with a 15 kHz
+component in the source: at 1.5× nothing folds (it lands at 22.5 kHz, still under
+Nyquist); at 2× it folds to 18 kHz and at 4× to 12 kHz, **both at full level**.
+Folding relocates energy rather than reducing it, so the artefact arrives as loud
+as the music it lands under. Down is clean at any speed. A proper fix — a
+decimating path, or a bounced pitch through libsamplerate — is on the roadmap;
+until then, a fifth up is fine and an octave up is an effect.
 
 **MIDI.** A controller plugged in before start-up plays the pads at real
 velocity: note 36 is pad 1 (the General MIDI bass drum, which is what essentially

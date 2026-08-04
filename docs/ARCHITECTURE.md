@@ -667,6 +667,26 @@ Implemented:
 Not yet built: recording, export and the project file (M6). See
 `docs/ROADMAP.md`.
 
+### Varispeed, and what it costs (M5.7)
+
+`PadConfig::pitch_ratio` is multiplied into the phase step in
+`VoicePool::step_for()` and has been since M3; M5.7 added the control, in both
+units a person thinks in — `rt::pitch.hpp` converts, so the parser, the interface
+and the keymap share one idea of what an octave is.
+
+**The alias floor, measured rather than argued** (`tests/unit/pitch_test.cpp`).
+Reading the source `r` times faster puts a component at `f` on `f*r`; once that
+passes Nyquist it folds back to `|sample_rate - f*r|`. With 15 kHz in the source:
+1.5× lands it at 22.5 kHz and nothing folds; 2× folds it to 18 kHz and 4× to
+12 kHz, **both level with the musical tone**. Folding relocates energy, it does
+not attenuate it.
+
+Two earlier versions of that measurement were wrong in ways worth not repeating:
+an unwindowed DFT leaks at −46 dB and reported −46 dB at unity, where the output
+is a bit-exact copy; and a single tone *below* Nyquist/r cannot alias at all,
+however fast it is played, so a 6 kHz probe measured nothing but interpolator
+error. Aliasing needs content above `sample_rate / (2r)` to fold.
+
 ### The crate, as built (M5.5)
 
 `ingest::SamplePool` is the session's loaded files, on the **control thread and

@@ -7,6 +7,7 @@
 #include "io/audio_device.hpp"
 #include "rt/pad_config.hpp"
 #include "rt/pad_event.hpp"
+#include "rt/pitch.hpp"
 #include "rt/sample.hpp"
 #include "rt/sequencer.hpp"
 #include "tui/command.hpp"
@@ -1018,6 +1019,14 @@ int run_app(const AppOptions& options) {
     state.chop.boundaries = chop_result.frames;
   };
 
+  // "pad 3 · 1.50x · +7.02 st", the two units the same number goes by.
+  auto pitch_summary = [](std::size_t pad_number, float ratio) {
+    return "pad " + std::to_string(pad_number) + " · " +
+           detail::with_precision(static_cast<double>(ratio), 2) + "x · " +
+           (rt::semitones_from_ratio(ratio) >= 0.0F ? "+" : "") +
+           detail::with_precision(static_cast<double>(rt::semitones_from_ratio(ratio)), 2) + " st";
+  };
+
   auto execute = [&](const Command& command) {
     switch (command.kind) {
       case CommandKind::kNone:
@@ -1590,6 +1599,34 @@ int run_app(const AppOptions& options) {
           ++index;
         }
         set_message(said, false);
+        break;
+      }
+
+      case CommandKind::kPadPitch: {
+        // The DSP has been here since M3: `pitch_ratio` is multiplied into the
+        // phase step in VoicePool::step_for() and clamped on arrival. This is
+        // the control that was missing, which makes it the fifth thing this
+        // project has found the engine able to do and nothing able to ask for.
+        const auto pad = static_cast<std::uint8_t>(command.pad - 1);
+        const std::shared_ptr<const rt::PadConfig> held = engine.pad_config(pad);
+        if (held == nullptr || held->sample == nullptr) {
+          set_message("pad " + std::to_string(command.pad) + " has nothing on it", true);
+          break;
+        }
+
+        rt::PadConfig next = *held;
+        next.pitch_ratio = rt::clamp_pitch_ratio(command.decibels);
+
+        if (!engine.publish_pad_config(std::make_shared<const rt::PadConfig>(std::move(next)))) {
+          set_message("pads are busy — the edit did not happen, try again", true);
+          break;
+        }
+        refresh_edit(last_columns);
+
+        // BOTH UNITS, because the grammar cannot tell `pitch 3 7` meaning seven
+        // semitones from `pitch 3 7` meaning seven times. Saying what was
+        // understood is what makes the rule discoverable rather than a trap.
+        set_message(pitch_summary(command.pad, rt::clamp_pitch_ratio(command.decibels)), false);
         break;
       }
 
@@ -2757,6 +2794,46 @@ int run_app(const AppOptions& options) {
         case 'u':
           undo_edit(last_columns);
           break;
+
+        case '-':
+        case '=': {
+          // PITCH, ON THE SLICE UNDER THE CURSOR, in semitones -- the unit an
+          // ear works in, and the reason the keys move by one rather than by a
+          // ratio step. The `:pitch` verb takes either unit; this is the one you
+          // reach for while listening.
+          //
+          // `-` and `=` because they sit together on the keyboard and neither is
+          // a pad key. `+` needs shift and would be a different key on half the
+          // layouts this runs on.
+          const ingest::PoolEntry* file = entry();
+          if (file == nullptr || state.edit.slice >= file->slices.size()) {
+            set_message("no slice to pitch", true);
+            break;
+          }
+          const std::uint8_t pad = pad_for_slice(state, state.current_file, state.edit.slice);
+          if (pad >= rt::kNumPads) {
+            set_message("slice " + std::to_string(state.edit.slice + 1) +
+                            " is on no pad — :slot assign it first",
+                        true);
+            break;
+          }
+          const std::shared_ptr<const rt::PadConfig> held = engine.pad_config(pad);
+          if (held == nullptr) {
+            break;
+          }
+          const float semitones =
+              rt::semitones_from_ratio(held->pitch_ratio) + (code == '=' ? 1.0F : -1.0F);
+          rt::PadConfig next = *held;
+          next.pitch_ratio =
+              rt::ratio_from_semitones(std::clamp(semitones, rt::kMinSemitones, rt::kMaxSemitones));
+          if (!engine.publish_pad_config(std::make_shared<const rt::PadConfig>(std::move(next)))) {
+            set_message("pads are busy — try again", true);
+            break;
+          }
+          refresh_edit(last_columns);
+          set_message(pitch_summary(pad + 1U, rt::ratio_from_semitones(semitones)), false);
+          break;
+        }
         case 'z': {
           // One key, one direction, wrapping back to the whole slice when there
           // is no more to see -- which is what a bare `z zoom` in the mockup's

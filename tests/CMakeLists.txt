@@ -37,6 +37,7 @@ add_executable(
   unit/audition_test.cpp
   unit/onset_profile_test.cpp
   unit/completion_test.cpp
+  unit/pitch_test.cpp
   unit/pool_test.cpp
   unit/result_test.cpp
   unit/rt_scope_test.cpp
