@@ -86,6 +86,44 @@ struct PadEvent {
 static_assert(std::is_trivially_copyable_v<PadEvent>,
               "PadEvent must be trivially copyable to travel through SpscRing");
 
+// A pad that was PLAYED, reported audio -> control. The other direction.
+//
+// Everything else in this header travels from a keyboard or a MIDI port toward
+// the audio thread. This goes back, and it exists because live recording needs
+// something the control thread cannot work out for itself: WHEN, exactly.
+//
+// The audio thread places every live trigger at a known frame inside its block
+// (PadEvent::frame_offset) and is the only thread that knows where the transport
+// was at that moment. By the time the control thread's 30 Hz tick notices a key
+// was pressed, the transport has moved on by up to a thirtieth of a second --
+// which at 120 bpm is a third of a sixteenth-note step, so a take timed on the
+// control thread would quantise to the wrong step roughly whenever the player
+// was slightly ahead of the beat. Which is to say: whenever they were playing.
+//
+// WHAT IS NOT HERE, deliberately: the quantised step. Rounding a frame to a step
+// is policy -- the resolution is a setting, and coarser grids are useful -- and
+// policy on the audio thread is a setting that cannot be changed without a
+// message. The control thread has the frame, the tempo and the sample rate, so
+// it can do the arithmetic itself and change its mind for free.
+struct PadHit {
+  // Absolute transport position, in frames, at which the pad sounded. Absolute
+  // rather than block-relative because the block is gone by the time anyone
+  // reads this.
+  std::uint64_t frame = 0;
+
+  std::uint8_t pad = 0;
+
+  // 0..127, matching rt::Step rather than PadEvent's linear float above.
+  //
+  // Converted HERE, at the one place a played note becomes a recorded one, so
+  // that a hit and the step it is written into cannot disagree about how loud it
+  // was.
+  std::uint8_t velocity = 0;
+};
+
+static_assert(std::is_trivially_copyable_v<PadHit>,
+              "PadHit must be trivially copyable to travel through SpscRing");
+
 }  // namespace rt
 
 #endif  // CRATEDIG_RT_PAD_EVENT_HPP

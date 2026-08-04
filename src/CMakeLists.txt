@@ -47,7 +47,7 @@ target_link_libraries(cratedig_rt_guard PRIVATE cratedig_warnings cratedig_sanit
 # -fno-exceptions/-fno-rtti per CLAUDE.md — errors travel as rt::Result. The
 # engine also must not see a device header; RtAudio/RtMidi belong to src/io/,
 # which is what lets render() run in a plain loop for offline export and CI.
-add_library(cratedig_engine STATIC engine/engine.cpp)
+add_library(cratedig_engine STATIC engine/engine.cpp engine/take.cpp)
 target_link_libraries(cratedig_engine PUBLIC cratedig_rt)
 target_link_libraries(cratedig_engine PRIVATE cratedig_warnings cratedig_sanitizer)
 target_compile_options(cratedig_engine PRIVATE -fno-exceptions -fno-rtti)

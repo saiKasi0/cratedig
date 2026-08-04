@@ -240,6 +240,17 @@ class Engine {
   // allowance rather than a throughput budget.
   static constexpr std::size_t kRecordRingCapacity = 8;
 
+  // Live pad hits in flight, AUDIO -> CONTROL, waiting to be written into a
+  // pattern.
+  //
+  // Sized for the gap between control-thread ticks rather than for a
+  // performance: the UI drains this at about 30 Hz, and 128 hits in a
+  // thirty-third of a second is roughly four thousand notes a second. Ten
+  // fingers cannot do that, and neither can a MIDI pad controller; a full ring
+  // here means the control thread stalled, which is why the overflow is counted
+  // rather than sized around.
+  static constexpr std::size_t kHitRingCapacity = 128;
+
   // The capture pool: 32 chunks of 4096 frames.
   //
   // 2.7 SECONDS OF SLACK at 48 kHz, which is what the number has to be measured
@@ -515,6 +526,25 @@ class Engine {
 
   [[nodiscard]] rt::RecordState record_state() const noexcept { return m_recorder.state(); }
 
+  // CONTROL THREAD. The next live pad hit the audio thread reported, oldest
+  // first; false when there are none left.
+  //
+  // "Live" means a person played it -- keyboard or MIDI -- while the transport
+  // was running. The sequencer's own hits are NOT reported, because writing them
+  // back into the pattern they came from is how an overdub fills a pattern with
+  // copies of itself.
+  //
+  // Drain this on the run loop's tick whether or not anything is recording. A
+  // producer with no consumer fills, and a ring that fills silently is how the
+  // audition path broke twice in M4.5.
+  [[nodiscard]] bool next_hit(rt::PadHit& out) noexcept;
+
+  // Hits lost because the ring was full. Non-zero means the control thread
+  // stopped draining, not that somebody played too fast -- see kHitRingCapacity.
+  [[nodiscard]] std::uint64_t dropped_hits() const noexcept {
+    return m_dropped_hits.load(std::memory_order_relaxed);
+  }
+
   // JANITOR THREAD. Destroys everything the audio thread has retired, and
   // returns how many references were released.
   std::size_t collect_garbage() noexcept;
@@ -720,6 +750,11 @@ class Engine {
   void start_voice(std::uint8_t pad, float velocity, std::size_t frame_offset,
                    bool sequenced) noexcept;
 
+  // AUDIO THREAD, from start_voice(). Hands a live hit back to the control
+  // thread with the transport position it landed on.
+  void report_live_hit(std::uint8_t pad, float velocity, std::size_t frame_offset,
+                       bool sequenced) noexcept;
+
   // AUDIO THREAD, at the top of every block. Takes whatever has been published
   // for audition and starts it.
   void adopt_auditions() noexcept;
@@ -848,6 +883,11 @@ class Engine {
   // The capture lane. The recorder itself is shared between the threads and says
   // in its own header which half owns what; everything below it here is storage
   // allocated ONCE in the constructor, exactly like the mixer graph.
+  // AUDIO -> CONTROL, the only ring in this class pointing that way. Live pad
+  // hits waiting to be written into a pattern.
+  rt::SpscRing<rt::PadHit, kHitRingCapacity> m_hits;
+  std::atomic<std::uint64_t> m_dropped_hits{0};
+
   rt::SpscRing<rt::RecordCommand, kRecordRingCapacity> m_record_commands;
   rt::Recorder m_recorder;
   std::vector<float> m_record_storage;

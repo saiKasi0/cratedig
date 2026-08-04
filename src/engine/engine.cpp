@@ -579,6 +579,18 @@ void Engine::start_voice(std::uint8_t pad, float velocity, std::size_t frame_off
   if (pad >= rt::kNumPads) {
     return;
   }
+
+  // REPORTED BEFORE ANYTHING CAN GO WRONG BELOW, and that is the decision rather
+  // than an accident of ordering.
+  //
+  // A hit on an unloaded pad makes no sound, and a hit that loses the race for a
+  // voice makes no sound either -- but both were PLAYED, and a take is a record
+  // of what somebody played. Dropping them would make a recording quieter than
+  // the performance for reasons the player cannot see, and "the note I hit
+  // during a busy bar is missing from the pattern" is a bug report nobody could
+  // ever reproduce.
+  report_live_hit(pad, velocity, frame_offset, sequenced);
+
   const std::shared_ptr<const rt::PadConfig>& config = m_pads[pad];
   if (config == nullptr || config->sample == nullptr) {
     return;  // an unloaded pad is silent, not an error
@@ -830,6 +842,38 @@ bool Engine::submit_midi_event(const rt::PadEvent& event) noexcept {
   // relaxed: a counter the UI reads for diagnostics; nothing is ordered by it.
   m_dropped_midi_events.fetch_add(1, std::memory_order_relaxed);
   return false;
+}
+
+void Engine::report_live_hit(std::uint8_t pad, float velocity, std::size_t frame_offset,
+                             bool sequenced) noexcept {
+  // LIVE ONLY. The sequencer's own hits are excluded because recording them
+  // would write back exactly what is already in the pattern -- and then again on
+  // the next pass, and the pass after that. Overdub would become a machine for
+  // slowly filling a pattern with itself.
+  if (sequenced || !m_transport.playing) {
+    return;
+  }
+
+  // The transport advances at the END of render(), so position_frames is still
+  // this block's start and the offset is the hit's place inside it. Reading it
+  // after the advance would put every hit one block late.
+  const rt::PadHit hit{
+      .frame = m_transport.position_frames + frame_offset,
+      .pad = pad,
+      .velocity = static_cast<std::uint8_t>(
+          std::lround(std::clamp(velocity, 0.0F, 1.0F) * static_cast<float>(rt::kMaxVelocity))),
+  };
+
+  if (!m_hits.try_push(hit)) {
+    // Dropped rather than blocked, and counted rather than dropped quietly: a
+    // full ring means the control thread stopped draining, which is a stall
+    // somewhere else showing up as notes missing from a take.
+    m_dropped_hits.fetch_add(1, std::memory_order_relaxed);  // diagnostic only
+  }
+}
+
+bool Engine::next_hit(rt::PadHit& out) noexcept {
+  return m_hits.try_pop(out);
 }
 
 void Engine::drain_record_commands() noexcept {

@@ -42,6 +42,8 @@ add_executable(
   unit/pool_test.cpp
   unit/recorder_test.cpp
   unit/reverse_test.cpp
+  unit/live_take_test.cpp
+  unit/take_test.cpp
   unit/tempo_test.cpp
   unit/result_test.cpp
   unit/rt_scope_test.cpp

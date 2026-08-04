@@ -62,6 +62,10 @@ inline constexpr std::uint32_t kDefaultBpmX100 = 12'000;  // 120.00 bpm
 // being monotonic -- which the block scan in Engine::render() relies on.
 inline constexpr std::uint8_t kMaxSwingPercent = 75;
 
+// The loudest a step can be. MIDI's range, because that is where the number
+// came from and where it goes back to.
+inline constexpr std::uint8_t kMaxVelocity = 127;
+
 // One cell of the grid.
 //
 // Velocity is 0..127 rather than a float, because that is what MIDI hands us and
