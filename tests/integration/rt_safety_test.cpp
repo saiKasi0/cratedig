@@ -9,10 +9,12 @@
 #include "engine/engine.hpp"
 #include "rt/pad_config.hpp"
 #include "rt/pad_event.hpp"
+#include "rt/recorder.hpp"
 #include "rt/rt_scope.hpp"
 #include "rt/sample.hpp"
 #include "rt/sequencer.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -444,6 +446,95 @@ TEST_CASE("Engine::render allocates nothing while the sequencer is republished",
   CHECK(collected >= kStateCount - 2);
   CHECK(eng.garbage_overflows() == 0);
   CHECK(eng.rejected_sequencer_states() == 0);
+}
+
+TEST_CASE("Engine::render allocates nothing while a take is being recorded", "[integration]") {
+  // The M6 acceptance: "zero allocations in the callback" with recording
+  // running. The capture path copies into a chunk, crosses two rings, walks a
+  // circular pre-roll buffer and flushes it on a trigger -- four places a
+  // std::vector would have been the obvious way to write it, and every one of
+  // them would allocate here.
+  if constexpr (!rt::kAllocationDetectionEnabled) {
+    SKIP("allocation detection is compiled out (TSan build) — see rt_scope.hpp");
+  }
+
+  const engine::Engine::Config config{
+      .sample_rate = 48'000, .num_channels = kChannels, .max_block_frames = kMaxBlock, .seed = 0};
+  engine::Engine eng{config};
+
+  auto sample = std::make_shared<rt::Sample>(48'000U, kChannels, std::size_t{4'000});
+  for (std::uint16_t channel = 0; channel < kChannels; ++channel) {
+    std::span<float> data = sample->mutable_channel(channel);
+    for (std::size_t frame = 0; frame < data.size(); ++frame) {
+      data[frame] = 0.2F * static_cast<float>((frame % 13) + 1);
+    }
+  }
+  REQUIRE(eng.set_pad_sample(0, std::move(sample)));
+
+  std::vector<std::vector<float>> storage(kChannels, std::vector<float>(kMaxBlock, 0.0F));
+  std::vector<float*> channels(kChannels);
+  std::vector<std::vector<float>> input_storage(kChannels, std::vector<float>(kMaxBlock, 0.3F));
+  std::vector<const float*> input(kChannels);
+  for (std::uint16_t i = 0; i < kChannels; ++i) {
+    channels[i] = storage[i].data();
+    input[i] = input_storage[i].data();
+  }
+
+  std::mt19937 rng{7'777};
+  std::uniform_int_distribution<std::size_t> block_sizes{1, kMaxBlock};
+  std::vector<std::size_t> plan(1'500);
+  for (std::size_t& size : plan) {
+    size = block_sizes(rng);
+  }
+
+  // Both sources and both entry points, because they are different code paths:
+  // the master tap copies pointers into a preallocated array, the input tap
+  // passes the device's own straight through, and a threshold arm is the only
+  // thing that ever touches the pre-roll.
+  const HandlerSwap swap;
+  std::size_t collected = 0;
+  for (std::size_t index = 0; index < plan.size(); ++index) {
+    if (index % 500 == 0) {
+      static_cast<void>(eng.trigger_pad(rt::PadEvent{.pad = 0, .velocity = 1.0F}));
+    }
+    if (index == 0) {
+      static_cast<void>(eng.arm_recording(rt::RecordSource::kInput, 0.5F, 4'000));
+    }
+    if (index == 200) {
+      // Push the input over the threshold, so the trigger fires with a FULL
+      // pre-roll buffer behind it and flush_preroll() actually runs inside the
+      // guarded region. Armed at 0.5 against an input of 0.3, the first version
+      // of this case stayed armed for its whole length and never exercised the
+      // one path most likely to want a heap allocation.
+      for (std::vector<float>& channel : input_storage) {
+        std::fill(channel.begin(), channel.end(), 0.9F);  // in place; no allocation
+      }
+    }
+    if (index == 400) {
+      static_cast<void>(eng.stop_recording());
+    }
+    if (index == 420) {
+      eng.discard_take();
+      static_cast<void>(eng.start_recording(rt::RecordSource::kMaster));
+    }
+    if (index == 1'000) {
+      static_cast<void>(eng.stop_recording());
+    }
+
+    eng.render(std::span<float* const>{channels}, std::span<const float* const>{input},
+               plan[index]);
+
+    // OUTSIDE the render but INSIDE the guarded region, which is where a
+    // control-thread collector really runs. It allocates -- it is supposed to,
+    // it is growing the take -- so the count below would be wrong if the guard
+    // were counting it. That it does not is what makes RT_SCOPE scoped rather
+    // than global, and this is the case that would catch it if that changed.
+    collected += eng.collect_take();
+  }
+
+  CHECK(HandlerSwap::count() == 0);
+  CHECK(collected > 0);
+  CHECK(eng.telemetry().record_dropped_frames == 0);
 }
 
 TEST_CASE("the RT guard is armed during the render test", "[integration]") {

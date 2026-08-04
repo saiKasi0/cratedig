@@ -69,6 +69,35 @@ Engine::Engine(const Config& config) noexcept : m_config(config) {
   // ever be asked for rather than for the current setting -- so changing the
   // lookahead is a different read offset rather than a reallocation.
   m_limiter.prepare(channels);
+
+  // The capture pool, allocated ONCE, here, for the same reason the graph is:
+  // the audio thread must never reach the heap, and a recorder that allocated a
+  // chunk when it needed one would do exactly that in the middle of a take.
+  //
+  // Clamped to what rt::Recorder will take. Nothing in this project builds an
+  // engine wider than stereo, so the clamp is a guard rather than a policy.
+  m_record_channels = static_cast<std::uint16_t>(std::min(channels, rt::kMaxRecordChannels));
+  const auto record_channels = static_cast<std::size_t>(m_record_channels);
+
+  m_record_storage.assign(kRecordPoolChunks * kRecordChunkFrames * record_channels, 0.0F);
+  m_record_chunks.resize(kRecordPoolChunks);
+  for (std::size_t index = 0; index < kRecordPoolChunks; ++index) {
+    m_record_chunks[index] = rt::RecordChunk{
+        .data = m_record_storage.data() + (index * kRecordChunkFrames * record_channels),
+        .capacity = kRecordChunkFrames,
+        .channels = m_record_channels,
+        .frames = 0,
+    };
+  }
+
+  const std::size_t preroll_frames = (static_cast<std::size_t>(m_config.sample_rate) *
+                                      static_cast<std::size_t>(kRecordPreRollMilliseconds)) /
+                                     1'000;
+  m_record_preroll.assign(preroll_frames * record_channels, 0.0F);
+  m_recorder.reset(m_record_chunks, m_record_preroll, preroll_frames, m_record_channels);
+
+  m_record_heads.assign(record_channels, nullptr);
+  m_take.resize(record_channels);
 }
 
 std::span<float* const> Engine::node_channels(std::size_t node) noexcept {
@@ -803,6 +832,150 @@ bool Engine::submit_midi_event(const rt::PadEvent& event) noexcept {
   return false;
 }
 
+void Engine::drain_record_commands() noexcept {
+  rt::RecordCommand command;
+  while (m_record_commands.try_pop(command)) {
+    switch (command.type) {
+      case rt::RecordCommand::Type::kArm:
+        m_recorder.arm(command.source, command.threshold,
+                       static_cast<std::size_t>(command.preroll_frames));
+        break;
+      case rt::RecordCommand::Type::kStart:
+        m_recorder.start(command.source);
+        break;
+      case rt::RecordCommand::Type::kStop:
+        m_recorder.stop();
+        break;
+    }
+  }
+}
+
+void Engine::capture_recording(std::span<float* const> channels,
+                               std::span<const float* const> input,
+                               std::size_t num_frames) noexcept {
+  if (m_recorder.source() == rt::RecordSource::kInput) {
+    // Straight through. The device layer hands the input in the same planar
+    // layout everything else here uses, so there is nothing to rearrange -- and
+    // an EMPTY span, which is what an output-only stream provides, is a state
+    // the recorder already answers for honestly.
+    m_recorder.capture(input, num_frames);
+    return;
+  }
+
+  const std::size_t count = std::min(channels.size(), m_record_heads.size());
+  for (std::size_t channel = 0; channel < count; ++channel) {
+    m_record_heads[channel] = channels[channel];
+  }
+  m_recorder.capture(std::span<const float* const>{m_record_heads.data(), count}, num_frames);
+}
+
+bool Engine::can_begin_take() const noexcept {
+  // Not mid-take, and nothing outstanding from the last one. Being ARMED does
+  // not disqualify: re-arming with a different threshold, or punching in on a
+  // recorder that is waiting, are both ordinary and neither has any audio to
+  // splice onto.
+  return m_recorder.state() != rt::RecordState::kRecording && m_recorder.pending_chunks() == 0 &&
+         m_take_frames == 0;
+}
+
+bool Engine::arm_recording(rt::RecordSource source, float threshold,
+                           std::size_t preroll_frames) noexcept {
+  if (!can_begin_take()) {
+    return false;
+  }
+  if (!m_record_commands.try_push(rt::RecordCommand{
+          .type = rt::RecordCommand::Type::kArm,
+          .source = source,
+          .threshold = threshold,
+          .preroll_frames = static_cast<std::uint32_t>(preroll_frames),
+      })) {
+    return false;
+  }
+  m_collected_frames = 0;
+  return true;
+}
+
+bool Engine::start_recording(rt::RecordSource source) noexcept {
+  if (!can_begin_take()) {
+    return false;
+  }
+  if (!m_record_commands.try_push(rt::RecordCommand{
+          .type = rt::RecordCommand::Type::kStart,
+          .source = source,
+          .threshold = 0.0F,
+          .preroll_frames = 0,
+      })) {
+    return false;
+  }
+  m_collected_frames = 0;
+  return true;
+}
+
+bool Engine::stop_recording() noexcept {
+  return m_record_commands.try_push(rt::RecordCommand{
+      .type = rt::RecordCommand::Type::kStop,
+      .source = m_recorder.source(),
+      .threshold = 0.0F,
+      .preroll_frames = 0,
+  });
+}
+
+std::size_t Engine::collect_take() noexcept {
+  std::size_t appended = 0;
+  std::uint16_t index = 0;
+  while (m_recorder.try_collect(index)) {
+    const rt::RecordChunk& chunk = m_recorder.chunk(index);
+    for (std::uint16_t channel = 0; channel < m_record_channels; ++channel) {
+      const std::span<const float> frames = chunk.channel(channel);
+      m_take[channel].insert(m_take[channel].end(), frames.begin(), frames.end());
+    }
+    appended += chunk.frames;
+    m_recorder.recycle(index);
+  }
+  m_take_frames += appended;
+  m_collected_frames += appended;
+  return appended;
+}
+
+bool Engine::take_complete() const noexcept {
+  // THE COUNT, not just the state -- rt::Recorder's try_collect() explains why.
+  //
+  // Against m_collected_frames rather than m_take_frames, and the difference is
+  // the whole reason there are two counters: discard_take() empties the take but
+  // does not un-capture what the audio thread already did, so comparing the
+  // emptied length against frames_captured() would report every discarded take
+  // as permanently incomplete.
+  return m_recorder.state() == rt::RecordState::kIdle && m_recorder.pending_chunks() == 0 &&
+         m_collected_frames >= m_recorder.frames_captured();
+}
+
+std::span<const float> Engine::take_channel(std::uint16_t channel) const noexcept {
+  if (channel >= m_record_channels) {
+    return {};
+  }
+  return std::span<const float>{m_take[channel]};
+}
+
+void Engine::discard_take() noexcept {
+  // The chunks still in flight too, not just the assembled vectors. A take that
+  // is thrown away with audio still in the full ring would have that audio
+  // turn up at the head of the NEXT one, which is the splice arm_recording()
+  // exists to prevent.
+  std::uint16_t index = 0;
+  while (m_recorder.try_collect(index)) {
+    // Counted even though it is being thrown away, so take_complete() still
+    // knows this take is accounted for.
+    m_collected_frames += m_recorder.chunk(index).frames;
+    m_recorder.recycle(index);
+  }
+  for (std::vector<float>& channel : m_take) {
+    // clear() rather than a fresh vector: the capacity is worth keeping, so a
+    // second take of similar length does not grow from nothing again.
+    channel.clear();
+  }
+  m_take_frames = 0;
+}
+
 void Engine::adopt_offline() noexcept {
   adopt_pad_configs();
   adopt_sequencer();
@@ -817,9 +990,23 @@ void Engine::adopt_offline() noexcept {
   // is fine and self-limiting: there are two, and the third audition steals the
   // oldest and retires its config through the garbage ring like any other steal.
   adopt_auditions();
+
+  // AND THE RECORD RING, for exactly the same reason. Nothing here will ever
+  // capture a frame -- with no device there is no input and no block to tap --
+  // but a producer with no consumer fills, and once it is full every later
+  // command is refused for the rest of the session. Applying them keeps the
+  // recorder's state honest about what was asked for, which is the state the
+  // interface reports; whether recording makes sense with no audio device is a
+  // question for the caller, and src/tui/ answers it there.
+  drain_record_commands();
 }
 
 void Engine::render(std::span<float* const> channels, std::size_t num_frames) noexcept {
+  render(channels, {}, num_frames);
+}
+
+void Engine::render(std::span<float* const> channels, std::span<const float* const> input,
+                    std::size_t num_frames) noexcept {
   // Opened first, so everything below is held to the real-time rules — including
   // anything added here later.
   RT_SCOPE();
@@ -858,6 +1045,15 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
   // block late -- which for "play from the top" is the difference between the
   // first step sounding and being skipped.
   drain_transport();
+
+  // The recorder's, and what matters is only that this precedes the capture tap
+  // at the bottom of this function -- not where in the block it sits. Measured,
+  // because the obvious statement of it is wrong: moving this line down to just
+  // above capture_recording() changes nothing at all, since the tap takes the
+  // whole block either way. Put it AFTER the tap and a punch-in loses the block
+  // it arrived in, which at 256 frames is 5.3 ms off the front of every take
+  // started by hand.
+  drain_record_commands();
 
   // Drain first, so a hit that arrived during the previous block sounds in this
   // one, placed inside it by PadEvent::frame_offset.
@@ -923,6 +1119,14 @@ void Engine::render(std::span<float* const> channels, std::size_t num_frames) no
     // was last on. Same rule as a bypassed EQ band.
     m_limiter.reset();
   }
+
+  // THE CAPTURE TAP, after the limiter and therefore after everything: what a
+  // master recording keeps is what the listener heard, master section included.
+  //
+  // Reads and never writes, so it cannot move a sample of the output. That is
+  // load-bearing rather than incidental -- it is what lets recording exist
+  // without moving a single committed hash in the project.
+  capture_recording(channels, input, num_frames);
 
   // The transport advances by exactly the block it just rendered, whatever that
   // block was. Nothing else tracks time: every step boundary is derived from
@@ -1092,6 +1296,15 @@ Telemetry Engine::telemetry() const noexcept {
   for (std::size_t bus = 0; bus < rt::kNumBuses; ++bus) {
     snapshot.bus_peak[bus] = m_published.bus_peak[bus].load(std::memory_order_relaxed);
   }
+
+  // Straight off the recorder rather than out of m_published, because the
+  // recorder already keeps these as atomics the audio thread writes -- copying
+  // them into a second set every block would be work in the callback to save a
+  // load in the UI.
+  snapshot.record_state = m_recorder.state();
+  snapshot.record_peak = m_recorder.source_peak();
+  snapshot.recorded_frames = m_recorder.frames_captured();
+  snapshot.record_dropped_frames = m_recorder.dropped_frames();
 
   const auto rate = static_cast<float>(m_config.sample_rate == 0 ? 1U : m_config.sample_rate);
   for (std::size_t pad = 0; pad < rt::kNumPads; ++pad) {

@@ -60,6 +60,29 @@ enum class RecordState : std::uint8_t {
   kRecording,
 };
 
+// An instruction for the recorder, control -> audio.
+//
+// A VALUE MESSAGE rather than a handoff, for the reason the master section's is:
+// it owns nothing, so it travels the way a PadEvent does and leaves nothing to
+// retire. The recorder's own methods are audio-thread-only; this is how the
+// control thread reaches them.
+struct RecordCommand {
+  enum class Type : std::uint8_t {
+    kArm,
+    kStart,
+    kStop,
+  };
+
+  Type type = Type::kStop;
+  RecordSource source = RecordSource::kInput;
+
+  // Linear amplitude, and only meaningful for kArm. Zero means "wait for a
+  // punch-in" rather than "trigger on silence".
+  float threshold = 0.0F;
+
+  std::uint32_t preroll_frames = 0;
+};
+
 // The widest source the recorder will take, matching io::AudioDevice::kMaxChannels.
 //
 // Here as its own constant rather than including that header: src/rt/ depends on
@@ -317,6 +340,11 @@ class Recorder {
   // starts dropping frames, so this is the early warning the counter above is
   // the obituary of.
   [[nodiscard]] std::size_t chunks_available() const noexcept { return m_empty.size_approx(); }
+
+  // Chunks filled and not yet collected. Non-zero between takes means audio from
+  // the last one is still in flight, which is what makes arming again unsafe --
+  // see arm().
+  [[nodiscard]] std::size_t pending_chunks() const noexcept { return m_full.size_approx(); }
 
  private:
   static constexpr std::uint16_t kNoChunk = 0xFFFF;

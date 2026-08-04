@@ -10,6 +10,7 @@
 #include "rt/limiter.hpp"
 #include "rt/pad_config.hpp"
 #include "rt/pad_event.hpp"
+#include "rt/recorder.hpp"
 #include "rt/sample.hpp"
 #include "rt/sequencer.hpp"
 #include "rt/spsc_ring.hpp"
@@ -125,6 +126,20 @@ struct Telemetry {
   // same thing the interface should show: an empty song is not slot zero of
   // nothing, it is a pattern repeating.
   std::uint8_t transport_slot = 0;
+
+  // What the recorder is doing and what it is hearing.
+  //
+  // `record_peak` is the level of whatever the recorder is TAPPING, which is not
+  // necessarily the input: with the source set to master it meters the mix.
+  // That is the useful answer either way, because the question a meter beside a
+  // record button answers is "how loud is the thing I am about to keep".
+  rt::RecordState record_state = rt::RecordState::kIdle;
+  float record_peak = 0.0F;
+  std::uint64_t recorded_frames = 0;
+
+  // Non-zero means the take has holes in it. See rt::Recorder::dropped_frames --
+  // this is not a quality metric, it is a correctness one.
+  std::uint64_t record_dropped_frames = 0;
 };
 
 // The engine facade. Everything audible eventually happens behind render().
@@ -219,6 +234,35 @@ class Engine {
   // depth is here so a burst during a stalled stream is dropped visibly rather
   // than blocking the UI.
   static constexpr std::size_t kTransportRingCapacity = 32;
+
+  // Recorder instructions in flight, control -> audio. Arm, punch in, stop --
+  // three things a person does with their hands, so the depth is a burst
+  // allowance rather than a throughput budget.
+  static constexpr std::size_t kRecordRingCapacity = 8;
+
+  // The capture pool: 32 chunks of 4096 frames.
+  //
+  // 2.7 SECONDS OF SLACK at 48 kHz, which is what the number has to be measured
+  // against -- not the length of a take, which this bounds not at all. It is how
+  // far behind the control thread may fall before frames start being dropped,
+  // and it is sized against the UI's frame tick (about 30 Hz) with three orders
+  // of magnitude to spare, because the tick is where collect_take() runs and the
+  // tick has been seen to stall for 80 ms on an onset analysis.
+  //
+  // 1 MB at stereo. The chunk length itself is not critical: a block is split
+  // across chunks as needed, so this trades the number of ring operations
+  // against how long the last partial chunk of a take sits unsent, which is one
+  // block either way because stop() flushes it.
+  static constexpr std::size_t kRecordChunkFrames = 4'096;
+  static constexpr std::size_t kRecordPoolChunks = 32;
+
+  // How much audio the recorder keeps behind a threshold trigger, at most.
+  //
+  // Half a second because that is comfortably longer than any attack a person
+  // would want back, and 192 KB at stereo/48 kHz is not worth being clever
+  // about. What is actually kept is whatever the caller asks arm() for, up to
+  // this; the buffer only has to be big enough not to be the limit.
+  static constexpr std::uint32_t kRecordPreRollMilliseconds = 500;
 
   struct Config {
     std::uint32_t sample_rate = 48'000;
@@ -401,6 +445,76 @@ class Engine {
   // debug-asserted; in release they are the caller's contract.
   void render(std::span<float* const> channels, std::size_t num_frames) noexcept;
 
+  // REAL-TIME. The duplex form: the same block, plus the stream's input.
+  //
+  // `input` is planar like everything else, and may be EMPTY -- which is the
+  // normal state for an offline bounce, for a test, and for an output-only
+  // device. The recorder is the only thing that reads it, so an empty span costs
+  // nothing and changes no sample of the output.
+  //
+  // A SEPARATE OVERLOAD rather than a defaulted parameter, so that the
+  // output-only form above stays the one every existing caller compiles against
+  // unchanged -- and so that "this render has an input" is visible at the call
+  // site, which is exactly one place: io::AudioDevice's callback.
+  void render(std::span<float* const> channels, std::span<const float* const> input,
+              std::size_t num_frames) noexcept;
+
+  // CONTROL THREAD. Arm the recorder: listen, meter, keep nothing yet.
+  //
+  // With `threshold` above zero the take starts by itself when the source
+  // reaches it, keeping `preroll_frames` of what came before (rt/recorder.hpp
+  // explains why that is not a luxury). With `threshold` at zero it waits for
+  // start_recording().
+  //
+  // Returns false if the ring is full, OR if a take is still outstanding --
+  // recording over one that has not been collected would splice two takes into
+  // one, so it is refused here rather than discovered afterwards. Call
+  // discard_take() or take the audio first.
+  [[nodiscard]] bool arm_recording(rt::RecordSource source, float threshold,
+                                   std::size_t preroll_frames) noexcept;
+
+  // CONTROL THREAD. Punch in now. Same refusals as arm_recording().
+  [[nodiscard]] bool start_recording(rt::RecordSource source) noexcept;
+
+  // CONTROL THREAD. Stop keeping. The partial chunk in the audio thread's hand
+  // comes back with it, so the tail of the take is not lost.
+  [[nodiscard]] bool stop_recording() noexcept;
+
+  // CONTROL THREAD, on the run loop's tick, like collect_garbage().
+  //
+  // Appends whatever the audio thread has filled to the take being assembled and
+  // hands the chunks back. Returns the frames appended.
+  //
+  // MUST BE CALLED WHILE RECORDING, not only at the end: the pool is finite, and
+  // a caller that waits until the take is over gets kRecordPoolChunks worth of
+  // audio and a drop count for the rest.
+  std::size_t collect_take() noexcept;
+
+  // CONTROL THREAD. Whether the take is over AND fully collected.
+  //
+  // Both halves. The state alone would be trusting the audio thread to have
+  // pushed its last chunk before publishing kIdle -- see rt::Recorder, which
+  // documents why counting is the half that cannot be broken by an edit.
+  [[nodiscard]] bool take_complete() const noexcept;
+
+  [[nodiscard]] std::size_t take_frames() const noexcept { return m_take_frames; }
+
+  // CONTROL THREAD. One channel of the assembled take.
+  //
+  // A SPAN rather than a built rt::Sample, so that the engine does not decide
+  // what a take becomes. The caller may want a pad, a pool entry with a peak
+  // pyramid, or a file; all three start from these frames, and only the caller
+  // knows which. Valid until the next collect_take() or discard_take().
+  [[nodiscard]] std::span<const float> take_channel(std::uint16_t channel) const noexcept;
+
+  [[nodiscard]] std::uint16_t take_channels() const noexcept { return m_record_channels; }
+
+  // CONTROL THREAD. Throws the assembled take away and drains anything still in
+  // flight, so the recorder can be armed again.
+  void discard_take() noexcept;
+
+  [[nodiscard]] rt::RecordState record_state() const noexcept { return m_recorder.state(); }
+
   // JANITOR THREAD. Destroys everything the audio thread has retired, and
   // returns how many references were released.
   std::size_t collect_garbage() noexcept;
@@ -577,6 +691,23 @@ class Engine {
   // AUDIO THREAD, at the top of every block, before the position advances.
   void drain_transport() noexcept;
 
+  // AUDIO THREAD, at the top of every block. Applies whatever the control thread
+  // has asked the recorder to do, so a punch-in lands on the block it arrived
+  // in rather than one block late.
+  void drain_record_commands() noexcept;
+
+  // CONTROL THREAD. Whether a new take may be started without splicing it onto
+  // the last one.
+  [[nodiscard]] bool can_begin_take() const noexcept;
+
+  // AUDIO THREAD, once the master is final. Meters the recorder's source and
+  // captures it if a take is running.
+  //
+  // AFTER THE LIMITER, which is what makes recording the master mean "what you
+  // heard" rather than "what you would have heard without the master section".
+  void capture_recording(std::span<float* const> channels, std::span<const float* const> input,
+                         std::size_t num_frames) noexcept;
+
   // AUDIO THREAD. Starts one voice on `pad`, and publishes the glow for it.
   //
   // The single path every producer goes through -- the keyboard and MIDI via the
@@ -713,6 +844,45 @@ class Engine {
   std::shared_ptr<const rt::PadConfig> m_retiring_audition;
 
   rt::GarbageRing<kGarbageRingCapacity> m_garbage;
+
+  // The capture lane. The recorder itself is shared between the threads and says
+  // in its own header which half owns what; everything below it here is storage
+  // allocated ONCE in the constructor, exactly like the mixer graph.
+  rt::SpscRing<rt::RecordCommand, kRecordRingCapacity> m_record_commands;
+  rt::Recorder m_recorder;
+  std::vector<float> m_record_storage;
+  std::vector<float> m_record_preroll;
+  std::vector<rt::RecordChunk> m_record_chunks;
+
+  // AUDIO THREAD ONLY. Channel pointers for the master tap.
+  //
+  // Preallocated because the alternative is building the array in the callback:
+  // render() is handed std::span<float* const> and rt::Recorder wants
+  // std::span<const float* const>, which is not a conversion, so the pointers
+  // have to be copied somewhere. Somewhere is here, once.
+  std::vector<const float*> m_record_heads;
+
+  // CONTROL THREAD ONLY. The take being assembled, one vector per channel --
+  // the layout rt::Sample wants, so whoever finishes the take copies rather
+  // than de-interleaves.
+  //
+  // THIS is what grows without bound, on the control thread where growing is
+  // legal. Four minutes of stereo at 48 kHz is 92 MB, which is the honest cost
+  // of an unbounded take and is why the pool below it can stay small.
+  std::vector<std::vector<float>> m_take;
+  std::size_t m_take_frames = 0;
+
+  // Frames drained from the recorder since this take began, INCLUDING ones
+  // discard_take() threw away. Separate from m_take_frames above because it
+  // answers a different question -- "has everything the audio thread captured
+  // been accounted for", which is what take_complete() needs and which emptying
+  // the take must not change the answer to.
+  std::uint64_t m_collected_frames = 0;
+
+  // How many channels the recorder was given, which is the engine's channel
+  // count clamped to rt::kMaxRecordChannels. Wider engines record their first
+  // eight channels; nothing in this project builds one.
+  std::uint16_t m_record_channels = 0;
 
   // AUDIO THREAD ONLY after construction. The mixer graph's sample storage:
   // kNumGraphNodes nodes, each num_channels wide and max_block_frames long, in

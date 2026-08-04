@@ -17,6 +17,7 @@ add_executable(
   unit/command_test.cpp
   unit/compressor_test.cpp
   unit/decode_test.cpp
+  unit/engine_record_test.cpp
   unit/engine_render_test.cpp
   unit/envelope_test.cpp
   unit/eq_test.cpp
