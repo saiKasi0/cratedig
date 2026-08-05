@@ -13,8 +13,12 @@ take and a one-shot.
 Browse a folder, hear a file before you load it, see its waveform while it plays,
 mark a bit of it and put that bit on a pad. Tab completes commands and paths.
 
-**Not yet:** recording your own audio (M6 — see *What is not built* below),
-export, and yt-dlp import.
+Play a pattern in rather than typing it: `R` arms, and what you hit on the pads
+while the transport rolls lands in the pattern, snapped as hard or as softly as
+you ask.
+
+**Not yet:** recording your own audio from an input (M6 — see *What is not
+built* below), export, and yt-dlp import.
 
 ## Quick start
 
@@ -98,6 +102,7 @@ rather than pretending.
 | `g` `G` | jump to the start · the end |
 | `\` | switch the right-hand panel |
 | `h` `l` | scroll — only once `+` has zoomed in; the whole file is on screen by default |
+| `R` | arm recording — play the pattern in instead of typing it |
 | `.` | stop every sounding voice, and the transport |
 | `esc` | quit |
 
@@ -195,6 +200,10 @@ keys to mean "put it here". `E` is capital because `e` is pad 7.
 | `:song 1 2 3` | chain patterns in play order |
 | `:song clear` | back to one pattern repeating |
 | `:metro [on\|off]` | metronome; bare `metro` flips it |
+| `:rec [on\|off]` | arm recording; bare `rec` flips it, and so does `R` |
+| `:rec quant N` | how hard to snap what you play: 16, 8, 4, 2 or 1 |
+| `:rec replace` · `:rec overdub` | a take clears the pattern first · a take adds to it |
+| `:rec undo` | put the pattern back as it was before the take |
 | `:stop [N]` | stop pad N, or everything (and the transport) |
 | `:q` `:quit` | quit |
 
@@ -280,13 +289,12 @@ point of a status section.
 
 | | |
 |---|---|
-| **Recording your own audio** | M6, and it goes first in that milestone. A sampler that cannot sample is a player. Today material comes from a file on disk; `:load` is the only way in. |
+| **Recording your own audio** | M6. Playing a *pattern* in works today (`R`); capturing *audio* off an input or off the master does not reach the interface yet. Material comes from a file on disk; `:load` is the only way in. |
 | **Export / bounce** | M6. `Engine::render()` already works with no device, which is what an offline bounce needs, but nothing writes a file yet. |
 | **yt-dlp import** | M6, using a yt-dlp you install yourself (see `docs/LICENSING.md`). |
 | **Banks and a 32-pad mode** | M6. Sixteen pads at a time; `:slot assign 17-32 1` reaches further slices in one line. |
 | **Saturation, sends, reverb, delay** | M5.2. The mixer's graph already has the attachment points, which is why they can land without re-cutting it. |
-| **Configurable transient detection** | M5.7. `:chop transient` runs at one fixed threshold today; the profiles that let you say what counts as a hit come next. |
-| **Varispeed and BPM detection** | M5.7. The chipmunk/screwed knob, and a tempo read off the sample rather than typed. |
+| **Unquantised playback** | A later milestone, by decision. A take snaps to the grid because `rt::Step` has no micro-timing; giving a step a timing offset changes the struct the project file serialises and the sequencer's step scan, so it is a milestone rather than a knob. |
 | **Lua config and scripting** | M7. |
 
 ## Building and testing

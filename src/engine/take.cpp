@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 
 namespace engine {
 namespace {
@@ -87,6 +88,17 @@ bool record_hit(rt::SequencerState& state, std::uint32_t sample_rate, std::uint8
   // hear it" than anything the extra count costs.
   cell.velocity = std::max<std::uint8_t>(hit.velocity, 1);
   return true;
+}
+
+std::size_t record_hits(rt::SequencerState& state, std::uint32_t sample_rate,
+                        std::uint8_t quantise_steps, std::span<const rt::PadHit> hits) noexcept {
+  std::size_t written = 0;
+  for (const rt::PadHit& hit : hits) {
+    if (record_hit(state, sample_rate, quantise_steps, hit)) {
+      ++written;
+    }
+  }
+  return written;
 }
 
 }  // namespace engine

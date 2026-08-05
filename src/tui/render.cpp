@@ -1,5 +1,6 @@
 #include "tui/render.hpp"
 
+#include "engine/take.hpp"
 #include "tui/command.hpp"
 #include "tui/render_detail.hpp"
 #include "tui/theme.hpp"
@@ -810,8 +811,45 @@ constexpr std::size_t kLaneRows = 8;  // pads per column
   std::vector<std::string> facts{
       format_bpm(state.pattern.bpm_x100) + " bpm",
       state.pattern.transport_running ? std::string{"play"} : std::string{"stop"},
-      "voices " + std::to_string(state.active_voices) + "/" + std::to_string(state.max_voices),
   };
+
+  // RECORD, straight after the transport and only when armed.
+  //
+  // Ahead of the voice count because it is the difference between playing and
+  // writing, and absent otherwise for the same reason the fault counters are:
+  // a line that says "not recording" every frame is spending columns to say
+  // nothing. The resolution rides along because it is the one setting that
+  // changes what a take comes out as, and the moment to know it is while your
+  // hands are on the pads rather than afterwards.
+  if (state.take.armed) {
+    facts.push_back("rec 1/" + std::to_string(static_cast<int>(
+                                   engine::quantise_denominator(state.take.quantise_steps))));
+
+    // Its own cell, and only when set. Replace throws the pattern away when the
+    // take starts; a destructive mode earns a column of its own rather than a
+    // character somebody has to already know the meaning of.
+    if (state.take.replace) {
+      facts.emplace_back("replace");
+    }
+  }
+
+  // THE FACTS THAT MUST SURVIVE at any width: the tempo, the transport, and the
+  // record state when there is one. Everything after this point is welcome to
+  // be dropped by the packer.
+  //
+  // Measured with the SAME arithmetic detail::mode_line packs with, per-fact
+  // trailing space included. An approximation here is a fact that fits by this
+  // budget and does not fit by the packer, and that is not hypothetical: the
+  // first version of this was one cell short and dropped "replace" -- the
+  // destructive mode -- off a 100-column terminal, which is the M4.5 lesson
+  // repeating. Found by the PTY session, then by this snapshot.
+  std::size_t essential = 0;
+  for (const std::string& fact : facts) {
+    essential += utf8_cells(fact) + (essential == 0 ? 0 : 3) + 1;
+  }
+
+  facts.push_back("voices " + std::to_string(state.active_voices) + "/" +
+                  std::to_string(state.max_voices));
   // Faults outrank the level meter, and appear only when they have something to
   // say. A counter reading zero is noise competing with the keymap for the same
   // columns; a counter reading three is news, and it earns its place by showing
@@ -866,7 +904,17 @@ constexpr std::size_t kLaneRows = 8;  // pads per column
   // depending on how fast the pattern was.
   constexpr std::size_t kMinFactCells = 34;
 
-  return detail::mode_line(state, columns, "  perform   ", facts, kHintTiers, kMinFactCells);
+  // While a take is armed, the record state DISPLACES the voice count rather
+  // than joining it -- which is why `essential` above stops before the voices
+  // are added. Reserving room for both instead took 60 cells of a 100-column
+  // line and collapsed the hint all the way to `pads · esc`, taking "space
+  // play" off the screen of somebody who needs the transport to record anything
+  // at all. The voice count gives way here, exactly as the peak gave way to the
+  // transport in M4.
+  //
+  // Un-armed, `essential` is well under kMinFactCells and no screen moves.
+  return detail::mode_line(state, columns, "  perform   ", facts, kHintTiers,
+                           std::max(kMinFactCells, essential));
 }
 
 [[nodiscard]] Element too_small(std::size_t columns, std::size_t rows) {

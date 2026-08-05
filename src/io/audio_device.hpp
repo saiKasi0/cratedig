@@ -103,6 +103,14 @@ class AudioDevice {
   // What RtAudio actually negotiated. Only meaningful once open() succeeded.
   [[nodiscard]] std::uint32_t actual_block_frames() const noexcept;
 
+  // Callbacks delivered since the stream was opened.
+  //
+  // ZERO WHILE RUNNING IS A REAL STATE and worth being able to ask about: a
+  // device can open, start, and never deliver anything. Callers that wait for
+  // audio can then say "the device produced nothing" instead of timing out with
+  // no explanation. stop() reads it too -- see the note there.
+  [[nodiscard]] std::uint64_t callback_count() const noexcept;
+
   // Callback deadlines missed. Non-zero means audible dropouts happened; the
   // shell shows it because a silent xrun counter teaches the wrong lesson about
   // how well the engine is keeping up.

@@ -1,5 +1,6 @@
 #include "tui/command.hpp"
 
+#include "engine/take.hpp"
 #include "rt/limiter.hpp"
 
 #include <string>
@@ -892,4 +893,77 @@ TEST_CASE("bpm detect and tape speed", "[command]") {
   CHECK(tui::parse_command("tape 0").kind == tui::CommandKind::kError);
   CHECK(tui::parse_command("tape 9").kind == tui::CommandKind::kError);
   CHECK(tui::parse_command("tape fast").kind == tui::CommandKind::kError);
+}
+
+// -- playing a pattern in ------------------------------------------------------
+
+TEST_CASE("rec arms, disarms and flips", "[unit]") {
+  // Bare flips it, the same tri-state `metro` uses -- the parser does not know
+  // whether it is armed and must not guess.
+  CHECK(tui::parse_command("rec").kind == tui::CommandKind::kRecordArm);
+  CHECK(tui::parse_command("rec").toggle == tui::Switch::kToggle);
+  CHECK(tui::parse_command("rec on").toggle == tui::Switch::kOn);
+  CHECK(tui::parse_command("rec off").toggle == tui::Switch::kOff);
+}
+
+TEST_CASE("rec quant takes a note value, not a step count", "[unit]") {
+  // 8 means eighths, which is TWO steps. The person types the note value they
+  // hear; nothing outside engine::quantise_from_denominator converts it.
+  const tui::Command eighths = tui::parse_command("rec quant 8");
+  REQUIRE(eighths.kind == tui::CommandKind::kRecordQuantise);
+  CHECK(eighths.count == 8);
+  CHECK(engine::quantise_from_denominator(8) == 2);
+
+  CHECK(tui::parse_command("rec quantise 16").count == 16);
+  CHECK(tui::parse_command("rec quantize 4").count == 4);
+}
+
+TEST_CASE("rec quant refuses a value that does not divide a bar", "[unit]") {
+  // Refused rather than rounded. 3 is not a resolution this grid has, and
+  // silently giving somebody 4 would be answering a question they did not ask.
+  for (const std::string_view line :
+       {"rec quant 3", "rec quant 5", "rec quant 32", "rec quant 0"}) {
+    INFO(line);
+    const tui::Command out = tui::parse_command(line);
+    CHECK(out.kind == tui::CommandKind::kError);
+    CHECK_FALSE(out.message.empty());
+  }
+  CHECK(tui::parse_command("rec quant").kind == tui::CommandKind::kError);
+  CHECK(tui::parse_command("rec quant x").kind == tui::CommandKind::kError);
+}
+
+TEST_CASE("rec names its two modes rather than negating one", "[unit]") {
+  // "overdub" is not "replace off" to anybody who has used a drum machine.
+  const tui::Command replace = tui::parse_command("rec replace");
+  CHECK(replace.kind == tui::CommandKind::kRecordReplace);
+  CHECK(replace.toggle == tui::Switch::kOn);
+
+  const tui::Command overdub = tui::parse_command("rec overdub");
+  CHECK(overdub.kind == tui::CommandKind::kRecordReplace);
+  CHECK(overdub.toggle == tui::Switch::kOff);
+}
+
+TEST_CASE("rec undo is its own verb", "[unit]") {
+  CHECK(tui::parse_command("rec undo").kind == tui::CommandKind::kRecordUndo);
+}
+
+TEST_CASE("rec says what it does not understand", "[unit]") {
+  const tui::Command out = tui::parse_command("rec sideways");
+  REQUIRE(out.kind == tui::CommandKind::kError);
+  // Names the alternatives rather than only refusing, like every other verb
+  // here: an error that does not say what would have worked is a dead end.
+  CHECK(out.message.find("quant") != std::string::npos);
+  CHECK(out.message.find("undo") != std::string::npos);
+}
+
+TEST_CASE("quantise resolutions convert both ways", "[unit]") {
+  // The pair has to be an inverse, because one side is what a person types and
+  // the other is what the mode line shows them.
+  for (const std::uint8_t denominator :
+       {std::uint8_t{16}, std::uint8_t{8}, std::uint8_t{4}, std::uint8_t{2}, std::uint8_t{1}}) {
+    const std::uint8_t steps = engine::quantise_from_denominator(denominator);
+    INFO("1/" << int{denominator} << " is " << int{steps} << " steps");
+    REQUIRE(steps != 0);
+    CHECK(engine::quantise_denominator(steps) == denominator);
+  }
 }

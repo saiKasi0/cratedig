@@ -485,6 +485,34 @@ struct ChopState {
   bool needs_analysis = false;
 };
 
+// Playing a pattern in rather than typing it.
+//
+// The state a person needs to see while their hands are on the pads, which is a
+// short list: whether it is listening, how hard it is rounding, and whether it
+// is going to keep what is already there.
+struct TakeState {
+  // Armed. Notes are only kept while the transport is ALSO running -- a hit
+  // with no transport has no position to be recorded against -- so the
+  // interface says "rec" while armed and stopped, which is the truth: waiting.
+  bool armed = false;
+
+  // Steps per snap; see engine::kQuantiseSixteenth and friends.
+  std::uint8_t quantise_steps = 1;
+
+  // Whether arming cleared the pattern first. Shown while armed BECAUSE it is
+  // destructive: a mode that silently threw away the last twenty minutes is not
+  // one to leave off the line.
+  bool replace = false;
+
+  // Whether there is a pattern to put back. Set when a take starts, because
+  // that is the moment the previous one became worth keeping a copy of.
+  bool can_undo = false;
+
+  // Notes this take has written. What makes an armed recorder that is hearing
+  // nothing visibly different from one that is working.
+  std::size_t recorded = 0;
+};
+
 struct UiState {
   std::string version;
 
@@ -559,6 +587,9 @@ struct UiState {
 
   // The live re-chop preview. See ChopState.
   ChopState chop;
+
+  // Playing a pattern in rather than typing it. See TakeState.
+  TakeState take;
 
   bool playing = false;
   std::size_t playhead_frame = 0;

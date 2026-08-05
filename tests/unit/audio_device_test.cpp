@@ -153,8 +153,26 @@ TEST_CASE("AudioDevice plays through real hardware", "[device]") {
 
   const std::uint64_t rendered = eng.frames_rendered();
   const std::uint64_t xruns = device.xrun_count();
+  const std::uint64_t callbacks = device.callback_count();
   device.stop();
   device.close();
+
+  // A DEVICE THAT OPENED, STARTED AND DELIVERED NOTHING is not this program
+  // failing, and reporting it as one sends the reader looking in the wrong
+  // place. It happens: a macOS CoreAudio left holding a stale client accepts
+  // the stream, parks its IO thread and calls back never.
+  //
+  // Skipped rather than failed, and named rather than silent -- the same
+  // contract every other [device] case here keeps (docs/TESTING.md: "a test
+  // that skips loudly is more useful than one nobody remembers to invoke").
+  // Before this, the run did not even get here: stop() blocked for ever
+  // draining a stream with nothing in it, and the suite hung.
+  if (callbacks == 0) {
+    SKIP(
+        "the audio device accepted the stream and delivered no callbacks — "
+        "this machine's audio stack is not usable right now (on macOS, "
+        "`sudo killall coreaudiod` clears a wedged one)");
+  }
 
   // xruns are reported, not asserted. Whether a freshly opened stream drops its
   // first callback depends on how busy the machine is and how the driver warms

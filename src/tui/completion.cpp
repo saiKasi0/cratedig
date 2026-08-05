@@ -85,6 +85,13 @@ constexpr std::array kPhrases{
     Phrase{"song clear", "back to one pattern repeating"},
     Phrase{"metro", "the metronome, on or off"},
 
+    // Playing a pattern in.
+    Phrase{"rec", "arm — play the pattern in instead of typing it"},
+    Phrase{"rec quant", "how hard to round what you play: 16, 8, 4, 2"},
+    Phrase{"rec replace", "a take clears the pattern first"},
+    Phrase{"rec overdub", "a take adds to the pattern"},
+    Phrase{"rec undo", "put the pattern back as it was"},
+
     // Getting about.
     Phrase{"perform", "back to PERFORM"},
     Phrase{"quit", "leave cratedig"},

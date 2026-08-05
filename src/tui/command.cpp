@@ -1,5 +1,6 @@
 #include "tui/command.hpp"
 
+#include "engine/take.hpp"
 #include "rt/limiter.hpp"
 #include "rt/pitch.hpp"
 #include "rt/sequencer.hpp"
@@ -402,6 +403,55 @@ namespace {
     return out;
   }
   return error("metro: " + std::string{words[1]} + " is not on or off");
+}
+
+// `rec`, `rec on|off`, `rec quant 8`, `rec replace|overdub`, `rec undo`.
+//
+// Bare `rec` flips the arm, the same tri-state `metro` uses and for the same
+// reason: the parser does not know the current setting and must not guess.
+[[nodiscard]] Command parse_rec(const std::vector<std::string_view>& words) {
+  if (words.size() < 2) {
+    return command_of(CommandKind::kRecordArm);
+  }
+
+  if (words[1] == "on" || words[1] == "off") {
+    Command out = command_of(CommandKind::kRecordArm);
+    out.toggle = words[1] == "on" ? Switch::kOn : Switch::kOff;
+    return out;
+  }
+
+  if (words[1] == "undo") {
+    return command_of(CommandKind::kRecordUndo);
+  }
+
+  // Two words for one setting, because "overdub" is not "replace off" to
+  // anybody who has used a drum machine -- they are two named modes, and naming
+  // them is cheaper than explaining which one the absence of a flag means.
+  if (words[1] == "replace" || words[1] == "overdub") {
+    Command out = command_of(CommandKind::kRecordReplace);
+    out.toggle = words[1] == "replace" ? Switch::kOn : Switch::kOff;
+    return out;
+  }
+
+  if (words[1] == "quant" || words[1] == "quantise" || words[1] == "quantize") {
+    if (words.size() < 3) {
+      return error("rec quant needs a note value, e.g. rec quant 8 for eighths");
+    }
+    std::size_t denominator = 0;
+    if (!parse_number(words[2], denominator) || denominator > 0xFF ||
+        engine::quantise_from_denominator(static_cast<std::uint8_t>(denominator)) == 0) {
+      // The list rather than a range, because the valid values are not a range:
+      // they are the divisors of a bar, and 3 or 5 or 12 are refused rather
+      // than rounded to something nobody asked for.
+      return error("rec quant: " + std::string{words[2]} + " is not 16, 8, 4, 2 or 1");
+    }
+    Command out = command_of(CommandKind::kRecordQuantise);
+    out.count = denominator;
+    return out;
+  }
+
+  return error("rec: " + std::string{words[1]} +
+               " is not on, off, quant, replace, overdub or undo");
 }
 
 // -- the crate ---------------------------------------------------------------
@@ -978,6 +1028,9 @@ Command parse_command(std::string_view line) {
   }
   if (verb == "song") {
     return parse_song(words);
+  }
+  if (verb == "rec") {
+    return parse_rec(words);
   }
   if (verb == "metro") {
     return parse_metro(words);

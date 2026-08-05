@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -206,4 +207,44 @@ TEST_CASE("place_hit survives a zero quantise rather than dividing by it", "[uni
   const rt::SequencerState state = straight_state();
   // Not reachable through the UI, and this arrives from a config file in M7.
   CHECK(engine::place_hit(state, kRate, 0, 5 * kStepFrames).absolute_step == 5);
+}
+
+TEST_CASE("record_hits keeps a tick's worth in the order they were played", "[unit]") {
+  rt::SequencerState state = straight_state();
+
+  // What the interface hands over on one frame tick. In order, because two hits
+  // that quantise to the same step must resolve to the later one -- and a
+  // reordering here would be invisible in the count.
+  const std::vector<rt::PadHit> hits{
+      hit_at(0, 0, 60),
+      hit_at(4 * kStepFrames, 1, 70),
+      hit_at((4 * kStepFrames) + 500, 1, 90),  // same step as the one before
+      hit_at(8 * kStepFrames, 0, 80),
+  };
+
+  const std::size_t written = engine::record_hits(state, kRate, engine::kQuantiseSixteenth, hits);
+  CHECK(written == hits.size());
+
+  CHECK(state.patterns[0].steps[0][0].velocity == 60);
+  CHECK(state.patterns[0].steps[8][0].velocity == 80);
+  // The later of the two that landed together.
+  CHECK(state.patterns[0].steps[4][1].velocity == 90);
+}
+
+TEST_CASE("record_hits counts only what it could place", "[unit]") {
+  rt::SequencerState state = straight_state();
+  const std::vector<rt::PadHit> hits{
+      hit_at(0, 0, 60),
+      hit_at(0, rt::kNumPads, 60),  // no such pad
+      hit_at(kStepFrames, 1, 60),
+  };
+  CHECK(engine::record_hits(state, kRate, engine::kQuantiseSixteenth, hits) == 2);
+}
+
+TEST_CASE("record_hits on nothing changes nothing", "[unit]") {
+  rt::SequencerState state = straight_state();
+  state.patterns[0].steps[3][2] = rt::Step{.on = true, .velocity = 55};
+
+  CHECK(engine::record_hits(state, kRate, engine::kQuantiseSixteenth, {}) == 0);
+  CHECK(state.patterns[0].steps[3][2].velocity == 55);
 }

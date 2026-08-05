@@ -199,6 +199,15 @@ if(Python3_FOUND)
                    $<TARGET_FILE:cratedig>)
   set_tests_properties(chop_tune_pty_e2e PROPERTIES LABELS e2e TIMEOUT ${CRATEDIG_PTY_TIMEOUT})
 
+  # Playing a pattern in: the controls and what the line says. NOT the
+  # recording itself -- with --no-audio nothing renders, so the transport never
+  # advances and a hit has no position. live_take_test.cpp is the half with an
+  # engine in it; this is the half with a person in it.
+  add_test(NAME take_pty_e2e
+           COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_take_session.py
+                   $<TARGET_FILE:cratedig>)
+  set_tests_properties(take_pty_e2e PROPERTIES LABELS e2e TIMEOUT ${CRATEDIG_PTY_TIMEOUT})
+
   add_test(NAME grab_pty_e2e
            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/e2e/pty_grab_session.py
                    $<TARGET_FILE:cratedig>)

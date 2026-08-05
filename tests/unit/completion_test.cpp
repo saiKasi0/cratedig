@@ -258,6 +258,11 @@ TEST_CASE("every phrase offered is a phrase the parser understands", "[unit]") {
       {"song", " 1 2"},
       {"song clear", ""},
       {"metro", " on"},
+      {"rec", ""},
+      {"rec quant", " 8"},
+      {"rec replace", ""},
+      {"rec overdub", ""},
+      {"rec undo", ""},
       {"perform", ""},
       {"quit", ""},
   };

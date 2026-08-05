@@ -11,6 +11,7 @@
 // says "38;2;255;79;0" or "38;5;202" otherwise depends on which terminal
 // happened to launch the test.
 
+#include "engine/take.hpp"
 #include "ingest/peak_pyramid.hpp"
 #include "ingest/slices.hpp"
 #include "rt/sample.hpp"
@@ -353,6 +354,24 @@ TEST_CASE("PERFORM renders at the 100x30 design grid", "[tui]") {
     state.tab = tui::PanelTab::kPattern;
     state.pattern = live_pattern();
     check_snapshot("perform_pattern_live_100x30", state, 100, 30);
+  }
+
+  SECTION("armed, playing a pattern in") {
+    // THE MODE LINE UNDER PRESSURE. The record state is two more facts on a
+    // line that was already choosing between them, so this is where the hint
+    // tier gives way -- and pinning it is the only way to notice if it stops.
+    //
+    // A PTY session found the first version of this dropping "replace" off a
+    // 100-column terminal: the budget that picks the hint was sized for the
+    // un-armed line, so the destructive mode was the fact that fell off the
+    // end. Rendering it here is what would have caught that without a terminal.
+    tui::UiState state = playing_state(100);
+    state.tab = tui::PanelTab::kPattern;
+    state.pattern = live_pattern();
+    state.take.armed = true;
+    state.take.quantise_steps = engine::kQuantiseEighth;
+    state.take.replace = true;
+    check_snapshot("perform_recording_100x30", state, 100, 30);
   }
 
   SECTION("pattern tab, longer than the lane") {
@@ -1503,8 +1522,14 @@ TEST_CASE("the completion menu marks the selection as it cycles", "[tui]") {
 
 TEST_CASE("a menu too tall for the terminal shrinks and says how much it hid", "[tui]") {
   // The case that was silently blank before the menu learned to shrink: an empty
-  // line matches all thirty-three verbs, which wants eleven rows against a
-  // budget of ten at the design size.
+  // line matches EVERY verb, which wants far more rows than the design size has
+  // to give.
+  //
+  // The snapshot's "n more" therefore moves whenever a verb is added, and that
+  // is the point rather than a maintenance cost -- it is the one assertion that
+  // notices the table grew. It said thirty-three when the table held forty,
+  // which is what a hand-written count in a comment is worth; the number lives
+  // in the snapshot now and nowhere else.
   check_snapshot("complete_all_100x30", completing(100, "", tui::complete_verbs("")), 100, 30);
 }
 

@@ -50,6 +50,12 @@ enum class CommandKind : std::uint8_t {
   kSongClear,  // back to one pattern repeating
   kMetronome,  // `toggle`
 
+  // Playing a pattern in rather than typing it, M6.
+  kRecordArm,       // `toggle`
+  kRecordQuantise,  // `count` is the note DENOMINATOR as typed: 16, 8, 4 or 2
+  kRecordReplace,   // `toggle`: on replaces the pattern, off overdubs onto it
+  kRecordUndo,      // put the pattern back as it was before the take
+
   // Stop sounding voices. `pad` is 1-based as typed, or 0 for all of them --
   // and unlike `pad gate`, "all" here also stops the transport, because a
   // running sequencer would retrigger within a step and the silence would last

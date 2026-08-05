@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace engine {
 
@@ -40,6 +41,32 @@ inline constexpr std::uint8_t kQuantiseSixteenth = 1;
 inline constexpr std::uint8_t kQuantiseEighth = 2;
 inline constexpr std::uint8_t kQuantiseQuarter = 4;  // on the beat
 inline constexpr std::uint8_t kQuantiseHalf = 8;
+
+// One bar of 4/4 in steps, which is what turns a snap resolution into the note
+// value a musician would name it by.
+inline constexpr std::uint8_t kStepsPerBar = 4 * rt::kStepsPerBeat;
+
+// The note value a resolution corresponds to, as a denominator: one step is a
+// sixteenth, so this answers 16, 8, 4 or 2.
+//
+// FOR DISPLAY AND FOR PARSING, in both directions, and here rather than in the
+// interface because it is arithmetic about the constants above. A person types
+// and reads "1/8"; nothing outside this pair of functions should have an opinion
+// about how many steps that is.
+[[nodiscard]] constexpr std::uint8_t quantise_denominator(std::uint8_t quantise_steps) noexcept {
+  const std::uint8_t steps = quantise_steps == 0 ? 1 : quantise_steps;
+  return steps >= kStepsPerBar ? std::uint8_t{1} : static_cast<std::uint8_t>(kStepsPerBar / steps);
+}
+
+// The resolution a denominator names, or 0 when it does not divide the grid --
+// which is the parser's cue to refuse rather than to round to something the
+// person did not ask for.
+[[nodiscard]] constexpr std::uint8_t quantise_from_denominator(std::uint8_t denominator) noexcept {
+  if (denominator == 0 || denominator > kStepsPerBar || (kStepsPerBar % denominator) != 0) {
+    return 0;
+  }
+  return static_cast<std::uint8_t>(kStepsPerBar / denominator);
+}
 
 // Where a hit belongs.
 struct HitPlacement {
@@ -80,6 +107,19 @@ struct HitPlacement {
 // themselves mid-loop.
 bool record_hit(rt::SequencerState& state, std::uint32_t sample_rate, std::uint8_t quantise_steps,
                 const rt::PadHit& hit) noexcept;
+
+// A tick's worth of hits, in the order they were played. Returns how many
+// landed.
+//
+// HERE RATHER THAN AS A LOOP IN THE INTERFACE, and the reason is coverage: with
+// --no-audio nothing renders, so the transport never advances and no hit is ever
+// reported -- which means the PTY session that drives the real binary CANNOT
+// reach the recording path, only the controls around it. Every line that can be
+// moved out of that gap and tested directly is a line that is not resting on
+// somebody having read it carefully.
+[[nodiscard]] std::size_t record_hits(rt::SequencerState& state, std::uint32_t sample_rate,
+                                      std::uint8_t quantise_steps,
+                                      std::span<const rt::PadHit> hits) noexcept;
 
 }  // namespace engine
 

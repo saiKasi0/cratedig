@@ -1,6 +1,7 @@
 #include "tui/app.hpp"
 
 #include "engine/engine.hpp"
+#include "engine/take.hpp"
 #include "ingest/decoder.hpp"
 #include "ingest/peak_pyramid.hpp"
 #include "ingest/slices.hpp"
@@ -466,6 +467,19 @@ int run_app(const AppOptions& options) {
   // mutable structure and rejects.
   rt::SequencerState sequencer;
 
+  // What the pattern was before the current take, so `rec undo` can put it back.
+  //
+  // A WHOLE STATE rather than a list of the steps written, because a take does
+  // more than turn steps on: overdubbing changes the velocity of a step that was
+  // already there, and replace throws the pattern away outright. Neither is
+  // undoable from a record of what was added. ~16 KB, copied once per take
+  // rather than once per note.
+  std::optional<rt::SequencerState> take_undo;
+
+  // Live hits drained from the engine this tick. A member rather than a local so
+  // the allocation happens once instead of thirty times a second.
+  std::vector<rt::PadHit> live_hits;
+
   // Published before anything renders, so that what the lane draws and what the
   // engine holds are the same object from the first frame. Without it the
   // interface would show "pattern 01, 16 steps" while the engine had no pattern
@@ -599,7 +613,11 @@ int run_app(const AppOptions& options) {
   // landed -- which is the same promise publish_pad_config() makes, and it is
   // worth keeping because a half-applied pattern is not something you would
   // diagnose quickly.
-  auto edit_sequencer = [&](const auto& mutate, std::string said) {
+  // Returns whether the edit actually landed. Ignored by everything that only
+  // wants to say something afterwards; the take recorder needs it, because a
+  // counter that went up on an edit the audio thread refused would be reporting
+  // notes that are not in the pattern.
+  auto edit_sequencer = [&](const auto& mutate, std::string said) -> bool {
     rt::SequencerState next = sequencer;
     mutate(next);
 
@@ -610,12 +628,13 @@ int run_app(const AppOptions& options) {
     // has to know, rather than every publisher guarding itself.
     if (!engine.publish_sequencer(std::make_shared<const rt::SequencerState>(next))) {
       set_message("sequencer busy — the edit did not happen, try again", true);
-      return;
+      return false;
     }
     sequencer = next;
     if (!said.empty()) {
       set_message(std::move(said), false);
     }
+    return true;
   };
 
   // The pattern the lane is showing, which is the one every edit lands in.
@@ -628,6 +647,72 @@ int run_app(const AppOptions& options) {
   // `slot N` is what says the song is still running.
   auto lane_pattern = [&]() -> std::size_t {
     return std::min<std::size_t>(sequencer.selected_pattern, rt::kMaxPatterns - 1);
+  };
+
+  // Arm or disarm the take.
+  //
+  // ARMING IS WHAT TAKES THE UNDO SNAPSHOT, not the first note. The moment the
+  // pattern becomes worth keeping a copy of is the moment somebody says they are
+  // about to play over it -- waiting for the first hit would mean a `replace`
+  // that cleared the pattern and was then played into silence had already thrown
+  // it away with nothing recorded to justify it.
+  auto set_armed = [&](bool on) {
+    if (on == state.take.armed) {
+      set_message(on ? "already recording" : "not recording", false);
+      return;
+    }
+
+    if (!on) {
+      state.take.armed = false;
+      set_message("recording off — " + std::to_string(state.take.recorded) +
+                      (state.take.recorded == 1 ? " note kept" : " notes kept"),
+                  false);
+      return;
+    }
+
+    take_undo = sequencer;
+    state.take.recorded = 0;
+
+    // NOT UNDOABLE YET, and the distinction matters. The snapshot is taken at
+    // arming because that is the last moment the old pattern exists, but there
+    // is nothing to put back until the take has actually changed something --
+    // and "take undone, the pattern is back as it was" after a take that
+    // recorded nothing is a confirmation of work that never happened. Found by
+    // the PTY session, which armed, disarmed, and was told it had undone a take.
+    //
+    // `replace` sets it below, because clearing the pattern IS the change.
+    state.take.can_undo = false;
+
+    if (state.take.replace) {
+      // Cleared HERE rather than on the first note, so that what you hear on the
+      // next pass is what you are playing into rather than the old pattern
+      // waiting to be overwritten a note at a time.
+      const std::size_t pattern = lane_pattern();
+      if (!edit_sequencer(
+              [pattern](rt::SequencerState& next) { next.patterns[pattern].steps = {}; }, "")) {
+        // The clear did not land, so neither does the arm. Recording into a
+        // pattern that was supposed to be empty and is not is the one outcome
+        // `replace` must never produce.
+        take_undo.reset();
+        return;
+      }
+      state.take.can_undo = true;
+    }
+
+    state.take.armed = true;
+
+    // The transport is what gives a hit a position; without it nothing is kept
+    // and nothing says why. Named at the moment of arming rather than left to be
+    // discovered after a bar of playing that went nowhere.
+    if (!transport_asked) {
+      set_message("recording armed — press space to roll", false);
+      return;
+    }
+    set_message(
+        state.take.replace
+            ? "recording — pattern " + std::to_string(lane_pattern() + 1) + " cleared, playing in"
+            : "recording — playing in over pattern " + std::to_string(lane_pattern() + 1),
+        false);
   };
 
   // Kept inside the pattern, which `pattern length` can shrink underneath it.
@@ -1407,6 +1492,60 @@ int run_app(const AppOptions& options) {
                                                           : command.toggle == Switch::kOn;
         edit_sequencer([on](rt::SequencerState& next) { next.metronome = on; },
                        on ? "metronome on" : "metronome off");
+        break;
+      }
+
+      case CommandKind::kRecordArm: {
+        const bool on =
+            command.toggle == Switch::kToggle ? !state.take.armed : command.toggle == Switch::kOn;
+        set_armed(on);
+        break;
+      }
+
+      case CommandKind::kRecordQuantise: {
+        // The parser already refused anything that does not divide a bar, so
+        // this cannot come back zero -- but it is checked rather than assumed,
+        // because a zero here would be a quantiser dividing by it.
+        const auto steps =
+            engine::quantise_from_denominator(static_cast<std::uint8_t>(command.count));
+        if (steps == 0) {
+          set_message("rec quant: " + std::to_string(command.count) + " does not divide a bar",
+                      true);
+          break;
+        }
+        state.take.quantise_steps = steps;
+        set_message("recording snaps to 1/" + std::to_string(command.count), false);
+        break;
+      }
+
+      case CommandKind::kRecordReplace: {
+        const bool on =
+            command.toggle == Switch::kToggle ? !state.take.replace : command.toggle == Switch::kOn;
+        state.take.replace = on;
+        // Named for what happens NEXT TIME, because changing the mode mid-take
+        // does not retroactively clear anything -- the clear happens at arming.
+        set_message(on ? "replace — arming clears the pattern first"
+                       : "overdub — a take adds to the pattern",
+                    false);
+        break;
+      }
+
+      case CommandKind::kRecordUndo: {
+        if (!state.take.can_undo || !take_undo.has_value()) {
+          set_message("nothing to put back — no take has been recorded", true);
+          break;
+        }
+        // Disarmed by the undo, deliberately. Putting the pattern back while
+        // still recording would start overwriting it again on the next bar,
+        // which is not what anybody means by undo.
+        state.take.armed = false;
+        const rt::SequencerState before = *take_undo;
+        if (edit_sequencer([&before](rt::SequencerState& next) { next = before; },
+                           "take undone — the pattern is back as it was")) {
+          take_undo.reset();
+          state.take.can_undo = false;
+          state.take.recorded = 0;
+        }
         break;
       }
 
@@ -3052,6 +3191,20 @@ int run_app(const AppOptions& options) {
       return true;
     }
 
+    // RECORD-ARM, on `R`.
+    //
+    // Capital, because the pad map owns every lower-case letter in the four rows
+    // and `r` is pad 8. Shift is no burden for this one: arming happens between
+    // takes rather than between notes, unlike everything the pad map claims.
+    //
+    // Press only, like the transport and the panic. Holding it would arm and
+    // disarm at the terminal's repeat rate, and with `replace` set that would
+    // clear the pattern on every other repeat.
+    if (code == 'R' && press) {
+      set_armed(!state.take.armed);
+      return true;
+    }
+
     // THE PANIC. `.` reads as a full stop, is under the right hand, and is one
     // of the few keys the pad map does not claim on either screen.
     //
@@ -3213,6 +3366,41 @@ int run_app(const AppOptions& options) {
         }
       }
       static_cast<void>(engine.collect_garbage());
+
+      // THE TAKE. Live hits are drained EVERY tick, armed or not.
+      //
+      // Draining only while recording would leave a producer with no consumer
+      // the rest of the time, and the ring would fill and stay full -- so the
+      // first take after a while of ordinary playing would be missing its
+      // opening notes, with nothing to suggest why. That failure has been paid
+      // for twice already in this project (the audition ring, M4.5), and it
+      // costs one loop to avoid.
+      live_hits.clear();
+      rt::PadHit hit{};
+      while (engine.next_hit(hit)) {
+        live_hits.push_back(hit);
+      }
+
+      if (state.take.armed && !live_hits.empty()) {
+        std::size_t written = 0;
+        const std::uint32_t rate = engine.config().sample_rate;
+        const std::uint8_t quantise = state.take.quantise_steps;
+
+        // One publish for the whole tick rather than one per note. A rolled
+        // sixteenth is four hits in a frame's worth of time, and four 16 KB
+        // copies through the handoff ring to say what one could.
+        if (edit_sequencer(
+                [&](rt::SequencerState& next) {
+                  written = engine::record_hits(next, rate, quantise, live_hits);
+                },
+                "")) {
+          state.take.recorded += written;
+          if (written > 0) {
+            // The first note is what makes the take worth putting back.
+            state.take.can_undo = true;
+          }
+        }
+      }
 
       // The capability query goes out on the first tick rather than before
       // Loop(), because by now FTXUI has switched to the ALTERNATE SCREEN --

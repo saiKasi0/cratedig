@@ -48,6 +48,12 @@ struct AudioDevice::Impl {
   // diagnostic counter and nothing else is ordered by it.
   std::atomic<std::uint64_t> xruns{0};
 
+  // Callbacks delivered since the stream opened.
+  //
+  // NOT a statistic. It is what stop() uses to decide whether there is anything
+  // to drain -- see the note there. Relaxed for the same reason as xruns.
+  std::atomic<std::uint64_t> callbacks{0};
+
   std::string last_error;
 
   RtAudio& backend() {
@@ -74,6 +80,7 @@ struct AudioDevice::Impl {
 int AudioDevice::Impl::render(void* output_buffer, void* /*input_buffer*/, unsigned int frame_count,
                               double /*stream_time*/, RtAudioStreamStatus status, void* user_data) {
   auto* impl = static_cast<AudioDevice::Impl*>(user_data);
+  impl->callbacks.fetch_add(1, std::memory_order_relaxed);  // see stop()
 
   if ((status & RTAUDIO_OUTPUT_UNDERFLOW) != 0) {
     impl->xruns.fetch_add(1, std::memory_order_relaxed);  // diagnostic only
@@ -192,6 +199,7 @@ DeviceError AudioDevice::open(engine::Engine& engine, const Config& config) {
   }
 
   m_impl->block_frames = frames;
+  m_impl->callbacks.store(0, std::memory_order_relaxed);  // per stream, not per process
   return DeviceError::kNone;
 }
 
@@ -207,11 +215,28 @@ DeviceError AudioDevice::start() {
 }
 
 void AudioDevice::stop() noexcept {
-  if (m_impl->audio != nullptr && m_impl->audio->isStreamRunning()) {
-    // stopStream drains; abortStream would cut the tail off mid-block. The
-    // difference is audible on the last note.
-    static_cast<void>(m_impl->backend().stopStream());
+  if (m_impl->audio == nullptr || !m_impl->audio->isStreamRunning()) {
+    return;
   }
+
+  // A STREAM THAT NEVER CALLED BACK HAS NOTHING TO DRAIN, and waiting for it to
+  // drain anyway is a hang rather than a delay.
+  //
+  // stopStream() waits on a condition the callback signals. That is right when
+  // audio is flowing -- it is what keeps the last block from being cut off
+  // mid-note, which is audible. It is a deadlock when the callback has never
+  // run: the thing being waited for cannot happen.
+  //
+  // Not hypothetical. A macOS machine whose CoreAudio had been left holding a
+  // stale client opened and started a stream normally, parked its IO thread,
+  // and delivered nothing -- and this function then blocked for ever in
+  // pthread_cond_wait, taking the whole program with it. Found by a sample of a
+  // hung test process, having first been mistaken for a slow test.
+  if (m_impl->callbacks.load(std::memory_order_relaxed) == 0) {
+    static_cast<void>(m_impl->backend().abortStream());
+    return;
+  }
+  static_cast<void>(m_impl->backend().stopStream());
 }
 
 void AudioDevice::close() noexcept {
@@ -231,6 +256,10 @@ bool AudioDevice::is_running() const noexcept {
 
 std::uint32_t AudioDevice::actual_block_frames() const noexcept {
   return m_impl->block_frames;
+}
+
+std::uint64_t AudioDevice::callback_count() const noexcept {
+  return m_impl->callbacks.load(std::memory_order_relaxed);
 }
 
 std::uint64_t AudioDevice::xrun_count() const noexcept {
