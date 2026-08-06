@@ -374,6 +374,19 @@ TEST_CASE("PERFORM renders at the 100x30 design grid", "[tui]") {
     check_snapshot("perform_recording_100x30", state, 100, 30);
   }
 
+  SECTION("capturing audio while playing a pattern in") {
+    // BOTH AT ONCE, which is the case the two indicators exist to keep apart:
+    // resampling the master while playing a part in is an ordinary thing to do,
+    // and one "recording" light covering both would be unreadable exactly then.
+    tui::UiState state = playing_state(100);
+    state.tab = tui::PanelTab::kPattern;
+    state.pattern = live_pattern();
+    state.take.armed = true;
+    state.capture.recording = true;
+    state.capture.seconds = 12.5F;
+    check_snapshot("perform_capturing_100x30", state, 100, 30);
+  }
+
   SECTION("pattern tab, longer than the lane") {
     // A 32-step pattern in a 16-step lane. The caption must SAY it is showing
     // part of it -- drawing the first half silently would make the second half

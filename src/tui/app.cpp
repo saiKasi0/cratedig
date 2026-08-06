@@ -140,6 +140,14 @@ constexpr float kTempoSureEnough = 0.6F;
 // is checked against it afterwards.
 constexpr std::uint32_t kMaxBlockFrames = 8'192;
 
+// How much of what came BEFORE a threshold crossing a capture keeps.
+//
+// 250 ms, which is a quarter of the buffer rt::Recorder is given, so asking for
+// it can never be the thing that limits it. It exists because a threshold
+// cannot begin before the threshold: without pre-roll every triggered take
+// opens on a step from silence to the trigger level, which is a click.
+constexpr std::size_t kCapturePreRollMs = 250;
+
 // ~30 Hz. The design is dense but calm (docs/design/DESIGN_BRIEF.md) and nothing
 // on screen changes faster than the eye reads it, so a higher rate would only
 // spend CPU that the audio thread would rather have.
@@ -479,6 +487,22 @@ int run_app(const AppOptions& options) {
   // Live hits drained from the engine this tick. A member rather than a local so
   // the allocation happens once instead of thirty times a second.
   std::vector<rt::PadHit> live_hits;
+
+  // Audio capture, control side.
+  //
+  // WHAT TO DO WHEN THE TAKE FINISHES, rather than doing it at the moment the
+  // verb is typed. Stopping is a message: the audio thread applies it at the top
+  // of a block and only then hands back the last chunk, so `capture stop` cannot
+  // build a sample there and then. It records an intention, and the frame tick
+  // acts on it once Engine::take_complete() says everything has arrived.
+  enum class CaptureFinish : std::uint8_t { kNone, kKeep, kDrop };
+  CaptureFinish capture_finish = CaptureFinish::kNone;
+  rt::RecordSource capture_source = rt::RecordSource::kMaster;
+
+  // Numbered rather than named after a clock. The pool keys on path, so two
+  // takes need two distinct ones -- and "take 3" is what a person would call it
+  // anyway.
+  std::size_t takes_made = 0;
 
   // Published before anything renders, so that what the lane draws and what the
   // engine holds are the same object from the first frame. Without it the
@@ -1549,6 +1573,73 @@ int run_app(const AppOptions& options) {
         break;
       }
 
+      case CommandKind::kCaptureSource: {
+        if (engine.record_state() != rt::RecordState::kIdle) {
+          set_message("capture source: stop the take first", true);
+          break;
+        }
+        capture_source =
+            command.text == "input" ? rt::RecordSource::kInput : rt::RecordSource::kMaster;
+        state.capture.master = capture_source == rt::RecordSource::kMaster;
+        set_message(state.capture.master
+                        ? "capture records the master — what you hear, mixer and all"
+                        : "capture records the input",
+                    false);
+        break;
+      }
+
+      case CommandKind::kCaptureArm: {
+        const float threshold = tui::detail::db_to_linear(command.decibels);
+        const std::size_t preroll =
+            (static_cast<std::size_t>(engine.config().sample_rate) * kCapturePreRollMs) / 1000;
+        if (!engine.arm_recording(capture_source, threshold, preroll)) {
+          set_message("capture: there is a take waiting — :capture drop it first", true);
+          break;
+        }
+        capture_finish = CaptureFinish::kNone;
+        set_message("capture armed at " +
+                        detail::with_precision(static_cast<double>(command.decibels), 1) +
+                        " dB — it starts itself",
+                    false);
+        break;
+      }
+
+      case CommandKind::kCaptureStart: {
+        const bool running = engine.record_state() != rt::RecordState::kIdle;
+        const bool start =
+            command.toggle == Switch::kToggle ? !running : command.toggle == Switch::kOn;
+        if (start) {
+          if (!engine.start_recording(capture_source)) {
+            set_message("capture: there is a take waiting — :capture drop it first", true);
+            break;
+          }
+          capture_finish = CaptureFinish::kNone;
+          if (!audio_running) {
+            set_message("capture: no audio device, so nothing renders and nothing is captured",
+                        true);
+            break;
+          }
+          set_message(state.capture.master ? "capturing the master" : "capturing the input", false);
+          break;
+        }
+
+        if (!running) {
+          set_message("nothing is being captured", false);
+          break;
+        }
+        // The take is not finished HERE. See CaptureFinish.
+        static_cast<void>(engine.stop_recording());
+        capture_finish = CaptureFinish::kKeep;
+        break;
+      }
+
+      case CommandKind::kCaptureDrop:
+        if (engine.record_state() != rt::RecordState::kIdle) {
+          static_cast<void>(engine.stop_recording());
+        }
+        capture_finish = CaptureFinish::kDrop;
+        break;
+
       case CommandKind::kStop:
         if (command.pad == 0) {
           panic();
@@ -2015,6 +2106,18 @@ int run_app(const AppOptions& options) {
     state.current_file = current;
 
     state.active_voices = engine.active_voices();
+
+    // What the capture lane is doing, straight off the engine's telemetry.
+    //
+    // `lost` is NOT cleared when the take ends. A hole in a recording cannot be
+    // repaired afterwards, so the count stays up until the next take begins,
+    // which is the only moment it stops being about the take you have.
+    state.capture.recording = telemetry.record_state == rt::RecordState::kRecording;
+    state.capture.armed = telemetry.record_state == rt::RecordState::kArmed;
+    state.capture.master = capture_source == rt::RecordSource::kMaster;
+    state.capture.seconds = static_cast<float>(telemetry.recorded_frames) /
+                            static_cast<float>(std::max(engine.config().sample_rate, 1U));
+    state.capture.lost = telemetry.record_dropped_frames;
 
     // A preview that ran to its end is no longer the thing space would stop.
     // Without this the toggle would refuse to replay the last file you heard.
@@ -3366,6 +3469,54 @@ int run_app(const AppOptions& options) {
         }
       }
       static_cast<void>(engine.collect_garbage());
+
+      // CAPTURE. Drained every tick while a take is running, for the same
+      // reason as the hit ring below and with a harder consequence: the chunk
+      // pool holds 2.7 seconds, and a collector that waits until the end gets
+      // the first 2.7 seconds of the take and a drop count for the rest.
+      static_cast<void>(engine.collect_take());
+
+      if (capture_finish != CaptureFinish::kNone && engine.take_complete()) {
+        const std::size_t frames = engine.take_frames();
+        const bool keep = capture_finish == CaptureFinish::kKeep;
+        capture_finish = CaptureFinish::kNone;
+
+        if (!keep) {
+          engine.discard_take();
+          set_message("capture dropped", false);
+        } else if (frames == 0) {
+          // Not an error, and not silently nothing either: a stop that produced
+          // no audio has a cause -- no device, or the threshold never crossed --
+          // and saying "0 frames" is what points at it.
+          engine.discard_take();
+          set_message("capture: nothing was recorded", true);
+        } else {
+          // THE TAKE BECOMES A FILE IN THE CRATE, rather than going straight to
+          // a pad. Everything else that arrives as audio does that, so a take
+          // gets `:chop`, EDIT, the browser and `:slot assign` for free instead
+          // of a second path that would have to grow each of them again.
+          std::shared_ptr<rt::Sample> sample = engine.build_take();
+          engine.discard_take();
+
+          const std::string name = "take " + std::to_string(++takes_made);
+          ingest::PeakPyramid built =
+              sample == nullptr ? ingest::PeakPyramid{} : ingest::PeakPyramid::build(*sample);
+          const ingest::FileId id = sample == nullptr
+                                        ? ingest::kNoFile
+                                        : pool.add(std::move(sample), std::filesystem::path{name},
+                                                   ingest::SliceSet{}, std::move(built));
+          if (id == ingest::kNoFile) {
+            set_message("capture: could not add the take to the crate", true);
+          } else {
+            current = id;
+            show_current(last_columns);
+            const double seconds = static_cast<double>(frames) /
+                                   static_cast<double>(std::max(engine.config().sample_rate, 1U));
+            set_message(name + " — " + detail::with_precision(seconds, 2) + "s in the crate",
+                        false);
+          }
+        }
+      }
 
       // THE TAKE. Live hits are drained EVERY tick, armed or not.
       //

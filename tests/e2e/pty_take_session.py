@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Arming a take, and seeing that the machine is listening.
 
+Covers BOTH recording features, because the one thing that has to stay true of
+them is that they are separate: `R` and `:rec` play a pattern in, `:capture`
+records audio, and they share no verb, no key and no indicator. Testing them in
+one session is what makes "these two do not overlap" an assertion rather than an
+intention.
+
 tests/unit/live_take_test.cpp proves that hits become steps, and
 tests/unit/take_test.cpp proves the quantiser. Both of those run an engine in a
 loop with no terminal in the way. Every assertion in them would still pass with
@@ -175,6 +181,59 @@ def main() -> int:
         said = mode_line(screen_now())
         if "nothing to put back" not in said:
             failures.append(f"rec undo with no take did not say so: {said!r}")
+
+    # -- recording AUDIO, which is a different feature ------------------------
+    #
+    # `capture` and `rec` share nothing: not a verb, not a key, not a line on
+    # the mode line. Asserting that here is what keeps them apart, because the
+    # one thing this milestone has already proved is that a single word for both
+    # is ambiguous enough to build the wrong feature from.
+
+    if alive:
+        alive = send(":capture source input\r", 1.0)
+        said = mode_line(screen_now())
+        if "input" not in said:
+            failures.append(f"capture source input was not acknowledged: {said!r}")
+
+        alive = send(":capture source master\r", 1.0)
+        said = mode_line(screen_now())
+        if "master" not in said:
+            failures.append(f"capture source master was not acknowledged: {said!r}")
+
+    if alive:
+        # ARMING WORKS WITH NO DEVICE, and that is not an accident: the command
+        # ring is drained by Engine::adopt_offline() on the frame tick, which is
+        # the mechanism that stops a producer with no consumer filling it. So
+        # this reaches the recorder's state machine for real.
+        alive = send(":capture arm -12\r", 1.0)
+        said = mode_line(screen_now())
+        if "armed" not in said:
+            failures.append(f"capture arm did not arm: {said!r}")
+        line = facts()
+        if "cap armed" not in line:
+            failures.append(f"armed, but the line does not show it: {line!r}")
+        # And it is NOT the pattern recorder. Two features, two indicators.
+        if "rec 1/" in line:
+            failures.append(f"capture armed the pattern recorder as well: {line!r}")
+
+    if alive:
+        alive = send(":capture drop\r", 1.0)
+        line = facts()
+        if "cap" in line:
+            failures.append(f"capture drop left the capture running: {line!r}")
+
+    if alive:
+        # With --no-audio nothing renders, so nothing can be captured -- and the
+        # program says so rather than presenting an empty take as a take.
+        alive = send(":capture start\r", 1.0)
+        said = mode_line(screen_now())
+        if "no audio device" not in said:
+            failures.append(f"capture with no device did not say so: {said!r}")
+
+        alive = send(":capture stop\r", 2.0)
+        said = mode_line(screen_now())
+        if "nothing was recorded" not in said:
+            failures.append(f"an empty take was not reported as empty: {said!r}")
 
     if alive:
         # The menu offers it, which is the only way somebody finds a verb they

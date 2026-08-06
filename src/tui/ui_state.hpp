@@ -513,6 +513,32 @@ struct TakeState {
   std::size_t recorded = 0;
 };
 
+// Recording AUDIO, which is not the same feature as TakeState above.
+//
+// One of them plays a pattern in and the other records sound. They are drawn
+// separately, named separately and can be on at once -- resampling the master
+// while playing a part in is an ordinary thing to want, and a single "recording"
+// indicator covering both would be unreadable at exactly that moment.
+struct CaptureState {
+  // Keeping audio right now.
+  bool recording = false;
+
+  // Listening for a level, keeping nothing yet.
+  bool armed = false;
+
+  // How much has been captured, in seconds.
+  float seconds = 0.0F;
+
+  // Whether it is tapping the master or the input.
+  bool master = true;
+
+  // Frames the pool could not hold. NON-ZERO MEANS THE TAKE HAS HOLES: the
+  // missing frames are absent rather than silent, so what was either side of
+  // them is spliced together. It stays on screen after the take ends, because
+  // the take is what it is about and there is no fixing it afterwards.
+  std::uint64_t lost = 0;
+};
+
 struct UiState {
   std::string version;
 
@@ -590,6 +616,9 @@ struct UiState {
 
   // Playing a pattern in rather than typing it. See TakeState.
   TakeState take;
+
+  // Recording audio. See CaptureState, and note that it is a different feature.
+  CaptureState capture;
 
   bool playing = false;
   std::size_t playhead_frame = 0;

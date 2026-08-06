@@ -92,6 +92,14 @@ constexpr std::array kPhrases{
     Phrase{"rec overdub", "a take adds to the pattern"},
     Phrase{"rec undo", "put the pattern back as it was"},
 
+    // Recording audio, which is a different thing from `rec` above.
+    Phrase{"capture", "record audio — the master, or an input"},
+    Phrase{"capture start", "begin a take"},
+    Phrase{"capture stop", "end it and put it in the crate"},
+    Phrase{"capture arm", "start by itself when the sound comes in"},
+    Phrase{"capture source", "master or input"},
+    Phrase{"capture drop", "end a take and throw it away"},
+
     // Getting about.
     Phrase{"perform", "back to PERFORM"},
     Phrase{"quit", "leave cratedig"},

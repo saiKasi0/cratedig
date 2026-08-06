@@ -1000,6 +1000,19 @@ std::span<const float> Engine::take_channel(std::uint16_t channel) const noexcep
   return std::span<const float>{m_take[channel]};
 }
 
+std::shared_ptr<rt::Sample> Engine::build_take() const {
+  if (m_take_frames == 0 || m_record_channels == 0) {
+    return nullptr;
+  }
+  auto sample =
+      std::make_shared<rt::Sample>(m_config.sample_rate, m_record_channels, m_take_frames);
+  for (std::uint16_t channel = 0; channel < m_record_channels; ++channel) {
+    const std::vector<float>& source = m_take[channel];
+    std::copy(source.begin(), source.end(), sample->mutable_channel(channel).begin());
+  }
+  return sample;
+}
+
 void Engine::discard_take() noexcept {
   // The chunks still in flight too, not just the assembled vectors. A take that
   // is thrown away with audio still in the full ring would have that audio

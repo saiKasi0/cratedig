@@ -967,3 +967,59 @@ TEST_CASE("quantise resolutions convert both ways", "[unit]") {
     CHECK(engine::quantise_denominator(steps) == denominator);
   }
 }
+
+// -- recording audio, which is not `rec` ---------------------------------------
+
+TEST_CASE("capture is a different verb from rec", "[unit]") {
+  // THE WHOLE POINT OF THE SEPARATION. One plays a pattern in, the other
+  // records sound, and a single word for both is what sent this milestone two
+  // commits in the wrong direction. Nothing about them should overlap.
+  CHECK(tui::parse_command("rec").kind == tui::CommandKind::kRecordArm);
+  CHECK(tui::parse_command("capture").kind == tui::CommandKind::kCaptureStart);
+}
+
+TEST_CASE("capture starts, stops and flips", "[unit]") {
+  CHECK(tui::parse_command("capture").toggle == tui::Switch::kToggle);
+  CHECK(tui::parse_command("capture start").toggle == tui::Switch::kOn);
+  CHECK(tui::parse_command("capture stop").toggle == tui::Switch::kOff);
+  CHECK(tui::parse_command("capture drop").kind == tui::CommandKind::kCaptureDrop);
+}
+
+TEST_CASE("capture source names a tap", "[unit]") {
+  const tui::Command master = tui::parse_command("capture source master");
+  REQUIRE(master.kind == tui::CommandKind::kCaptureSource);
+  CHECK(master.text == "master");
+  CHECK(tui::parse_command("capture source input").text == "input");
+
+  CHECK(tui::parse_command("capture source").kind == tui::CommandKind::kError);
+  CHECK(tui::parse_command("capture source speakers").kind == tui::CommandKind::kError);
+}
+
+TEST_CASE("capture arm defaults to a level a threshold can be", "[unit]") {
+  // Bare `arm` has to pick something, and zero would mean "start on anything" --
+  // which for a threshold whose job is ignoring room noise is the one answer
+  // that cannot be right.
+  const tui::Command bare = tui::parse_command("capture arm");
+  REQUIRE(bare.kind == tui::CommandKind::kCaptureArm);
+  CHECK(bare.decibels == tui::kDefaultCaptureThresholdDb);
+  CHECK(bare.decibels < 0.0F);
+
+  CHECK(tui::parse_command("capture arm -12").decibels == Catch::Approx(-12.0F));
+}
+
+TEST_CASE("capture arm refuses a threshold nothing can cross", "[unit]") {
+  // Above full scale there is no signal that reaches it, so the capture would
+  // wait for ever. Refused with the reason rather than accepted and silent.
+  const tui::Command out = tui::parse_command("capture arm 6");
+  REQUIRE(out.kind == tui::CommandKind::kError);
+  CHECK(out.message.find("full scale") != std::string::npos);
+
+  CHECK(tui::parse_command("capture arm loud").kind == tui::CommandKind::kError);
+}
+
+TEST_CASE("capture says what it does not understand", "[unit]") {
+  const tui::Command out = tui::parse_command("capture sideways");
+  REQUIRE(out.kind == tui::CommandKind::kError);
+  CHECK(out.message.find("start") != std::string::npos);
+  CHECK(out.message.find("source") != std::string::npos);
+}

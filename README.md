@@ -15,10 +15,14 @@ mark a bit of it and put that bit on a pad. Tab completes commands and paths.
 
 Play a pattern in rather than typing it: `R` arms, and what you hit on the pads
 while the transport rolls lands in the pattern, snapped as hard or as softly as
-you ask.
+you ask. Resample yourself with `:capture` — the take arrives in the crate as a
+file like any other, ready to chop and put back on a pad.
 
-**Not yet:** recording your own audio from an input (M6 — see *What is not
-built* below), export, and yt-dlp import.
+**`rec` and `capture` are different things.** One plays a pattern in; the other
+records sound.
+
+**Not yet:** recording from an audio *input* (M6 — see *What is not built*
+below), export, and yt-dlp import.
 
 ## Quick start
 
@@ -204,6 +208,10 @@ keys to mean "put it here". `E` is capital because `e` is pad 7.
 | `:rec quant N` | how hard to snap what you play: 16, 8, 4, 2 or 1 |
 | `:rec replace` · `:rec overdub` | a take clears the pattern first · a take adds to it |
 | `:rec undo` | put the pattern back as it was before the take |
+| `:capture [start\|stop]` | record audio; bare flips it. Stopping puts the take in the crate |
+| `:capture source master\|input` | what to record — the mix you hear, or an input |
+| `:capture arm [dB]` | start by itself when the sound arrives (-24 dB by default) |
+| `:capture drop` | end a take and throw it away |
 | `:stop [N]` | stop pad N, or everything (and the transport) |
 | `:q` `:quit` | quit |
 
@@ -289,7 +297,7 @@ point of a status section.
 
 | | |
 |---|---|
-| **Recording your own audio** | M6. Playing a *pattern* in works today (`R`); capturing *audio* off an input or off the master does not reach the interface yet. Material comes from a file on disk; `:load` is the only way in. |
+| **Recording from an input** | M6. `:capture source master` works — resampling what the sampler itself plays. `input` needs a duplex stream in `src/io/`, which is not built, so it captures nothing today. |
 | **Export / bounce** | M6. `Engine::render()` already works with no device, which is what an offline bounce needs, but nothing writes a file yet. |
 | **yt-dlp import** | M6, using a yt-dlp you install yourself (see `docs/LICENSING.md`). |
 | **Banks and a 32-pad mode** | M6. Sixteen pads at a time; `:slot assign 17-32 1` reaches further slices in one line. |

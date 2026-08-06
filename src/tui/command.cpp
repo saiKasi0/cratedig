@@ -557,6 +557,62 @@ namespace {
   return true;
 }
 
+// `capture`, `capture start|stop|drop`, `capture source master|input`,
+// `capture arm -24`.
+//
+// A SEPARATE VERB FROM `rec`, and the separation is the point rather than
+// tidiness: one of them plays a pattern in and the other records sound, and the
+// single word "record" covering both is what sent this milestone two commits in
+// the wrong direction. Nothing is shared between them, so nothing can be
+// confused for the other later.
+[[nodiscard]] Command parse_capture(const std::vector<std::string_view>& words) {
+  if (words.size() < 2) {
+    return command_of(CommandKind::kCaptureStart);  // bare flips it
+  }
+
+  if (words[1] == "start" || words[1] == "stop") {
+    Command out = command_of(CommandKind::kCaptureStart);
+    out.toggle = words[1] == "start" ? Switch::kOn : Switch::kOff;
+    return out;
+  }
+
+  if (words[1] == "drop") {
+    return command_of(CommandKind::kCaptureDrop);
+  }
+
+  if (words[1] == "source") {
+    if (words.size() < 3) {
+      return error("capture source needs master or input");
+    }
+    if (words[2] != "master" && words[2] != "input") {
+      return error("capture source: " + std::string{words[2]} + " is not master or input");
+    }
+    Command out = command_of(CommandKind::kCaptureSource);
+    out.text = std::string{words[2]};
+    return out;
+  }
+
+  if (words[1] == "arm") {
+    Command out = command_of(CommandKind::kCaptureArm);
+    // A DEFAULT THAT IS NOT SILENCE. Bare `capture arm` has to pick a level,
+    // and zero would mean "start on anything", which for a threshold whose job
+    // is ignoring room noise is the one answer that cannot be right.
+    out.decibels = kDefaultCaptureThresholdDb;
+    if (words.size() >= 3) {
+      if (!parse_decimal(words[2], out.decibels)) {
+        return error("capture arm: " + std::string{words[2]} + " is not a level in dB");
+      }
+      if (out.decibels > 0.0F) {
+        return error("capture arm: " + std::string{words[2]} +
+                     " dB is above full scale — a threshold nothing can cross");
+      }
+    }
+    return out;
+  }
+
+  return error("capture: " + std::string{words[1]} + " is not start, stop, drop, arm or source");
+}
+
 // A bus, as the letter the screen shows. 0-based on the way out.
 [[nodiscard]] bool parse_bus_letter(std::string_view text, std::uint8_t& out) {
   if (text.size() != 1) {
@@ -1028,6 +1084,9 @@ Command parse_command(std::string_view line) {
   }
   if (verb == "song") {
     return parse_song(words);
+  }
+  if (verb == "capture") {
+    return parse_capture(words);
   }
   if (verb == "rec") {
     return parse_rec(words);

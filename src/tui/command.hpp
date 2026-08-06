@@ -56,6 +56,17 @@ enum class CommandKind : std::uint8_t {
   kRecordReplace,   // `toggle`: on replaces the pattern, off overdubs onto it
   kRecordUndo,      // put the pattern back as it was before the take
 
+  // Recording AUDIO, M6. A different feature from the four above and therefore
+  // a different word.
+  //
+  // `rec` plays a pattern in; `capture` records sound. Calling both of them
+  // "record" is what cost this milestone two commits built against the wrong
+  // reading of one sentence, so they do not share a verb, a key or a noun.
+  kCaptureStart,   // `toggle`: bare flips it, on starts, off stops and keeps
+  kCaptureSource,  // `text` is "master" or "input"
+  kCaptureArm,     // `decibels` is the level that starts it by itself
+  kCaptureDrop,    // stop and throw the take away
+
   // Stop sounding voices. `pad` is 1-based as typed, or 0 for all of them --
   // and unlike `pad gate`, "all" here also stops the transport, because a
   // running sequencer would retrigger within a step and the silence would last
@@ -97,6 +108,13 @@ enum class CommandKind : std::uint8_t {
 
   kQuit,
 };
+
+// Where a threshold-armed capture starts by itself, when no level is typed.
+//
+// -24 dBFS: comfortably above the noise floor of anything worth sampling and
+// comfortably below the level a record actually plays at, which is what a
+// threshold has to sit between to be useful rather than merely present.
+inline constexpr float kDefaultCaptureThresholdDb = -24.0F;
 
 // `on`, `off`, or neither -- which is a request to flip whatever it is now.
 //

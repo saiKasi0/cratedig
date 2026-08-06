@@ -520,6 +520,19 @@ class Engine {
 
   [[nodiscard]] std::uint16_t take_channels() const noexcept { return m_record_channels; }
 
+  // CONTROL THREAD. The collected take as a Sample, or null when there is none.
+  //
+  // A CONVENIENCE OVER take_channel(), not a replacement for it: the spans stay
+  // because a caller may want to write a file or compute something without a
+  // second copy of the audio. This exists because the copy loop is otherwise
+  // written out in the interface, where no test can reach it -- and a loop that
+  // fills a Sample one channel at a time is exactly the kind of thing that is
+  // right until somebody edits it.
+  //
+  // Allocates, on the control thread, where that is legal. Does NOT clear the
+  // take; call discard_take() when you have what you want.
+  [[nodiscard]] std::shared_ptr<rt::Sample> build_take() const;
+
   // CONTROL THREAD. Throws the assembled take away and drains anything still in
   // flight, so the recorder can be armed again.
   void discard_take() noexcept;

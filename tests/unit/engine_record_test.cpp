@@ -447,3 +447,55 @@ TEST_CASE("Engine adopts record commands with nothing rendering", "[unit]") {
   }
   REQUIRE(eng.record_state() == rt::RecordState::kIdle);
 }
+
+TEST_CASE("Engine builds a take into a Sample the crate can hold", "[unit]") {
+  // The copy the interface used to write out by hand, where a test can reach
+  // it. A loop that fills a Sample one channel at a time is right until
+  // somebody edits it, and there was nothing to notice if they did.
+  constexpr std::size_t kBlock = 64;
+  constexpr std::size_t kBlocks = 20;
+
+  Duplex duplex{kBlock};
+  engine::Engine eng{test_config()};
+  REQUIRE(eng.start_recording(rt::RecordSource::kInput));
+
+  std::vector<std::vector<float>> expected(kChannels);
+  for (std::size_t block = 0; block < kBlocks; ++block) {
+    for (std::size_t channel = 0; channel < kChannels; ++channel) {
+      for (std::size_t frame = 0; frame < kBlock; ++frame) {
+        // Distinct per channel, so a build that filled both from channel 0
+        // would be visible rather than plausible.
+        const auto value = static_cast<float>((block * kBlock) + frame) * 0.001F +
+                           (static_cast<float>(channel) * 100.0F);
+        duplex.write_input(channel, frame, value);
+        expected[channel].push_back(value);
+      }
+    }
+    eng.render(duplex.out(), duplex.in(), kBlock);
+    static_cast<void>(eng.collect_take());
+  }
+  REQUIRE(eng.stop_recording());
+  eng.render(duplex.out(), duplex.in(), kBlock);
+  static_cast<void>(eng.collect_take());
+
+  const std::shared_ptr<rt::Sample> sample = eng.build_take();
+  REQUIRE(sample != nullptr);
+  CHECK(sample->num_frames() == kBlock * kBlocks);
+  CHECK(sample->num_channels() == kChannels);
+  CHECK(sample->sample_rate() == kSampleRate);
+
+  for (std::uint16_t channel = 0; channel < kChannels; ++channel) {
+    const std::span<const float> audio = sample->channel(channel);
+    REQUIRE(audio.size() == expected[channel].size());
+    for (std::size_t frame = 0; frame < audio.size(); ++frame) {
+      REQUIRE(audio[frame] == expected[channel][frame]);
+    }
+  }
+
+  // BUILDING DOES NOT CONSUME. The caller may want the spans as well -- to
+  // write a file without a second copy of the audio -- so the take survives
+  // until it is discarded.
+  CHECK(eng.take_frames() == kBlock * kBlocks);
+  eng.discard_take();
+  CHECK(eng.build_take() == nullptr);
+}

@@ -263,6 +263,12 @@ TEST_CASE("every phrase offered is a phrase the parser understands", "[unit]") {
       {"rec replace", ""},
       {"rec overdub", ""},
       {"rec undo", ""},
+      {"capture", ""},
+      {"capture start", ""},
+      {"capture stop", ""},
+      {"capture arm", ""},
+      {"capture source", " master"},
+      {"capture drop", ""},
       {"perform", ""},
       {"quit", ""},
   };

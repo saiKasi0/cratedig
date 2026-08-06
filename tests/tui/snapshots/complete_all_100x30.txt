@@ -26,5 +26,5 @@
     chop reset           back to one slice                                                          
     chop tune            adjust the chop while watching it                                          
     slot assign          bind slices to pads                                                        
-    38 more                                                                                         
+    44 more                                                                                         
   tab next · shift-tab back · enter run · esc close                                                 

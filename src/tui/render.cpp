@@ -833,6 +833,22 @@ constexpr std::size_t kLaneRows = 8;  // pads per column
     }
   }
 
+  // CAPTURE, beside the pattern recorder rather than instead of it. Both can be
+  // on: resampling the master while playing a part in is an ordinary thing to
+  // do, and one indicator covering both would be unreadable exactly then.
+  if (state.capture.recording) {
+    facts.push_back("cap " + with_precision(static_cast<double>(state.capture.seconds), 1) + "s");
+  } else if (state.capture.armed) {
+    facts.emplace_back("cap armed");
+  }
+
+  // Frames the take lost, and it OUTLIVES the take. A hole in a recording
+  // cannot be repaired afterwards, so the number stays up until something
+  // clears it rather than vanishing with the state that produced it.
+  if (state.capture.lost > 0) {
+    facts.push_back("cap lost " + std::to_string(state.capture.lost));
+  }
+
   // THE FACTS THAT MUST SURVIVE at any width: the tempo, the transport, and the
   // record state when there is one. Everything after this point is welcome to
   // be dropped by the packer.
