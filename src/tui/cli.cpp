@@ -27,21 +27,35 @@ void print_version() {
 
 int list_devices() {
   const io::AudioDevice device;
-  const std::vector<io::DeviceInfo> devices = device.output_devices();
-
   std::cout << "audio API: " << device.api_name() << '\n';
-  if (devices.empty()) {
+
+  const std::vector<io::DeviceInfo> outputs = device.output_devices();
+  std::cout << "output:\n";
+  if (outputs.empty()) {
     // Not an error status: a container legitimately has none, and `cratedig
     // --list-devices` succeeding with an empty list is more useful in a script
     // than a non-zero exit.
-    std::cout << "no output devices found\n";
-    return 0;
+    std::cout << "  none found\n";
   }
-
-  for (const io::DeviceInfo& info : devices) {
+  for (const io::DeviceInfo& info : outputs) {
     std::cout << "  [" << info.id << "] " << info.name << "  " << info.output_channels << " ch, "
               << info.preferred_sample_rate << " Hz"
               << (info.is_default_output ? "  (default)" : "") << '\n';
+  }
+
+  // LISTED SEPARATELY, because `--input-device` takes one of these and the
+  // numbers are not interchangeable: a device can capture and not play, or
+  // play and not capture, and picking an id off the wrong list is a failure at
+  // open() with nothing to explain it.
+  const std::vector<io::DeviceInfo> inputs = device.input_devices();
+  std::cout << "input:\n";
+  if (inputs.empty()) {
+    std::cout << "  none found\n";
+  }
+  for (const io::DeviceInfo& info : inputs) {
+    std::cout << "  [" << info.id << "] " << info.name << "  " << info.input_channels << " ch, "
+              << info.preferred_sample_rate << " Hz" << (info.is_default_input ? "  (default)" : "")
+              << '\n';
   }
   return 0;
 }

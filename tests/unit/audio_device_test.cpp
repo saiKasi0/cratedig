@@ -8,7 +8,9 @@
 #include "io/audio_device.hpp"
 
 #include "engine/engine.hpp"
+#include "rt/recorder.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -37,6 +39,97 @@ TEST_CASE("AudioDevice enumeration tolerates having no devices", "[unit]") {
     CHECK_FALSE(info.name.empty());
   }
   CHECK(device.has_output_device() == !devices.empty());
+}
+
+TEST_CASE("AudioDevice enumerates inputs separately from outputs", "[unit]") {
+  const io::AudioDevice device;
+  const std::vector<io::DeviceInfo> inputs = device.input_devices();
+
+  for (const io::DeviceInfo& info : inputs) {
+    CHECK(info.input_channels > 0);
+    CHECK_FALSE(info.name.empty());
+  }
+  CHECK(device.has_input_device() == !inputs.empty());
+
+  // The two lists are FILTERS over one enumeration, not two enumerations, so a
+  // duplex device appears in both and a speaker in only one. Checking the
+  // relationship rather than the counts is what makes this runnable in a
+  // container, where both are empty and the relationship still holds.
+  const std::vector<io::DeviceInfo> outputs = device.output_devices();
+  for (const io::DeviceInfo& info : outputs) {
+    const bool listed_as_input =
+        std::any_of(inputs.begin(), inputs.end(),
+                    [&](const io::DeviceInfo& other) { return other.id == info.id; });
+    CHECK(listed_as_input == (info.input_channels > 0));
+  }
+}
+
+TEST_CASE("AudioDevice reports a missing input rather than opening half a stream", "[unit]") {
+  const engine::Engine::Config config{
+      .sample_rate = 48'000, .num_channels = 2, .max_block_frames = 2'048, .seed = 0};
+  engine::Engine eng{config};
+  io::AudioDevice device;
+
+  io::AudioDevice::Config duplex{};
+  duplex.sample_rate = 48'000;
+  duplex.num_channels = 2;
+  duplex.block_frames = 256;
+  duplex.input_channels = 2;
+
+  const io::DeviceError status = device.open(eng, duplex);
+
+  if (!device.has_output_device()) {
+    CHECK(status == io::DeviceError::kNoDeviceAvailable);
+  } else if (!device.has_input_device()) {
+    // ITS OWN CODE, and this is why it exists: a machine with speakers and no
+    // microphone must be told that recording is unavailable, not that audio is.
+    CHECK(status == io::DeviceError::kNoInputDeviceAvailable);
+    CHECK_FALSE(device.is_open());
+    CHECK(device.input_channels() == 0);
+  } else if (status == io::DeviceError::kNone) {
+    CHECK(device.is_open());
+    CHECK(device.input_channels() == 2);
+    device.close();
+    // Closing forgets the input side too -- a stale count would have the
+    // callback build channel pointers into a buffer that no longer exists.
+    CHECK(device.input_channels() == 0);
+  } else {
+    // A MONO MICROPHONE ASKED FOR TWO CHANNELS lands here, which is the
+    // ordinary case on a laptop rather than an exotic one. What matters is
+    // that the refusal leaves NOTHING open: RtAudio probes the output first
+    // and returns on a failed input probe without undoing it, so without the
+    // cleanup in open() this reported failure and is_open() at the same time.
+    INFO("duplex open failed: " << io::describe(status) << " (" << device.last_error() << ")");
+    CHECK_FALSE(device.is_open());
+    CHECK(device.input_channels() == 0);
+  }
+}
+
+TEST_CASE("AudioDevice refuses an input wider than the callback's array", "[unit]") {
+  const engine::Engine::Config config{
+      .sample_rate = 48'000, .num_channels = 2, .max_block_frames = 2'048, .seed = 0};
+  engine::Engine eng{config};
+  io::AudioDevice device;
+
+  // Same reasoning as the output side: the callback builds a fixed stack array
+  // for the input too, so anything wider is refused at open() rather than
+  // overrunning it on the audio thread.
+  io::AudioDevice::Config too_wide{};
+  too_wide.num_channels = 2;
+  too_wide.input_channels = io::AudioDevice::kMaxChannels + 1;
+  CHECK(device.open(eng, too_wide) == io::DeviceError::kUnsupportedChannelCount);
+}
+
+TEST_CASE("AudioDevice opens output only by default", "[unit]") {
+  // The default has to stay what it was: every caller before M6 asked for no
+  // input, and a device layer that quietly started capturing would take a
+  // microphone permission nobody asked for.
+  const io::AudioDevice::Config defaults{};
+  CHECK(defaults.input_channels == 0);
+  CHECK(defaults.input_device_id == 0);
+
+  const io::AudioDevice device;
+  CHECK(device.input_channels() == 0);
 }
 
 TEST_CASE("AudioDevice reports rather than crashes when it cannot open", "[unit]") {
@@ -113,11 +206,85 @@ TEST_CASE("AudioDevice describes every error code", "[unit]") {
       io::DeviceError::kStartFailed,
       io::DeviceError::kAlreadyOpen,
       io::DeviceError::kNotOpen,
+      io::DeviceError::kNoInputDeviceAvailable,
   };
   for (const io::DeviceError code : codes) {
     CHECK_FALSE(io::describe(code).empty());
     CHECK(io::describe(code) != "unknown error");
   }
+}
+
+TEST_CASE("AudioDevice captures through real hardware", "[device]") {
+  // M6's acceptance for the device layer, and it needs a sound card with a
+  // capture side. Tagged [device] for that and for one more reason: opening and
+  // STARTING a real input is what asks macOS for the microphone, and a default
+  // test run must never pop a system dialog at somebody.
+  engine::Engine eng{engine::Engine::Config{
+      .sample_rate = 48'000, .num_channels = 2, .max_block_frames = 2'048, .seed = 0}};
+  io::AudioDevice device;
+
+  const std::vector<io::DeviceInfo> inputs = device.input_devices();
+  if (inputs.empty() || !device.has_output_device()) {
+    SKIP("no capture device present");
+  }
+
+  // Whatever the default input actually offers, capped at stereo -- the same
+  // negotiation run_app() does, and for the same reason: a laptop microphone is
+  // mono, and asking it for two channels fails.
+  const io::DeviceInfo* chosen = &inputs.front();
+  for (const io::DeviceInfo& info : inputs) {
+    if (info.is_default_input) {
+      chosen = &info;
+      break;
+    }
+  }
+
+  io::AudioDevice::Config config{};
+  config.sample_rate = 48'000;
+  config.num_channels = 2;
+  config.block_frames = 256;
+  config.input_channels = static_cast<std::uint16_t>(std::min(2U, chosen->input_channels));
+  config.input_device_id = chosen->id;
+
+  const io::DeviceError opened = device.open(eng, config);
+  if (opened != io::DeviceError::kNone) {
+    // Duplex across two different devices needs an aggregate device on
+    // CoreAudio, and a machine may simply refuse. Reported, not failed: this
+    // case is about the capture path working where the hardware allows it.
+    INFO("duplex open: " << io::describe(opened) << " (" << device.last_error() << ")");
+    SKIP("this machine will not open a duplex stream");
+  }
+
+  REQUIRE(device.input_channels() == config.input_channels);
+  REQUIRE(device.start() == io::DeviceError::kNone);
+  REQUIRE(eng.start_recording(rt::RecordSource::kInput));
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (eng.take_frames() < 24'000 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    static_cast<void>(eng.collect_take());
+  }
+
+  static_cast<void>(eng.stop_recording());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  static_cast<void>(eng.collect_take());
+  const std::uint64_t callbacks = device.callback_count();
+  device.stop();
+  device.close();
+
+  if (callbacks == 0) {
+    SKIP(
+        "the audio device accepted the stream and delivered no callbacks — "
+        "this machine's audio stack is not usable right now (on macOS, "
+        "`sudo killall coreaudiod` clears a wedged one)");
+  }
+
+  // Half a second of capture, through a real callback, from real hardware.
+  // NOT an assertion about the CONTENT: a silent room is a legitimate
+  // recording, and asserting on level here would fail on a muted microphone.
+  CHECK(eng.take_frames() >= 24'000);
+  CHECK(eng.telemetry().record_dropped_frames == 0);
+  CHECK(eng.build_take() != nullptr);
 }
 
 TEST_CASE("AudioDevice plays through real hardware", "[device]") {

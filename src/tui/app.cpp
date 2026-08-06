@@ -519,10 +519,40 @@ int run_app(const AppOptions& options) {
   bool audio_running = false;
 
   if (!options.no_audio) {
+    // HOW MANY CHANNELS THE INPUT ACTUALLY HAS, capped at stereo, rather than a
+    // fixed two. A laptop microphone is mono, and asking a mono device for two
+    // channels fails at open() with "the device does not support the requested
+    // channel count" -- which is a confusing way to be told the machine has a
+    // built-in mic. Measured on exactly that machine.
+    std::uint16_t input_channels = 0;
+    if (options.want_input) {
+      const std::vector<io::DeviceInfo> inputs = device.input_devices();
+      const io::DeviceInfo* chosen = nullptr;
+      for (const io::DeviceInfo& info : inputs) {
+        const bool wanted = options.input_device_id == 0 ? info.is_default_input
+                                                         : info.id == options.input_device_id;
+        if (wanted) {
+          chosen = &info;
+          break;
+        }
+      }
+      if (chosen == nullptr && options.input_device_id == 0 && !inputs.empty()) {
+        chosen = &inputs.front();  // no device claims to be the default
+      }
+      if (chosen == nullptr) {
+        std::cerr << "error: " << io::describe(io::DeviceError::kNoInputDeviceAvailable) << '\n';
+        std::cerr << "try: cratedig --list-devices, or drop --input\n";
+        return 1;
+      }
+      input_channels = static_cast<std::uint16_t>(std::min(2U, chosen->input_channels));
+    }
+
     const io::AudioDevice::Config device_config{.sample_rate = options.sample_rate,
                                                 .num_channels = 2,
                                                 .block_frames = options.block_frames,
-                                                .device_id = options.device_id};
+                                                .device_id = options.device_id,
+                                                .input_channels = input_channels,
+                                                .input_device_id = options.input_device_id};
     const io::DeviceError opened = device.open(engine, device_config);
     if (opened != io::DeviceError::kNone) {
       std::cerr << "error: " << io::describe(opened);
@@ -1576,6 +1606,18 @@ int run_app(const AppOptions& options) {
       case CommandKind::kCaptureSource: {
         if (engine.record_state() != rt::RecordState::kIdle) {
           set_message("capture source: stop the take first", true);
+          break;
+        }
+        // REFUSED RATHER THAN ACCEPTED AND SILENT. With no capture side on the
+        // stream, `source input` would set a mode that records nothing at all,
+        // and the only symptom would be an empty take with no explanation. The
+        // input is opt-in (see AppOptions::want_input), so the fix is a restart
+        // and the message says so.
+        if (command.text == "input" && device.input_channels() == 0) {
+          set_message(audio_running
+                          ? "capture source: this stream has no input — restart with --input"
+                          : "capture source: no audio device, so there is no input",
+                      true);
           break;
         }
         capture_source =

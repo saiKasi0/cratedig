@@ -13,6 +13,10 @@ take and a one-shot.
 Browse a folder, hear a file before you load it, see its waveform while it plays,
 mark a bit of it and put that bit on a pad. Tab completes commands and paths.
 
+Record an input with `cratedig --input` — a turntable, a mic, whatever is
+plugged in. It is opt-in because opening one is what makes macOS ask for the
+microphone, and a sampler should not demand one before it will start.
+
 Play a pattern in rather than typing it: `R` arms, and what you hit on the pads
 while the transport rolls lands in the pattern, snapped as hard or as softly as
 you ask. Resample yourself with `:capture` — the take arrives in the crate as a
@@ -21,8 +25,7 @@ file like any other, ready to chop and put back on a pad.
 **`rec` and `capture` are different things.** One plays a pattern in; the other
 records sound.
 
-**Not yet:** recording from an audio *input* (M6 — see *What is not built*
-below), export, and yt-dlp import.
+**Not yet:** export and yt-dlp import (M6 — see *What is not built* below).
 
 ## Quick start
 
@@ -209,7 +212,7 @@ keys to mean "put it here". `E` is capital because `e` is pad 7.
 | `:rec replace` · `:rec overdub` | a take clears the pattern first · a take adds to it |
 | `:rec undo` | put the pattern back as it was before the take |
 | `:capture [start\|stop]` | record audio; bare flips it. Stopping puts the take in the crate |
-| `:capture source master\|input` | what to record — the mix you hear, or an input |
+| `:capture source master\|input` | what to record — the mix you hear, or an input (start with `--input`) |
 | `:capture arm [dB]` | start by itself when the sound arrives (-24 dB by default) |
 | `:capture drop` | end a take and throw it away |
 | `:stop [N]` | stop pad N, or everything (and the transport) |
@@ -297,7 +300,6 @@ point of a status section.
 
 | | |
 |---|---|
-| **Recording from an input** | M6. `:capture source master` works — resampling what the sampler itself plays. `input` needs a duplex stream in `src/io/`, which is not built, so it captures nothing today. |
 | **Export / bounce** | M6. `Engine::render()` already works with no device, which is what an offline bounce needs, but nothing writes a file yet. |
 | **yt-dlp import** | M6, using a yt-dlp you install yourself (see `docs/LICENSING.md`). |
 | **Banks and a 32-pad mode** | M6. Sixteen pads at a time; `:slot assign 17-32 1` reaches further slices in one line. |

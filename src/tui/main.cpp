@@ -29,6 +29,8 @@ int run(int argc, char** argv) {
   std::uint32_t sample_rate = 48'000;
   std::uint32_t block_frames = 256;
   unsigned int device_id = 0;
+  bool want_input = false;
+  unsigned int input_device_id = 0;
   bool no_audio = false;
   bool legacy_keys = false;
   bool want_devices = false;
@@ -40,10 +42,13 @@ int run(int argc, char** argv) {
       ->capture_default_str();
   app.add_option("--device", device_id, "output device id (0 = system default)")
       ->capture_default_str();
+  app.add_flag("--input", want_input, "also open an audio input, so :capture can record it");
+  app.add_option("--input-device", input_device_id, "input device id (0 = system default)")
+      ->capture_default_str();
   app.add_flag("--no-audio", no_audio, "run the interface without opening an audio device");
   app.add_flag("--legacy-keys", legacy_keys,
                "never negotiate the Kitty keyboard protocol (loses gate pads)");
-  app.add_flag("--list-devices", want_devices, "list audio output devices and exit");
+  app.add_flag("--list-devices", want_devices, "list audio devices and exit");
   app.add_flag("--version", want_version, "print version, FFmpeg build and license, then exit");
 
   CLI11_PARSE(app, argc, argv);
@@ -58,12 +63,21 @@ int run(int argc, char** argv) {
     return tui::list_devices();
   }
 
+  // NAMING A DEVICE IMPLIES WANTING ONE. `--input-device 3` without `--input`
+  // would otherwise be a flag that parses, reads as a request, and does
+  // nothing -- which is worse than an error.
+  if (input_device_id != 0) {
+    want_input = true;
+  }
+
   // No file is a legitimate starting state, not an error: the interface renders
   // "nothing loaded" and M6's onboarding tour begins exactly there.
   const tui::AppOptions options{.sample_path = sample_path,
                                 .sample_rate = sample_rate,
                                 .block_frames = block_frames,
                                 .device_id = device_id,
+                                .want_input = want_input,
+                                .input_device_id = input_device_id,
                                 .no_audio = no_audio,
                                 .legacy_keys = legacy_keys};
   return tui::run_app(options);

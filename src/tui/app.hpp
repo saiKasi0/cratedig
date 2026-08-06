@@ -24,6 +24,17 @@ struct AppOptions {
   std::uint32_t block_frames = 256;
   unsigned int device_id = 0;
 
+  // Open a capture side as well, so `:capture source input` has something to
+  // record.
+  //
+  // OFF BY DEFAULT, and that is about consent rather than caution: opening an
+  // input is what makes macOS ask for the microphone, and a sampler that
+  // demands one before it will start is answering a question nobody asked. The
+  // channel count is negotiated against what the device actually offers -- a
+  // laptop microphone is mono, and asking it for two fails.
+  bool want_input = false;
+  unsigned int input_device_id = 0;
+
   // Run the interface with no audio device at all. This is what makes the UI
   // testable under a PTY in a container, where there is no /dev/snd -- and it
   // is honest about it rather than pretending to play: the mode line says so.

@@ -32,6 +32,15 @@ enum class DeviceError : std::uint8_t {
   kStartFailed,
   kAlreadyOpen,
   kNotOpen,
+
+  // An input was asked for and there is nothing to capture with.
+  //
+  // ITS OWN CODE rather than kNoDeviceAvailable, because the two lead to
+  // different places: no output means the program cannot make a sound at all,
+  // while no input means recording off a turntable is unavailable and
+  // everything else still works. A caller can only offer to carry on without
+  // the input if it can tell them apart.
+  kNoInputDeviceAvailable,
 };
 
 [[nodiscard]] std::string_view describe(DeviceError error) noexcept;
@@ -40,8 +49,15 @@ struct DeviceInfo {
   unsigned int id = 0;
   std::string name;
   unsigned int output_channels = 0;
+
+  // What this device can capture. Zero on a plain pair of speakers, which is
+  // why output_devices() and input_devices() are two filters over one
+  // enumeration rather than one list every call site has to filter correctly.
+  unsigned int input_channels = 0;
+
   unsigned int preferred_sample_rate = 0;
   bool is_default_output = false;
+  bool is_default_input = false;
 };
 
 // Owns the RtAudio stream and pumps Engine::render() from its callback.
@@ -66,6 +82,22 @@ class AudioDevice {
 
     // Zero means "the system default output".
     unsigned int device_id = 0;
+
+    // ZERO MEANS NO INPUT AT ALL, and that is the default deliberately.
+    //
+    // An output-only stream is what every version of this program before M6
+    // opened, and it is what a machine with no capture device can give. It is
+    // also what stops the program asking macOS for microphone permission on
+    // every launch: a sampler that demands a microphone before it will start is
+    // answering a question nobody asked.
+    //
+    // Above zero opens a DUPLEX stream -- one callback, one clock, input and
+    // output in the same block, which is the only arrangement in which "what
+    // came in" and "what went out" refer to the same instant.
+    std::uint16_t input_channels = 0;
+
+    // Zero means "the system default input".
+    unsigned int input_device_id = 0;
   };
 
   AudioDevice();
@@ -81,7 +113,13 @@ class AudioDevice {
   // treated as an error by callers that only want to list.
   [[nodiscard]] std::vector<DeviceInfo> output_devices() const;
 
+  // Every device the current API can capture with. Empty is normal -- a
+  // container has none, and so does a laptop with the microphone disabled.
+  [[nodiscard]] std::vector<DeviceInfo> input_devices() const;
+
   [[nodiscard]] bool has_output_device() const;
+
+  [[nodiscard]] bool has_input_device() const;
 
   // By value: RtAudio builds this string on demand, so a string_view into it
   // would dangle the moment this function returned.
@@ -103,6 +141,11 @@ class AudioDevice {
   // What RtAudio actually negotiated. Only meaningful once open() succeeded.
   [[nodiscard]] std::uint32_t actual_block_frames() const noexcept;
 
+  // How many channels the open stream captures. Zero means output only, which
+  // is a whole stream configuration rather than a setting -- the input side is
+  // decided at open() and cannot be turned on afterwards.
+  [[nodiscard]] std::uint16_t input_channels() const noexcept;
+
   // Callbacks delivered since the stream was opened.
   //
   // ZERO WHILE RUNNING IS A REAL STATE and worth being able to ask about: a
@@ -121,6 +164,10 @@ class AudioDevice {
   [[nodiscard]] const std::string& last_error() const noexcept;
 
  private:
+  // One enumeration, filtered by direction. Two nearly identical loops is how
+  // the input list would eventually stop matching the output one.
+  [[nodiscard]] std::vector<DeviceInfo> devices(bool want_output) const;
+
   struct Impl;
   std::unique_ptr<Impl> m_impl;
 };

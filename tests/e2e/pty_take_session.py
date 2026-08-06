@@ -190,10 +190,17 @@ def main() -> int:
     # is ambiguous enough to build the wrong feature from.
 
     if alive:
+        # REFUSED, because this session has no device and therefore no input.
+        # Accepting it would set a mode that records nothing, and the only
+        # symptom would be an empty take with nothing to explain it.
+        #
+        # Asserting the refusal rather than merely "input appears somewhere":
+        # the refusal message contains the word too, so the loose check passed
+        # for the wrong reason the moment this behaviour was added.
         alive = send(":capture source input\r", 1.0)
         said = mode_line(screen_now())
-        if "input" not in said:
-            failures.append(f"capture source input was not acknowledged: {said!r}")
+        if "no audio device" not in said or "input" not in said:
+            failures.append(f"capture source input was not refused with a reason: {said!r}")
 
         alive = send(":capture source master\r", 1.0)
         said = mode_line(screen_now())
